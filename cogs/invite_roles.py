@@ -7,16 +7,20 @@ from typing import Dict, Optional
 
 # ---- Role / Guild config from environment -----------------------------------
 
-PT_ROLE_ID = int(os.getenv("PT_ROLE", "0"))          # e.g. 1436713802719826010
-ECL_ROLE_ID = int(os.getenv("ECL_ROLE", "0"))        # e.g. 1436747092872663104
+PT_ROLE_ID = int(os.getenv("PT_ROLE", "0"))
+ECL_ROLE_ID = int(os.getenv("ECL_ROLE", "0"))
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 # ---- Reaction-role config (leave 0/empty to disable) ------------------------
 
 ECL_RR_CHANNEL_ID = int(os.getenv("ECL_RR_CHANNEL_ID", "0"))
 ECL_RR_MESSAGE_ID = int(os.getenv("ECL_RR_MESSAGE_ID", "0"))
-# Unicode like "🔔" or custom like "<:name:123456789012345678>"
 ECL_RR_EMOJI = (os.getenv("ECL_RR_EMOJI", "") or "").strip()
+
+LFG_ROLE_ID = int(os.getenv("LFG_ROLE", "0"))                                    
+LFG_RR_CHANNEL_ID = int(os.getenv("LFG_RR_CHANNEL_ID", "0"))
+LFG_RR_MESSAGE_ID = int(os.getenv("LFG_RR_MESSAGE_ID", "0"))
+LFG_RR_EMOJI = (os.getenv("LFG_RR_EMOJI", "") or "").strip()
 
 
 def _emoji_matches_config(payload_emoji: discord.PartialEmoji) -> bool:
@@ -37,6 +41,18 @@ def _emoji_matches_config(payload_emoji: discord.PartialEmoji) -> bool:
 
     # Unicode emoji path
     return payload_emoji.name == ECL_RR_EMOJI
+
+def _emoji_matches_generic(config_emoji: str, payload_emoji: discord.PartialEmoji) -> bool:
+    """Match unicode or custom emoji using a provided config string."""
+    if not config_emoji:                                                                     
+        return False                                                                         
+    if payload_emoji.id:                                                                     
+        m = re.search(r"(\d{15,25})", config_emoji)                                         
+        if m:                                                                                
+            return int(m.group(1)) == payload_emoji.id                                       
+        m2 = re.match(r"<:([^:>]+):\d+>", config_emoji)                                      
+        return bool(m2 and payload_emoji.name and payload_emoji.name == m2.group(1))         
+    return payload_emoji.name == config_emoji                                                
 
 
 class InviteRoles(commands.Cog):
@@ -142,71 +158,101 @@ class InviteRoles(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        """Grant ECL role when reacting with the configured emoji on the configured message, and log to terminal."""
-        if not (ECL_RR_CHANNEL_ID and ECL_RR_MESSAGE_ID and ECL_RR_EMOJI):
-            return
+        """Grant role when reacting on configured messages (ECL + LFG), and log to terminal."""
         if payload.guild_id != GUILD_ID:
-            return
-        if payload.channel_id != ECL_RR_CHANNEL_ID or payload.message_id != ECL_RR_MESSAGE_ID:
-            return
-        if not _emoji_matches_config(payload.emoji):
             return
 
         guild = self.bot.get_guild(payload.guild_id)
         if not guild:
             return
 
-        role = guild.get_role(ECL_ROLE_ID)
-        if not role:
-            print("[invite_roles] ⚠️ ECL role not found for reaction-role.")
-            return
+        # ----- ECL block (existing behavior) -----
+        if ECL_RR_CHANNEL_ID and ECL_RR_MESSAGE_ID and ECL_RR_EMOJI:
+            if payload.channel_id == ECL_RR_CHANNEL_ID and payload.message_id == ECL_RR_MESSAGE_ID:
+                if _emoji_matches_config(payload.emoji):
+                    role = guild.get_role(ECL_ROLE_ID)
+                    if not role:
+                        print("[invite_roles] ⚠️ ECL role not found for reaction-role.")
+                        return
+                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+                    if member and not member.bot:
+                        try:
+                            await member.add_roles(role, reason="Reaction role (ECL)")
+                            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
+                            print(f"[invite_roles] ✅ ECL ADDED: {member} via reaction {payload.emoji} • {msg_link}")
+                        except discord.Forbidden:
+                            print("[invite_roles] ⚠️ Missing permission to add ECL role.")
+                        except Exception as e:
+                            print(f"[invite_roles] ⚠️ Error adding ECL (reaction): {e}")
+                    return  # stop after handling ECL
 
-        member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
-        if member.bot:
-            return
-
-        try:
-            await member.add_roles(role, reason="Reaction role (ECL)")
-            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-            print(f"[invite_roles] ✅ ECL ADDED: {member} via reaction {payload.emoji} • {msg_link}")
-        except discord.Forbidden:
-            print("[invite_roles] ⚠️ Missing permission to add ECL role.")
-        except Exception as e:
-            print(f"[invite_roles] ⚠️ Error adding ECL (reaction): {e}")
+        if LFG_RR_CHANNEL_ID and LFG_RR_MESSAGE_ID and LFG_RR_EMOJI:               
+            if payload.channel_id == LFG_RR_CHANNEL_ID and payload.message_id == LFG_RR_MESSAGE_ID:  
+                if _emoji_matches_generic(LFG_RR_EMOJI, payload.emoji):            
+                    role = guild.get_role(LFG_ROLE_ID)                             
+                    if not role:                                                   
+                        print("[invite_roles] ⚠️ LFG role not found for reaction-role.")  
+                        return                                                     
+                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)  
+                    if member and not member.bot:                                  
+                        try:                                                       
+                            await member.add_roles(role, reason="Reaction role (LFGLEAGUE)")  
+                            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"  
+                            print(f"[invite_roles] ✅ LFGLEAGUE ADDED: {member} via reaction {payload.emoji} • {msg_link}")   
+                        except discord.Forbidden:                                   
+                            print("[invite_roles] ⚠️ Missing permission to add LFGLEAGUE role.")  
+                        except Exception as e:                                      
+                            print(f"[invite_roles] ⚠️ Error adding LFGLEAGUE (reaction): {e}")     
+                    return                                                          
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
-        """Remove ECL role when the reaction is removed, and log to terminal."""
-        if not (ECL_RR_CHANNEL_ID and ECL_RR_MESSAGE_ID and ECL_RR_EMOJI):
-            return
+        """Remove role when the reaction is removed (ECL + LFG), and log to terminal."""
         if payload.guild_id != GUILD_ID:
-            return
-        if payload.channel_id != ECL_RR_CHANNEL_ID or payload.message_id != ECL_RR_MESSAGE_ID:
-            return
-        if not _emoji_matches_config(payload.emoji):
             return
 
         guild = self.bot.get_guild(payload.guild_id)
         if not guild:
             return
 
-        role = guild.get_role(ECL_ROLE_ID)
-        if not role:
-            print("[invite_roles] ⚠️ ECL role not found for reaction-role.")
-            return
+        # ----- ECL block (existing behavior) -----
+        if ECL_RR_CHANNEL_ID and ECL_RR_MESSAGE_ID and ECL_RR_EMOJI:
+            if payload.channel_id == ECL_RR_CHANNEL_ID and payload.message_id == ECL_RR_MESSAGE_ID:
+                if _emoji_matches_config(payload.emoji):
+                    role = guild.get_role(ECL_ROLE_ID)
+                    if not role:
+                        print("[invite_roles] ⚠️ ECL role not found for reaction-role.")
+                        return
+                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+                    if member and not member.bot:
+                        try:
+                            await member.remove_roles(role, reason="Reaction role (ECL) removed")
+                            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
+                            print(f"[invite_roles] 🗑️ ECL REMOVED: {member} (reaction removed {payload.emoji}) • {msg_link}")
+                        except discord.Forbidden:
+                            print("[invite_roles] ⚠️ Missing permission to remove ECL role.")
+                        except Exception as e:
+                            print(f"[invite_roles] ⚠️ Error removing ECL (reaction): {e}")
+                    return  # stop after handling ECL
 
-        member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
-        if member.bot:
-            return
-
-        try:
-            await member.remove_roles(role, reason="Reaction role (ECL) removed")
-            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-            print(f"[invite_roles] 🗑️ ECL REMOVED: {member} (reaction removed {payload.emoji}) • {msg_link}")
-        except discord.Forbidden:
-            print("[invite_roles] ⚠️ Missing permission to remove ECL role.")
-        except Exception as e:
-            print(f"[invite_roles] ⚠️ Error removing ECL (reaction): {e}")
+        if LFG_RR_CHANNEL_ID and LFG_RR_MESSAGE_ID and LFG_RR_EMOJI:               
+            if payload.channel_id == LFG_RR_CHANNEL_ID and payload.message_id == LFG_RR_MESSAGE_ID:  
+                if _emoji_matches_generic(LFG_RR_EMOJI, payload.emoji):            
+                    role = guild.get_role(LFG_ROLE_ID)                             
+                    if not role:                                                   
+                        print("[invite_roles] ⚠️ LFG role not found for reaction-role.")  
+                        return                                                     
+                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)  
+                    if member and not member.bot:                                  
+                        try:                                                       
+                            await member.remove_roles(role, reason="Reaction role (LFGLEAGUE) removed")  
+                            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"  
+                            print(f"[invite_roles] 🗑️ LFGLEAGUE REMOVED: {member} (reaction {payload.emoji}) • {msg_link}")  
+                        except discord.Forbidden:                                   
+                            print("[invite_roles] ⚠️ Missing permission to remove LFGLEAGUE role.")  
+                        except Exception as e:                                      
+                            print(f"[invite_roles] ⚠️ Error removing LFGLEAGUE (reaction): {e}")     
+                    return                                                          
 
     # ---------------------- Slash command: /eclgive --------------------------
 
