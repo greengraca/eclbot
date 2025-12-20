@@ -19,6 +19,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 INITIAL_EXTENSIONS = [
     "cogs.invite_roles",
     "cogs.timer_cog",
+    "cogs.topdeck_league",
+    "cogs.spellbot_watch",
+    "cogs.topdeck_online_sync",
+    # "cogs.lfg_cog",
 ]
 
 
