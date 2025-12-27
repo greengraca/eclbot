@@ -1,27 +1,40 @@
 # cogs/timer_cog.py
 import os
+import re
 import asyncio
-import imageio_ffmpeg  # add this import
+import imageio_ffmpeg
 import contextlib
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 import discord
 from discord.ext import commands
 from discord import Option
 
+from online_games_store import OnlineGameRecord, get_record, upsert_record
+
+from topdeck_fetch import (
+    get_in_progress_pods,
+    InProgressPod,
+)
+
+from utils.interactions import safe_ctx_defer, safe_ctx_respond, safe_ctx_followup
+
+
 # ---------------- env / config ----------------
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
-ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))  # set this in .env
+ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
 ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
+
 
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
 
 # Main round duration in minutes
 TIMER_MINUTES: float = _env_float("TIMER_MINUTES", 80.0)
@@ -38,7 +51,6 @@ TEN_TO_END_AUDIO: str = os.getenv("TEN_TO_END_AUDIO", "./timer/10minutestoend.mp
 EXTRA_TIME_AUDIO: str = os.getenv("EXTRA_TIME_AUDIO", "./timer/ap20minutes.mp3")
 FINAL_DRAW_AUDIO: str = os.getenv("FINAL_DRAW_AUDIO", "./timer/ggboyz.mp3")
 
-
 try:
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
     print(f"[voice] Using ffmpeg from imageio-ffmpeg: {FFMPEG_EXE}")
@@ -46,22 +58,41 @@ except Exception as e:
     FFMPEG_EXE = "ffmpeg"
     print(f"[voice] Failed to get imageio-ffmpeg binary, falling back to 'ffmpeg': {e}")
 
+# --- TopDeck / online-games (Mongo) config (shared with other cogs) ---
+
+TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
+FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
+SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
 
 # ---------------- small helpers ----------------
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def ts(dt: datetime) -> int:
     return int(dt.timestamp())
+
+
+def _month_start_utc() -> datetime:
+    now = datetime.now(timezone.utc)
+    return datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
 
 def make_timer_id(voice_channel_id: int, seq: int) -> str:
     return f"{voice_channel_id}_{seq}"
 
 
+def _norm_handle(s: str) -> str:
+    """Normalize a Discord handle for fuzzy matching."""
+    return "".join(ch for ch in s.lower() if ch.isalnum()) if s else ""
+
+
 # ---------------- voice helpers ----------------
 
 VOICE_CONNECT_TIMEOUT = 10.0
+
 
 def _same_channel(
     vc: Optional[discord.VoiceClient],
@@ -94,6 +125,7 @@ def _ffmpeg_src(path: str) -> discord.AudioSource:
 
 def _non_bot_members(ch: discord.VoiceChannel) -> List[discord.Member]:
     return [m for m in ch.members if not m.bot]
+
 
 def _build_progress_bar(
     main_total: float,
@@ -152,8 +184,8 @@ def _build_progress_bar(
     return f"[{filled_main}|{filled_extra}]"
 
 
-
 # ---------------- confirmation view ----------------
+
 
 class ReplaceTimerView(discord.ui.View):
     """Ask whether to replace an existing timer for a given game room."""
@@ -203,10 +235,17 @@ class ReplaceTimerView(discord.ui.View):
 
         # stop old, start new
         await self.cog.set_timer_stopped(self.existing_timer_id, reason="replace")
+
+        ignore_autostop = self.cog._ignore_autostop_for_start(
+            interaction.user if isinstance(interaction.user, discord.Member) else None,
+            self.voice_channel,
+        )
+
         await self.cog._start_timer(
             self.ctx,
             self.voice_channel,
             game_number=self.game_number,
+            ignore_autostop=ignore_autostop,
         )
         self.stop()
 
@@ -231,6 +270,7 @@ class ReplaceTimerView(discord.ui.View):
 
 # ---------------- Cog ----------------
 
+
 class ECLTimerCog(commands.Cog):
     """
     Multi-room timer system.
@@ -242,7 +282,7 @@ class ECLTimerCog(commands.Cog):
 
     Constraints:
     - Timer only starts if that VC has ≥ 3 non-bot members.
-    - If VC drops below 2 non-bot members, timer auto-stops.
+    - If VC drops below 2 non-bot members, timer auto-stops (with a mod-testing exception).
     - Bot only plays audio in 1 VC at a time (per-guild voice lock).
     - If room already has a timer, user gets buttons to keep/replace.
     """
@@ -266,12 +306,41 @@ class ECLTimerCog(commands.Cog):
         # guild_id -> asyncio.Lock (serialize voice ops per guild)
         self._voice_locks: Dict[int, asyncio.Lock] = {}
 
+        # lock for writing/updating the TopDeck online JSON
+        self._online_json_lock: asyncio.Lock = asyncio.Lock()
+
         print(
             "[ECLTimerCog init] "
             f"TIMER_MINUTES={TIMER_MINUTES}, "
             f"EXTRA_TURNS_MINUTES={EXTRA_TURNS_MINUTES}, "
             f"OFFSET_MINUTES={OFFSET_MINUTES}"
         )
+
+    # ---------- mod helpers ----------
+
+    def _is_mod_member(self, member: Optional[discord.Member]) -> bool:
+        if not member:
+            return False
+        for role in getattr(member, "roles", []) or []:
+            if (ECL_MOD_ROLE_ID and role.id == ECL_MOD_ROLE_ID) or (
+                ECL_MOD_ROLE_NAME and role.name == ECL_MOD_ROLE_NAME
+            ):
+                return True
+        return False
+
+    def _ignore_autostop_for_start(
+        self,
+        member: Optional[discord.Member],
+        voice_channel: discord.VoiceChannel,
+    ) -> bool:
+        """
+        Only ignore auto-stop for "testing":
+        - caller is a mod
+        - and VC has 1 or 2 non-bot members at start
+        """
+        if not self._is_mod_member(member):
+            return False
+        return len(_non_bot_members(voice_channel)) <= 2
 
     # ---------- voice utils ----------
 
@@ -425,7 +494,7 @@ class ECLTimerCog(commands.Cog):
         if tid in self.active_timers or tid in self.paused_timers:
             return tid
         return None
-    
+
     def _timer_owner_id(self, timer_id: str) -> Optional[int]:
         """Return the user ID of whoever started this timer (if we can)."""
         data = self.active_timers.get(timer_id) or self.paused_timers.get(timer_id)
@@ -438,12 +507,224 @@ class ECLTimerCog(commands.Cog):
 
         return getattr(ctx.author, "id", None)
 
-
     def _cleanup_timer_structs(self, timer_id: str) -> None:
         self.active_timers.pop(timer_id, None)
         self.paused_timers.pop(timer_id, None)
         self.timer_messages.pop(timer_id, None)
         self.timer_tasks.pop(timer_id, None)
+
+    # ---------- TopDeck online tagging helpers ----------
+
+    async def _match_vc_to_in_progress_pod(
+        self,
+        voice_channel: discord.VoiceChannel,
+        members: List[discord.Member],
+    ) -> Optional[InProgressPod]:
+        """
+        Compare VC member handles with TopDeck in-progress pods.
+
+        - Normalize Discord names (same as elsewhere: a-z0-9 only)
+        - Allow extra people in VC (judge/spectator)
+        - Require good overlap: at least 3 shared names AND >=75% of the pod
+        """
+        handles = {_norm_handle(m.name) for m in members if _norm_handle(m.name)}
+        handles_sorted = sorted(handles)
+        print(
+            f"[timer/topdeck] VC {voice_channel.name} -> "
+            f"vc_handles={handles_sorted}"
+        )
+
+        if not handles:
+            print(
+                f"[timer/topdeck] VC {voice_channel.name} has no usable handles; "
+                "skipping TopDeck match."
+            )
+            return None
+
+        if not TOPDECK_BRACKET_ID:
+            print("[timer/topdeck] TOPDECK_BRACKET_ID not set; skipping lookup.")
+            return None
+
+        pods = await get_in_progress_pods(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+        print(
+            f"[timer/topdeck] get_in_progress_pods returned {len(pods)} pods "
+            f"for bracket={TOPDECK_BRACKET_ID!r}."
+        )
+
+        if not pods:
+            return None
+
+        # Debug log every pod we got from TopDeck
+        for pod in pods:
+            pod_norm = list(getattr(pod, "entrant_discords_norm", []) or [])
+            pod_raw = list(getattr(pod, "entrant_discords_raw", []) or [])
+            pod_uids = list(getattr(pod, "entrant_uids", []) or [])
+            pod_eids = list(getattr(pod, "entrant_ids", []) or [])
+
+            pod_handles_set = {h for h in pod_norm if h}
+            print(
+                "[timer/topdeck] Pod "
+                f"S{pod.season}:T{pod.table} | "
+                f"norm_handles={sorted(pod_handles_set)} | "
+                f"raw_discords={pod_raw} | "
+                f"uids={pod_uids} | "
+                f"eids={pod_eids} | "
+                f"start={pod.start}"
+            )
+
+        best: Optional[InProgressPod] = None
+        best_score: Optional[tuple] = None  # (coverage, inter_count, start_ts)
+
+        for pod in pods:
+            pod_norm = list(getattr(pod, "entrant_discords_norm", []) or [])
+            pod_handles = {h for h in pod_norm if h}
+            if not pod_handles:
+                continue
+
+            intersection = handles & pod_handles
+            inter_count = len(intersection)
+            if inter_count == 0:
+                continue
+
+            pod_size = len(pod_handles)
+            coverage = inter_count / pod_size if pod_size else 0.0
+            start_ts = float(getattr(pod, "start", 0.0) or 0.0)
+
+            print(
+                "[timer/topdeck]   candidate "
+                f"S{pod.season}:T{pod.table} | "
+                f"pod_handles={sorted(pod_handles)} | "
+                f"intersection={sorted(intersection)} | "
+                f"inter_count={inter_count} | coverage={coverage:.2f}"
+            )
+
+            # Require:
+            # - at least 3 shared players (for 4-player pods)
+            # - and at least 75% of that pod present in VC
+            if inter_count < 3:
+                continue
+            if coverage < 0.75:
+                continue
+
+            score = (coverage, inter_count, start_ts)
+            if best_score is None or score > best_score:
+                best_score = score
+                best = pod
+
+        if best:
+            pod_norm = list(getattr(best, "entrant_discords_norm", []) or [])
+            pod_handles = {h for h in pod_norm if h}
+            print(
+                f"[timer/topdeck] VC {voice_channel.name} matched TopDeck pod "
+                f"S{best.season}:T{best.table} with pod_handles="
+                f"{sorted(pod_handles)}."
+            )
+        else:
+            print(
+                f"[timer/topdeck] No in-progress TopDeck pod matched VC "
+                f"{voice_channel.name}; vc_handles={handles_sorted}, pods={len(pods)}."
+            )
+
+        return best
+
+    async def _mark_match_online(
+        self,
+        guild: discord.Guild,
+        match: InProgressPod,
+    ) -> None:
+        """Persist a TopDeck match as online (Mongo)."""
+        if not TOPDECK_BRACKET_ID:
+            return
+
+        ms = _month_start_utc()
+        year, month = ms.year, ms.month
+
+        season = int(getattr(match, "season", 0) or 0)
+        tid = int(getattr(match, "table", 0) or 0)
+        start_ts = float(getattr(match, "start", 0.0) or 0.0)
+
+        entrant_ids: list[int] = []
+        for x in (getattr(match, "entrant_ids", None) or []):
+            try:
+                entrant_ids.append(int(x))
+            except Exception:
+                continue
+
+        # ✅ entrant_uids are TopDeck UIDs (strings)
+        topdeck_uids: list[str] = []
+        for u in (getattr(match, "entrant_uids", None) or []):
+            if u is None:
+                continue
+            s = str(u).strip()
+            if s:
+                topdeck_uids.append(s)
+
+        # de-dupe, stable order
+        seen = set()
+        topdeck_uids = [x for x in topdeck_uids if not (x in seen or seen.add(x))]
+
+        async with self._online_json_lock:
+            existing = await get_record(
+                TOPDECK_BRACKET_ID, year, month, season=season, tid=tid
+            )
+            already_online = bool(existing and existing.online)
+
+            rec = OnlineGameRecord(
+                season=season,
+                tid=tid,
+                start_ts=start_ts or None,
+                entrant_ids=entrant_ids,
+                topdeck_uids=topdeck_uids,
+                online=True,
+            )
+            await upsert_record(TOPDECK_BRACKET_ID, year, month, rec)
+
+        print(
+            f"[timer/topdeck] Marked TopDeck match S{season}:T{tid} as online "
+            f"(already_online={already_online}). Players in match: {topdeck_uids}."
+        )
+
+
+    async def _tag_online_game_for_timer(
+        self,
+        ctx: discord.ApplicationContext,
+        voice_channel: discord.VoiceChannel,
+        non_bot_members: List[discord.Member],
+    ) -> None:
+        guild = ctx.guild
+        if guild is None:
+            return
+        if not TOPDECK_BRACKET_ID:
+            return
+
+        try:
+            match = await self._match_vc_to_in_progress_pod(
+                voice_channel,
+                non_bot_members,
+            )
+        except Exception as e:
+            print(
+                "[timer/topdeck] Error while matching VC to TopDeck pods: "
+                f"{type(e).__name__}: {e}"
+            )
+            return
+
+        if match is None:
+            # No match → warn chat (public)
+            try:
+                await ctx.channel.send(
+                    "⚠️ I couldn't find a matching **TopDeck game in progress** "
+                    "for this table. Make sure your game is started in TopDeck "
+                    "and that your Discord name on TopDeck matches your name here."
+                )
+            except Exception as e:
+                print(
+                    "[timer/topdeck] Failed to send 'no TopDeck match' warning: "
+                    f"{type(e).__name__}: {e}"
+                )
+            return
+
+        await self._mark_match_online(guild, match)
 
     # ---------- core actions ----------
 
@@ -489,11 +770,18 @@ class ECLTimerCog(commands.Cog):
         vcid: Optional[int] = None
         if timer_id and timer_id in self.active_timers:
             vcid = self.active_timers[timer_id].get("voice_channel_id")
-        if vcid is None and ctx.guild and ctx.guild.voice_client and ctx.guild.voice_client.channel:
+        if (
+            vcid is None
+            and ctx.guild
+            and ctx.guild.voice_client
+            and ctx.guild.voice_client.channel
+        ):
             vcid = ctx.guild.voice_client.channel.id  # type: ignore[assignment]
 
         if voice_file_path and ctx.guild:
-            await self._play(ctx.guild, voice_file_path, channel_id=vcid, leave_after=True)
+            await self._play(
+                ctx.guild, voice_file_path, channel_id=vcid, leave_after=True
+            )
 
         if delete_after is not None and msg_obj is not None:
             await asyncio.sleep(max(0.0, delete_after) * 60)
@@ -522,11 +810,18 @@ class ECLTimerCog(commands.Cog):
         vcid: Optional[int] = None
         if timer_id and timer_id in self.active_timers:
             vcid = self.active_timers[timer_id].get("voice_channel_id")
-        if vcid is None and ctx.guild and ctx.guild.voice_client and ctx.guild.voice_client.channel:
+        if (
+            vcid is None
+            and ctx.guild
+            and ctx.guild.voice_client
+            and ctx.guild.voice_client.channel
+        ):
             vcid = ctx.guild.voice_client.channel.id  # type: ignore[assignment]
 
         if ctx.guild:
-            await self._play(ctx.guild, voice_file_path, channel_id=vcid, leave_after=True)
+            await self._play(
+                ctx.guild, voice_file_path, channel_id=vcid, leave_after=True
+            )
 
     async def _cancel_tasks(self, timer_id: str):
         for task in self.timer_tasks.get(timer_id, []):
@@ -581,10 +876,11 @@ class ECLTimerCog(commands.Cog):
         voice_channel: discord.VoiceChannel,
         *,
         game_number: int,
+        ignore_autostop: bool = False,
     ):
         guild = ctx.guild
         if guild is None:
-            await ctx.followup.send(
+            await safe_ctx_followup(ctx,
                 "This command can only be used in a server.", ephemeral=True
             )
             return
@@ -593,14 +889,13 @@ class ECLTimerCog(commands.Cog):
         extra_minutes = EXTRA_TURNS_MINUTES
         offset = OFFSET_MINUTES
 
-        member = ctx.author if isinstance(ctx.author, discord.Member) else None
-
         vc_id = voice_channel.id
         self.voice_channel_timers[vc_id] = self.voice_channel_timers.get(vc_id, 0) + 1
         seq = self.voice_channel_timers[vc_id]
         timer_id = make_timer_id(vc_id, seq)
-        if timer_id not in self.timer_tasks:
-            self.timer_tasks[timer_id] = []
+
+        # Always create fresh list for this timer_id (prevents KeyError race)
+        self.timer_tasks[timer_id] = []
 
         print(f"[timer] Using timer_id={timer_id}")
 
@@ -623,7 +918,7 @@ class ECLTimerCog(commands.Cog):
         )
         final_msg = "If no one won until now, the game is a draw. Well Played."
 
-        sent = await ctx.followup.send(
+        sent = await safe_ctx_followup(ctx,
             f"Timer for **{voice_channel.name}** (Game in room {game_number}) will start now and end "
             f"<t:{end_ts_main}:R>. Play to win and to your outs.",
             ephemeral=False,  # force public
@@ -640,6 +935,7 @@ class ECLTimerCog(commands.Cog):
             },
             "ctx": ctx,
             "voice_channel_id": voice_channel.id,
+            "ignore_autostop": bool(ignore_autostop),
             "messages": {
                 "turns": turns_msg,
                 "final": final_msg,
@@ -651,23 +947,7 @@ class ECLTimerCog(commands.Cog):
             },
         }
 
-        # intro audio
-        ok = await self._play(
-            guild,
-            TIMER_START_AUDIO,
-            channel_id=voice_channel.id,
-            leave_after=True,
-        )
-
-        if not ok:
-            # We continue with the text timers, but tell the caller audio failed.
-            await ctx.followup.send(
-                f"Started timer for **{voice_channel.name}**, but I couldn't "
-                f"connect to voice in time. Text timers will still run, but "
-                f"no audio will play.",
-                ephemeral=False,
-            )
-
+        # Schedule tasks BEFORE awaiting voice playback (prevents autostop race KeyError)
         # main end -> extra time msg + audio
         self.timer_tasks[timer_id].append(
             asyncio.create_task(
@@ -714,59 +994,28 @@ class ECLTimerCog(commands.Cog):
             f"delay_sec={to_end_delay_sec}"
         )
 
+        # intro audio
+        ok = await self._play(
+            guild,
+            TIMER_START_AUDIO,
+            channel_id=voice_channel.id,
+            leave_after=True,
+        )
+
+        # If we got auto-stopped / replaced while playing intro, just stop here.
+        if timer_id not in self.active_timers:
+            return
+
+        if not ok:
+            # We continue with the text timers, but tell the caller audio failed.
+            await safe_ctx_followup(ctx,
+                f"Started timer for **{voice_channel.name}**, but I couldn't "
+                f"connect to voice in time. Text timers will still run, but "
+                f"no audio will play.",
+                ephemeral=False,
+            )
 
     # ---------- slash commands ----------
-    
-    # @commands.slash_command(
-    #     name="vtest",
-    #     description="Debug voice connection for this bot.",
-    #     guild_ids=[GUILD_ID] if GUILD_ID else None,
-    # )
-    # async def vtest(self, ctx: discord.ApplicationContext):
-    #     """Minimal voice connect test for this bot."""
-    #     await ctx.defer(ephemeral=True)
-
-    #     if not (ctx.author.voice and isinstance(ctx.author.voice.channel, discord.VoiceChannel)):
-    #         await ctx.followup.send("You must be in a voice channel to run /vtest.", ephemeral=True)
-    #         return
-
-    #     ch: discord.VoiceChannel = ctx.author.voice.channel
-    #     guild = ctx.guild
-    #     if guild is None:
-    #         await ctx.followup.send("This can only be used in a server.", ephemeral=True)
-    #         return
-
-    #     if not _voice_prereqs_ok():
-    #         await ctx.followup.send(
-    #             "Voice prereqs not OK (Opus / PyNaCl). Check console logs.",
-    #             ephemeral=True,
-    #         )
-    #         return
-
-    #     await ctx.followup.send(f"Trying to connect to **{ch.name}**…", ephemeral=True)
-
-    #     try:
-    #         print(f"[vtest] Connecting to voice in guild={guild.id}, channel={ch.id}")
-    #         vc = await ch.connect(reconnect=False, timeout=20)
-    #     except Exception as e:
-    #         print(f"[vtest] Voice connect failed in guild={guild.id}, channel={ch.id}: {type(e).__name__}: {e}")
-    #         await ctx.followup.send(f"Connect failed: `{type(e).__name__}: {e}`", ephemeral=True)
-    #         return
-
-    #     print(f"[vtest] Connected OK to guild={guild.id}, channel={ch.id}")
-
-    #     # Try very short playback (just to prove it works), then disconnect.
-    #     try:
-    #         vc.play(_ffmpeg_src(TIMER_START_AUDIO))
-    #         print(f"[vtest] Started playback of {TIMER_START_AUDIO}")
-    #         await asyncio.sleep(5)
-    #     except Exception as e:
-    #         print(f"[vtest] Playback error in vtest: {type(e).__name__}: {e}")
-    #     finally:
-    #         with contextlib.suppress(Exception):
-    #             await vc.disconnect(force=True)
-    #         print("[vtest] Disconnected from voice")
-
 
     @commands.slash_command(
         name="timer",
@@ -780,7 +1029,7 @@ class ECLTimerCog(commands.Cog):
     ):
         # --- basic guild / channel checks (errors → ephemeral) ---
         if ctx.guild is None:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 "This command can only be used in a server.",
                 ephemeral=True,
             )
@@ -789,7 +1038,7 @@ class ECLTimerCog(commands.Cog):
         guild = ctx.guild
         voice_channel = self._get_game_channel(guild, game)
         if not voice_channel:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"Could not find a voice channel named `ECL Game {game}`.",
                 ephemeral=True,
             )
@@ -802,7 +1051,7 @@ class ECLTimerCog(commands.Cog):
             caller_vc = member.voice.channel
 
         if caller_vc is None:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"You must be in **{voice_channel.name}** to start a timer for that room "
                 f"(you're not in any voice channel).",
                 ephemeral=True,
@@ -810,31 +1059,26 @@ class ECLTimerCog(commands.Cog):
             return
 
         if caller_vc.id != voice_channel.id:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"You must be in **{voice_channel.name}** to start a timer for that room "
                 f"(you're currently in **{caller_vc.name}**).",
                 ephemeral=True,
             )
             return
 
-        # --- ECL MOD backdoor + 3-player requirement (errors → ephemeral) ---
-        is_mod = False
-        if member:
-            for role in getattr(member, "roles", []):
-                if (ECL_MOD_ROLE_ID and role.id == ECL_MOD_ROLE_ID) or (
-                    ECL_MOD_ROLE_NAME and role.name == ECL_MOD_ROLE_NAME
-                ):
-                    is_mod = True
-                    break
-
         non_bot = _non_bot_members(voice_channel)
+        is_mod = self._is_mod_member(member)
+
+        # --- ECL MOD backdoor + 3-player requirement (errors → ephemeral) ---
         if len(non_bot) < 3 and not is_mod:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"Cannot start a timer for **{voice_channel.name}**: "
                 f"need at least 3 players in the channel (currently {len(non_bot)}). ",
                 ephemeral=True,
             )
             return
+
+        ignore_autostop = self._ignore_autostop_for_start(member, voice_channel)
 
         # --- existing timer? → show buttons (public) ---
         existing_timer_id = self._current_timer_id_for_channel(voice_channel.id)
@@ -846,7 +1090,7 @@ class ECLTimerCog(commands.Cog):
                 game_number=game,
                 existing_timer_id=existing_timer_id,
             )
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"There is already an active or paused timer for **{voice_channel.name}**.\n"
                 "Do you want to stop it and start a new one?",
                 view=view,
@@ -855,12 +1099,19 @@ class ECLTimerCog(commands.Cog):
             return
 
         # --- from here on we're doing heavier work → defer non-ephemeral ---
-        await ctx.defer()  # non-ephemeral; followups will be public
+        await safe_ctx_defer(ctx, ephemeral=False, label="timer")  # non-ephemeral; followups will be public
 
-        # _start_timer now just schedules tasks + plays audio
-        await self._start_timer(ctx, voice_channel, game_number=game)
+        # Try to tag this pod as an online TopDeck game (or warn if not found)
+        try:
+            await self._tag_online_game_for_timer(ctx, voice_channel, non_bot)
+        except Exception as e:
+            print(
+                "[timer/topdeck] Unexpected error in _tag_online_game_for_timer: "
+                f"{type(e).__name__}: {e}"
+            )
 
-
+        # start timer (schedules tasks + plays audio)
+        await self._start_timer(ctx, voice_channel, game_number=game, ignore_autostop=ignore_autostop)
 
     @commands.slash_command(
         name="endtimer",
@@ -873,7 +1124,7 @@ class ECLTimerCog(commands.Cog):
         game: int = Option(int, "Game number (e.g. 1 for 'ECL Game 1')", min_value=1),
     ):
         if ctx.guild is None:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 "This command can only be used in a server.",
                 ephemeral=True,
             )
@@ -881,7 +1132,7 @@ class ECLTimerCog(commands.Cog):
 
         voice_channel = self._get_game_channel(ctx.guild, game)
         if not voice_channel:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"Could not find a voice channel named `ECL Game {game}`.",
                 ephemeral=True,
             )
@@ -889,7 +1140,7 @@ class ECLTimerCog(commands.Cog):
 
         timer_id = self._current_timer_id_for_channel(voice_channel.id)
         if not timer_id:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"No active or paused timer found for **{voice_channel.name}**.",
                 ephemeral=True,
             )
@@ -897,14 +1148,14 @@ class ECLTimerCog(commands.Cog):
 
         owner_id = self._timer_owner_id(timer_id)
         if owner_id is not None and owner_id != ctx.author.id:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 "Only the person who started the timer for this table can end it.",
                 ephemeral=True,
             )
             return
 
         await self.set_timer_stopped(timer_id, reason="endtimer")
-        await ctx.respond(
+        await safe_ctx_respond(ctx,
             f"Timer for **{voice_channel.name}** has been manually ended.",
             ephemeral=False,
         )
@@ -914,41 +1165,28 @@ class ECLTimerCog(commands.Cog):
         description="Pauses the current timer for a given ECL game.",
         guild_ids=[GUILD_ID] if GUILD_ID else None,
     )
-    async def pausetimer(
-        self,
-        ctx: discord.ApplicationContext,
-        game: int = Option(int, "Game number (e.g. 1 for 'ECL Game 1')", min_value=1),
-    ):
+    async def pausetimer(self, ctx: discord.ApplicationContext, game: int = Option(int, "...", min_value=1)):
         if ctx.guild is None:
-            await ctx.respond(
-                "This command can only be used in a server.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx, "This command can only be used in a server.", ephemeral=True)
             return
 
         voice_channel = self._get_game_channel(ctx.guild, game)
         if not voice_channel:
-            await ctx.respond(
-                f"Could not find a voice channel named `ECL Game {game}`.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx, f"Could not find a voice channel named `ECL Game {game}`.", ephemeral=True)
             return
 
         timer_id = self._current_timer_id_for_channel(voice_channel.id)
         if not timer_id or timer_id not in self.active_timers:
-            await ctx.respond(
-                f"There's no active timer to pause for **{voice_channel.name}**.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx, f"There's no active timer to pause for **{voice_channel.name}**.", ephemeral=True)
             return
 
         owner_id = self._timer_owner_id(timer_id)
         if owner_id is not None and owner_id != ctx.author.id:
-            await ctx.respond(
-                "Only the person who started the timer for this table can pause it.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx, "Only the person who started the timer for this table can pause it.", ephemeral=True)
             return
+
+        # ✅ ACK FAST (prevents 10062)
+        await safe_ctx_defer(ctx, ephemeral=False, label="pausetimer")
 
         await self._cancel_tasks(timer_id)
 
@@ -962,6 +1200,7 @@ class ECLTimerCog(commands.Cog):
             "extra": max(durations["extra"] - elapsed + durations["main"], 0.0),
         }
 
+        # delete old timer msg (can be slow)
         try:
             ch_id, m_id = self.timer_messages.get(timer_id, (None, None))
             if ch_id and m_id:
@@ -973,9 +1212,10 @@ class ECLTimerCog(commands.Cog):
             print(f"[pausetimer] Error deleting original timer message: {e}")
 
         remaining_minutes = int(remaining["main"] // 60)
-        pause_msg = await ctx.respond(
-            f"⏸️ Timer for **{voice_channel.name}** paused – "
-            f"**{remaining_minutes} minutes** remaining.",
+
+        pause_msg = await safe_ctx_followup(
+            ctx,
+            f"⏸️ Timer for **{voice_channel.name}** paused – **{remaining_minutes} minutes** remaining.",
             ephemeral=False,
         )
 
@@ -986,7 +1226,9 @@ class ECLTimerCog(commands.Cog):
             "audio": timer_data["audio"],
             "pause_message": pause_msg,
             "voice_channel_id": timer_data.get("voice_channel_id"),
+            "ignore_autostop": bool(timer_data.get("ignore_autostop", False)),
         }
+
 
     @commands.slash_command(
         name="resumetimer",
@@ -999,35 +1241,26 @@ class ECLTimerCog(commands.Cog):
         game: int = Option(int, "Game number (e.g. 1 for 'ECL Game 1')", min_value=1),
     ):
         if ctx.guild is None:
-            await ctx.respond(
-                "This command can only be used in a server.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx,"This command can only be used in a server.", ephemeral=True)
             return
 
         voice_channel = self._get_game_channel(ctx.guild, game)
         if not voice_channel:
-            await ctx.respond(
-                f"Could not find a voice channel named `ECL Game {game}`.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx,f"Could not find a voice channel named `ECL Game {game}`.", ephemeral=True)
             return
 
         timer_id = self._current_timer_id_for_channel(voice_channel.id)
         if not timer_id or timer_id not in self.paused_timers:
-            await ctx.respond(
-                f"No paused timer found for **{voice_channel.name}**.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx,f"No paused timer found for **{voice_channel.name}**.", ephemeral=True)
             return
 
         owner_id = self._timer_owner_id(timer_id)
         if owner_id is not None and owner_id != ctx.author.id:
-            await ctx.respond(
-                "Only the person who started the timer for this table can resume it.",
-                ephemeral=True,
-            )
+            await safe_ctx_respond(ctx,"Only the person who started the timer for this table can resume it.", ephemeral=True)
             return
+
+        # ✅ ACK FAST (prevents 10062)
+        await safe_ctx_defer(ctx, ephemeral=False, label="resumetimer")
 
         paused = self.paused_timers.pop(timer_id)
 
@@ -1042,6 +1275,7 @@ class ECLTimerCog(commands.Cog):
             "messages": paused["messages"],
             "audio": paused["audio"],
             "voice_channel_id": paused.get("voice_channel_id"),
+            "ignore_autostop": bool(paused.get("ignore_autostop", False)),
         }
         self.timer_tasks[timer_id] = []
 
@@ -1056,51 +1290,24 @@ class ECLTimerCog(commands.Cog):
         egg = paused["remaining"]["easter_egg"]
         extra = paused["remaining"]["extra"]
 
-        self.timer_tasks[timer_id].append(
-            asyncio.create_task(
-                self.timer_end(
-                    old_ctx,
-                    main / 60.0,
-                    turns_msg,
-                    turns_audio,
-                    timer_id=timer_id,
-                    edit=True,
-                )
-            )
-        )
-        self.timer_tasks[timer_id].append(
-            asyncio.create_task(
-                self.play_voice_file(
-                    old_ctx,
-                    egg_audio,
-                    egg,
-                    timer_id=timer_id,
-                )
-            )
-        )
-        self.timer_tasks[timer_id].append(
-            asyncio.create_task(
-                self.timer_end(
-                    old_ctx,
-                    extra / 60.0,
-                    final_msg,
-                    final_audio,
-                    timer_id=timer_id,
-                    edit=True,
-                    delete_after=1,
-                    final_cleanup=True,
-                )
-            )
-        )
+        self.timer_tasks[timer_id].append(asyncio.create_task(
+            self.timer_end(old_ctx, main / 60.0, turns_msg, turns_audio, timer_id=timer_id, edit=True)
+        ))
+        self.timer_tasks[timer_id].append(asyncio.create_task(
+            self.play_voice_file(old_ctx, egg_audio, egg, timer_id=timer_id)
+        ))
+        self.timer_tasks[timer_id].append(asyncio.create_task(
+            self.timer_end(old_ctx, extra / 60.0, final_msg, final_audio, timer_id=timer_id, edit=True, delete_after=1, final_cleanup=True)
+        ))
 
         end_time = now_utc() + timedelta(seconds=main)
-        msg = await ctx.respond(
-            f"▶️ Timer for **{voice_channel.name}** has been resumed and will "
-            f"end <t:{ts(end_time)}:R>.",
-            ephemeral=False,
+
+        # ✅ AFTER defer: use followup
+        msg = await safe_ctx_followup(ctx,
+            f"▶️ Timer for **{voice_channel.name}** has been resumed and will end <t:{ts(end_time)}:R>."
         )
-        self.timer_messages[timer_id] = (msg.channel.id, msg.id)
-        
+        self.timer_messages[timer_id] = (ctx.channel.id, msg.id)
+
     @commands.slash_command(
         name="checktimer",
         description="Check how much time is left on an ECL game timer.",
@@ -1113,7 +1320,7 @@ class ECLTimerCog(commands.Cog):
     ):
         # everyone can use it, always ephemeral
         if ctx.guild is None:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 "This command can only be used in a server.",
                 ephemeral=True,
             )
@@ -1121,7 +1328,7 @@ class ECLTimerCog(commands.Cog):
 
         voice_channel = self._get_game_channel(ctx.guild, game)
         if not voice_channel:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"Could not find a voice channel named `ECL Game {game}`.",
                 ephemeral=True,
             )
@@ -1129,7 +1336,7 @@ class ECLTimerCog(commands.Cog):
 
         timer_id = self._current_timer_id_for_channel(voice_channel.id)
         if not timer_id:
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"No active or paused timer found for **{voice_channel.name}**.",
                 ephemeral=True,
             )
@@ -1156,7 +1363,7 @@ class ECLTimerCog(commands.Cog):
 
             if remaining_main > 0:
                 mins = remaining_main / 60.0
-                await ctx.respond(
+                await safe_ctx_respond(ctx,
                     f"Timer for **{voice_channel.name}** is running.\n"
                     f"≈ **{mins:.1f} minutes** of main time remaining.\n"
                     f"```{bar}```",
@@ -1167,7 +1374,7 @@ class ECLTimerCog(commands.Cog):
             # in extra time
             extra_remaining = remaining_total
             mins = extra_remaining / 60.0
-            await ctx.respond(
+            await safe_ctx_respond(ctx,
                 f"Main time is already over for **{voice_channel.name}**.\n"
                 f"≈ **{mins:.1f} minutes** of extra time remaining.\n"
                 f"```{bar}```",
@@ -1193,7 +1400,7 @@ class ECLTimerCog(commands.Cog):
 
             if remaining_main > 0:
                 mins = remaining_main / 60.0
-                await ctx.respond(
+                await safe_ctx_respond(ctx,
                     f"Timer for **{voice_channel.name}** is **paused**.\n"
                     f"≈ **{mins:.1f} minutes** of main time remaining.\n"
                     f"```{bar}```",
@@ -1204,7 +1411,7 @@ class ECLTimerCog(commands.Cog):
             if remaining_total > 0:
                 extra_remaining = remaining_total
                 mins = extra_remaining / 60.0
-                await ctx.respond(
+                await safe_ctx_respond(ctx,
                     f"Timer for **{voice_channel.name}** is **paused** "
                     f"during extra time.\n"
                     f"≈ **{mins:.1f} minutes** of extra time remaining.\n"
@@ -1214,7 +1421,7 @@ class ECLTimerCog(commands.Cog):
                 return
 
         # ---------- weird edge ----------
-        await ctx.respond(
+        await safe_ctx_respond(ctx,
             f"Couldn't determine remaining time for **{voice_channel.name}** "
             f"(timer exists but has no remaining duration).",
             ephemeral=True,
@@ -1243,15 +1450,30 @@ class ECLTimerCog(commands.Cog):
             if not ch.name.lower().startswith("ecl game"):
                 continue
 
+            timer_id = self._current_timer_id_for_channel(ch.id)
+            if not timer_id:
+                continue
+
             non_bot = _non_bot_members(ch)
+            data = self.active_timers.get(timer_id) or self.paused_timers.get(timer_id) or {}
+
+            # If timer was started in mod-testing mode:
+            # - keep it alive while underfilled
+            # - but if it ever reaches 3+ players, flip back to normal behavior
+            if data.get("ignore_autostop"):
+                if len(non_bot) >= 3:
+                    data["ignore_autostop"] = False
+                    print(f"[auto-stop] Re-enabled for {timer_id} (table reached 3+ players).")
+                elif len(non_bot) < 2:
+                    print(f"[auto-stop] Skipped for {timer_id} (mod testing mode).")
+                    continue
+
             if len(non_bot) < 2:
-                timer_id = self._current_timer_id_for_channel(ch.id)
-                if timer_id:
-                    print(
-                        f"[auto-stop] Channel {ch.name} ({ch.id}) dropped to "
-                        f"{len(non_bot)} non-bot members; stopping timer {timer_id}"
-                    )
-                    await self.set_timer_stopped(timer_id, reason="auto")
+                print(
+                    f"[auto-stop] Channel {ch.name} ({ch.id}) dropped to "
+                    f"{len(non_bot)} non-bot members; stopping timer {timer_id}"
+                )
+                await self.set_timer_stopped(timer_id, reason="auto")
 
 
 def setup(bot: commands.Bot):

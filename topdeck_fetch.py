@@ -1,17 +1,28 @@
 # topdeck_fetch.py
 import os
 import re
+import asyncio
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Iterable
+from datetime import datetime, timezone, timedelta
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Iterable,
+    Tuple,
+    Awaitable,
+    Callable,
+)
 
 import aiohttp
 
 START_POINTS: float = 1000.0
 WAGER_RATE: float = 0.07  # 7% of current points staked each game
 
-# Firestore URL template (env)
-# Example in .env:
-# FIRESTORE_DOC_URL_TEMPLATE="https://firestore.googleapis.com/v1/projects/eminence-1b40b/databases/(default)/documents/tournaments/{bracket_id}"
+# Shared cache TTL (minutes) for all TopDeck league fetches
+TOPDECK_CACHE_MINUTES = int(os.getenv("TOPDECK_CACHE_MINUTES", "30"))
+
 FIRESTORE_DOC_URL_TEMPLATE = os.getenv("FIRESTORE_DOC_URL_TEMPLATE", "").strip()
 
 
@@ -55,6 +66,21 @@ class PlayerRow:
     losses: int
     dropped: bool
     dropped_at: Optional[float]
+
+
+@dataclass
+class InProgressPod:
+    season: int
+    table: int
+    start: Optional[float]
+    entrant_ids: List[int]
+    entrant_uids: List[Optional[str]]
+    entrant_names: List[str]
+    entrant_discords: List[str]
+    entrant_discords_norm: List[str]
+
+
+# --------- HTTP + Firestore helpers ---------
 
 
 async def _fetch_json(
@@ -144,7 +170,6 @@ def _extract_matches_all_seasons(fields: Dict[str, Any]) -> List[Match]:
         if isinstance(es_raw, list):
             es: List[int] = []
             for x in es_raw:
-                # these come back as ints usually, but just in case they're strings
                 if isinstance(x, int):
                     es.append(x)
                 elif isinstance(x, float):
@@ -184,6 +209,37 @@ def _is_valid_completed_match(m: Match) -> bool:
     if m.winner == "_DRAW_":
         return True
     return False
+
+
+def _is_in_progress_match(m: Match) -> bool:
+    if isinstance(m.raw, dict) and m.raw.get("Mute") is True:
+        return False
+
+    started = isinstance(m.start, (int, float))
+    ended = isinstance(m.end, (int, float))
+    has_result = isinstance(m.winner, (int, float)) or m.winner == "_DRAW_"
+
+    return started and not ended and not has_result
+
+
+def _norm_handle_basic(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower()) if isinstance(s, str) else ""
+
+
+def normalize_topdeck_discord(discord_raw: str) -> str:
+    """
+    Take the TopDeck 'discord' field and turn it into something that
+    should match the real Discord username, same idea as the JS helper.
+    """
+    if not discord_raw:
+        return ""
+    s = str(discord_raw).strip()
+    for sep in (" ", "("):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    return _norm_handle_basic(s)
 
 
 def _compute_standings(
@@ -248,7 +304,6 @@ def _compute_standings(
             try:
                 winner_eid = int(m.winner)
             except (TypeError, ValueError):
-                # malformed winner, ignore match
                 continue
 
             points[winner_eid] = points.get(winner_eid, START_POINTS) + pot
@@ -328,6 +383,9 @@ def _extract_drop_state(fields: Dict[str, Any]):
     }
 
 
+# --------- Main league fetch ---------
+
+
 async def get_league_rows(
     bracket_id: str,
     firebase_id_token: Optional[str] = None,
@@ -356,7 +414,10 @@ async def get_league_rows(
         for eid in m.es:
             entrant_ids.add(eid)
 
-    points, stats, win_pct, ow_pct = _compute_standings(matches, entrant_ids)
+    # ✅ CPU-heavy: run off the event loop to avoid freezing slash commands
+    points, stats, win_pct, ow_pct = await asyncio.to_thread(
+        _compute_standings, matches, entrant_ids
+    )
 
     rows: List[PlayerRow] = []
 
@@ -368,7 +429,6 @@ async def get_league_rows(
             if isinstance(players, dict):
                 p = players.get(uid)
             elif isinstance(players, list):
-                # uid may be numeric string; try index
                 try:
                     idx = int(uid)
                     if 0 <= idx < len(players):
@@ -409,3 +469,204 @@ async def get_league_rows(
     )
 
     return rows
+
+
+async def get_in_progress_pods(
+    bracket_id: str,
+    firebase_id_token: Optional[str] = None,
+) -> List[InProgressPod]:
+    """
+    Fetch TopDeck data for this bracket and return only pods that are
+    currently in progress (started, not ended, no winner / _DRAW_).
+
+    This is the Python equivalent of your JS listInProgressPods().
+    """
+    if not bracket_id:
+        raise RuntimeError("bracket_id is required")
+
+    players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
+    doc_url = _get_firestore_doc_url(bracket_id)
+
+    async with aiohttp.ClientSession() as session:
+        players = await _fetch_json(session, players_url, token=None)
+        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+
+    fields = _parse_tournament_fields(doc)
+    entrant_to_uid = _extract_entrant_to_uid(fields)
+    matches = _extract_matches_all_seasons(fields)
+
+    # Normalize players into uid -> dict with name/discord
+    player_map: Dict[str, Dict[str, Any]] = {}
+    if isinstance(players, dict):
+        for uid, pdata in players.items():
+            if isinstance(pdata, dict):
+                player_map[str(uid)] = pdata
+    elif isinstance(players, list):
+        for idx, pdata in enumerate(players):
+            if isinstance(pdata, dict):
+                player_map[str(idx)] = pdata
+
+    pods: List[InProgressPod] = []
+
+    for m in matches:
+        if not _is_in_progress_match(m):
+            continue
+
+        entrant_ids = list(m.es or [])
+        uids: List[Optional[str]] = []
+        names: List[str] = []
+        discords: List[str] = []
+        discords_norm: List[str] = []
+
+        for eid in entrant_ids:
+            uid = entrant_to_uid.get(eid)
+            uids.append(uid)
+
+            pdata = player_map.get(str(uid)) or {}
+            name = (pdata.get("name") if isinstance(pdata, dict) else None) or uid or f"E{eid}"
+            names.append(str(name))
+
+            d_raw = (pdata.get("discord") if isinstance(pdata, dict) else "") or ""
+            discords.append(str(d_raw))
+            discords_norm.append(normalize_topdeck_discord(str(d_raw)))
+
+        pods.append(
+            InProgressPod(
+                season=m.season,
+                table=m.id,
+                start=float(m.start) if isinstance(m.start, (int, float)) else None,
+                entrant_ids=entrant_ids,
+                entrant_uids=uids,
+                entrant_names=names,
+                entrant_discords=discords,
+                entrant_discords_norm=discords_norm,
+            )
+        )
+
+    return pods
+
+
+# --------- Shared cached wrapper ---------
+
+
+# --------- Derived caches (computed from cached rows) ---------
+
+# handle -> (pts, games) choosing the *best* row per handle
+_TOPDECK_HANDLE_BEST_CACHE: Dict[Tuple[str, str], Tuple[Dict[str, Tuple[float, int]], datetime]] = {}
+
+_TOPDECK_CACHE: Dict[Tuple[str, str], Tuple[List[PlayerRow], datetime]] = {}
+_TOPDECK_CACHE_TTL = timedelta(minutes=TOPDECK_CACHE_MINUTES)
+
+# Optional async callback run whenever we do a *real* TopDeck fetch.
+_TOPDECK_CACHE_MISS_HOOK: Optional[Callable[[], Awaitable[None]]] = None
+
+
+def register_topdeck_cache_miss_hook(hook: Callable[[], Awaitable[None]]) -> None:
+    """
+    Register an async callback that will be awaited every time
+    get_league_rows_cached performs a real TopDeck fetch
+    (cache miss or expired).
+
+    Used by topdeck_online_sync to auto-refresh online stats.
+    """
+    global _TOPDECK_CACHE_MISS_HOOK
+    _TOPDECK_CACHE_MISS_HOOK = hook
+
+
+async def get_league_rows_cached(
+    bracket_id: str,
+    firebase_id_token: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+) -> Tuple[List[PlayerRow], datetime]:
+    """
+    Cached wrapper around get_league_rows.
+
+    - Respects TOPDECK_CACHE_MINUTES env var.
+    - Cache key is (bracket_id, firebase_id_token or '').
+    - Returns (rows, fetched_at).
+    """
+    if not bracket_id:
+        raise RuntimeError("bracket_id is required")
+
+    now = datetime.now(timezone.utc)
+    key = (bracket_id, firebase_id_token or "")
+
+    if not force_refresh and key in _TOPDECK_CACHE:
+        rows, cached_at = _TOPDECK_CACHE[key]
+        if now - cached_at < _TOPDECK_CACHE_TTL:
+            return rows, cached_at
+
+    # ✅ Cache miss: DO NOT block the event loop awaiting a hook
+    if _TOPDECK_CACHE_MISS_HOOK is not None:
+        try:
+            asyncio.create_task(_TOPDECK_CACHE_MISS_HOOK())
+        except Exception as e:
+            print(
+                "[topdeck] Warning: cache-miss hook scheduling failed "
+                f"{type(e).__name__}: {e}"
+            )
+
+    print(
+        f"[topdeck] Fetching fresh TopDeck data from API for bracket "
+        f"{bracket_id!r} (cache miss or expired)."
+    )
+
+    rows = await get_league_rows(bracket_id, firebase_id_token)
+    _TOPDECK_CACHE[key] = (rows, now)
+    # invalidate derived caches for this key
+    _TOPDECK_HANDLE_BEST_CACHE.pop(key, None)
+    return rows, now
+
+
+# --------- Derived helpers ---------
+
+
+def build_handle_to_best(rows: List[PlayerRow]) -> Dict[str, Tuple[float, int]]:
+    """Build a mapping: normalized discord handle -> (points, games).
+
+    If a handle appears multiple times, prefer the row with:
+      1) higher games, then
+      2) higher points.
+    """
+    out: Dict[str, Tuple[float, int]] = {}
+    for row in rows:
+        handle = normalize_topdeck_discord(getattr(row, 'discord', None))
+        if not handle:
+            continue
+        pts = float(getattr(row, 'pts', 0.0) or 0.0)
+        games = int(getattr(row, 'games', 0) or 0)
+        existing = out.get(handle)
+        if existing is None or games > existing[1] or (games == existing[1] and pts > existing[0]):
+            out[handle] = (pts, games)
+    return out
+
+
+async def get_handle_to_best_cached(
+    bracket_id: str,
+    firebase_id_token: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+) -> Tuple[Dict[str, Tuple[float, int]], datetime]:
+    """Return (handle_to_best, fetched_at) using the shared TopDeck cache.
+
+    The mapping is cached per (bracket_id, token) and invalidated whenever
+    get_league_rows_cached fetches fresh data for the same key.
+    """
+    rows, fetched_at = await get_league_rows_cached(
+        bracket_id,
+        firebase_id_token,
+        force_refresh=force_refresh,
+    )
+
+    key = (bracket_id, firebase_id_token or '')
+    cached = _TOPDECK_HANDLE_BEST_CACHE.get(key)
+    if cached is not None:
+        mapping, cached_at = cached
+        # Only reuse if it was built from the same rows snapshot time
+        if cached_at == fetched_at:
+            return mapping, fetched_at
+
+    mapping = build_handle_to_best(rows)
+    _TOPDECK_HANDLE_BEST_CACHE[key] = (mapping, fetched_at)
+    return mapping, fetched_at

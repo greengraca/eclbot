@@ -5,6 +5,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Mongo bootstrap (Motor)
+try:
+    from db import ping as mongo_ping, ensure_indexes as mongo_ensure_indexes
+except Exception as e:
+    mongo_ping = None
+    mongo_ensure_indexes = None
+    print(f"[boot] Mongo not ready: {e}")
+
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
@@ -18,12 +27,16 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 INITIAL_EXTENSIONS = [
     "cogs.invite_roles",
+    "cogs.subscriptions_cog",
     "cogs.timer_cog",
     "cogs.topdeck_league",
     "cogs.spellbot_watch",
     "cogs.topdeck_online_sync",
-    # "cogs.lfg_cog",
+    "cogs.lfg_cog",
+    "cogs.join_league_cog",
 ]
+
+_MONGO_BOOTSTRAPPED = False
 
 
 def load_opus():
@@ -56,6 +69,19 @@ def load_opus():
 
 @bot.event
 async def on_ready():
+    global _MONGO_BOOTSTRAPPED
+
+    # MongoDB connectivity check + indexes
+    if (not _MONGO_BOOTSTRAPPED) and mongo_ping and mongo_ensure_indexes:
+        try:
+            await mongo_ping()
+            await mongo_ensure_indexes()
+            print("[boot] MongoDB OK + indexes ensured")
+            _MONGO_BOOTSTRAPPED = True
+        except Exception as e:
+            print(f"[boot] MongoDB ERROR: {e}")
+
+    # Existing invite-role cache bootstrap (unchanged behavior)
     invite_cog = bot.get_cog("InviteRoles")
     if invite_cog is not None:
         guild = bot.get_guild(GUILD_ID)
@@ -67,10 +93,16 @@ async def on_ready():
 
 
 if __name__ == "__main__":
+    if not TOKEN:
+        raise RuntimeError("Missing DISCORD_TOKEN env var.")
+
     load_opus()
 
     # load extensions (sync in py-cord)
     for ext in INITIAL_EXTENSIONS:
-        bot.load_extension(ext)
+        try:
+            bot.load_extension(ext)
+        except Exception as e:
+            print(f"[boot] ⚠️ Failed to load extension '{ext}': {e}")
 
     bot.run(TOKEN)

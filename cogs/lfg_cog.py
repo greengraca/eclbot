@@ -2,189 +2,409 @@
 import os
 import asyncio
 import contextlib
-from typing import Dict, Optional, List
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Optional, List, Tuple
 
 import discord
 from discord.ext import commands
 from discord import Option
 
-from spelltable_client import create_spelltable_game  # <- your real SpellTable helper
+from spelltable_client import create_spelltable_game  # <- your SpellTable helper
+from topdeck_fetch import get_handle_to_best_cached
+
+from utils.interactions import (
+    safe_ctx_defer,
+    safe_ctx_respond,
+    safe_ctx_followup,
+    safe_i_send,
+    safe_i_edit,
+)
+
+from .lfg.models import LFGLobby, now_utc
+from .lfg.state import LobbyStore
+from .lfg.views import LFGJoinView
+from .lfg.embeds import (
+    build_lobby_embed,
+    build_ready_embed,
+    EloLobbyInfo,
+    LastSeatInfo,
+)
+from .lfg.elo import (
+    compute_dynamic_window,
+    current_downward_range,
+    effective_elo_floor,
+    is_last_seat_open,
+    max_downward_range,
+    relaxed_last_seat_floor,
+    get_member_points_games,
+    resolve_points_games_from_map,
+)
+from .lfg.service import (
+    handle_join,
+    handle_leave,
+    handle_open_last_seat,
+)
+
+from .lfg.autojoin import (
+    try_join_existing_for_lfg,
+    try_join_existing_for_lfgelo,
+)
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+LFG_EMBED_ICON_URL = os.getenv("LFG_EMBED_ICON_URL", "").strip()
 
+# minutes of inactivity (no button clicks) before a lobby auto-expires
+LOBBY_INACTIVITY_MINUTES = int(os.getenv("LOBBY_INACTIVITY_MINUTES", "45"))
 
-class LFGLobby:
-    def __init__(
-        self,
-        guild_id: int,
-        channel_id: int,
-        host_id: int,
-        link: str,
-        max_seats: int = 4,
-        invited_ids: Optional[List[int]] = None,
-    ) -> None:
-        self.guild_id = guild_id
-        self.channel_id = channel_id
-        self.host_id = host_id
-        self.link = link
-        self.max_seats = max_seats
-        self.player_ids: List[int] = [host_id]  # host always first
-        self.invited_ids: List[int] = invited_ids or []
-        self.message_id: Optional[int] = None   # set after we send the embed
+# TopDeck league config (for Elo lookup)
+TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "").strip()
+FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
-    def is_full(self) -> bool:
-        return len(self.player_ids) >= self.max_seats
+# /lfgelo availability & Elo window behaviour
+LFG_ELO_MIN_DAY = int(os.getenv("LFG_ELO_MIN_DAY", "10"))  # earliest day-of-month for /lfgelo
 
+# Defaults / fallback (used when dynamic window isn't available)
+LFG_ELO_BASE_RANGE = int(os.getenv("LFG_ELO_BASE_RANGE", "100"))        # start range (downwards)
+LFG_ELO_RANGE_STEP = int(os.getenv("LFG_ELO_RANGE_STEP", "100"))        # expand by this each step
+LFG_ELO_MAX_STEPS = int(os.getenv("LFG_ELO_MAX_STEPS", "4"))            # 4 => base, +1 step, +2 step, +3 step
+LFG_ELO_MAX_RANGE = (
+    LFG_ELO_BASE_RANGE + max(0, LFG_ELO_MAX_STEPS - 1) * LFG_ELO_RANGE_STEP
+)
+LFG_ELO_EXPAND_INTERVAL_MIN = int(os.getenv("LFG_ELO_EXPAND_INTERVAL_MIN", "5"))  # expand every 5min
+LFG_ELO_MIN_GAMES = int(os.getenv("LFG_ELO_MIN_GAMES", "5"))
 
-class LFGJoinView(discord.ui.View):
-    def __init__(self, cog: "LFGCog", lobby: LFGLobby):
-        # 1 hour timeout; after that the lobby expires
-        super().__init__(timeout=60 * 60)
-        self.cog = cog
-        self.lobby = lobby
+# ---- dynamic window tuning (percentile-based) -------------------------------
+# At time=0, we aim to allow ~this fraction of rated players to join (via floor).
+LFG_ELO_TARGET_POOL_FRAC = float(os.getenv("LFG_ELO_TARGET_POOL_FRAC", "0.35"))
+LFG_ELO_MIN_BASE_RANGE = int(os.getenv("LFG_ELO_MIN_BASE_RANGE", "100"))
+# Step grows with base (top players expand faster)
+LFG_ELO_STEP_FACTOR = float(os.getenv("LFG_ELO_STEP_FACTOR", "0.35"))
+LFG_ELO_MIN_RANGE_STEP = int(os.getenv("LFG_ELO_MIN_RANGE_STEP", "50"))
+# Keep ranges “clean”
+LFG_ELO_RANGE_ROUND_TO = int(os.getenv("LFG_ELO_RANGE_ROUND_TO", "25"))
 
-    @discord.ui.button(
-        label="Join Game",
-        style=discord.ButtonStyle.green,
-        custom_id="lfg_join_button",
-    )
-    async def join_button(
-        self,
-        button: discord.ui.Button,
-        interaction: discord.Interaction,
-    ):
-        await self.cog._handle_join(interaction, self, button)
+# last-seat behaviour (floor-only; no ceiling)
+LFG_ELO_LAST_SEAT_GRACE_MIN = int(os.getenv("LFG_ELO_LAST_SEAT_GRACE_MIN", "10"))    # wait this long at 3/4
+# last-seat behaviour (absolute floor when unlocked)
+LFG_ELO_LAST_SEAT_MIN_RATING = int(os.getenv("LFG_ELO_LAST_SEAT_MIN_RATING", "200"))
 
-    async def on_timeout(self) -> None:
-        # Disable the button + mark lobby as expired
-        guild = self.cog.bot.get_guild(self.lobby.guild_id)
-        if not guild:
-            return
-
-        channel = guild.get_channel(self.lobby.channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            return
-
-        if not self.lobby.message_id:
-            return
-
-        try:
-            msg = await channel.fetch_message(self.lobby.message_id)
-        except Exception:
-            return
-
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-
-        if msg.embeds:
-            embed = msg.embeds[0]
-        else:
-            embed = discord.Embed()
-
-        embed.title = "⌛ LFG lobby expired"
-        embed.color = discord.Color.dark_grey()
-
-        with contextlib.suppress(Exception):
-            await msg.edit(embed=embed, view=self)
-
-        # Cleanup internal state
-        self.cog._clear_lobby(self.lobby.guild_id)
+# ---- High-stakes pods -------------------------------------------------------
+# If either is 0/empty -> feature is effectively disabled
+WAGER_RATE = float(os.getenv("WAGER_RATE", "0"))  # e.g. 0.25 means 25% of each player's pts
+HIGH_STAKES_THRESHOLD = float(os.getenv("HIGH_STAKES_THRESHOLD", "0"))  # e.g. 400
 
 
 class LFGCog(commands.Cog):
     """
     Simple LFG system for SpellTable Commander pods.
 
-    - /lfg → opens a lobby for up to 4 players, always SpellTable + Commander.
+    - /lfg → opens a lobby for up to 4 players (optionally auto-filling with mentioned friends).
+    - /lfgelo → opens an Elo-matched lobby for up to 4 players (no friends option).
     - One active lobby per guild at a time.
-    - Lobby embed updates as people join; closes when full.
+    - SpellTable room is created *only when the lobby becomes full*.
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # guild_id -> LFGLobby
-        self._guild_lobbies: Dict[int, LFGLobby] = {}
-        self._lock = asyncio.Lock()
+        self.state = LobbyStore()
 
     # ---------- internal helpers ----------
 
-    def _clear_lobby(self, guild_id: int) -> None:
-        self._guild_lobbies.pop(guild_id, None)
+    # ------------------------------------------------------------------------
 
-    def _build_lobby_embed(
+    def _alloc_lobby_id(self) -> int:
+        return self.state.alloc_lobby_id()
+
+    def _get_guild_lobbies(self, guild_id: int) -> Dict[int, LFGLobby]:
+        return self.state.get_guild_lobbies(guild_id)
+
+    def _find_user_lobby(
         self,
+        guild_id: int,
+        user_id: int,
+        *,
+        exclude_lobby_id: Optional[int] = None,
+    ) -> Optional[LFGLobby]:
+        return self.state.find_user_lobby(
+            guild_id,
+            user_id,
+            exclude_lobby_id=exclude_lobby_id,
+        )
+
+    def _clear_lobby(self, guild_id: int, lobby_id: int) -> None:
+        lobby = self.state.remove_lobby(guild_id, lobby_id)
+        if lobby and lobby.update_task:
+            lobby.update_task.cancel()
+
+    def _is_lobby_active(self, lobby: LFGLobby) -> bool:
+        return self.state.is_lobby_active(lobby) and not lobby.has_link() and not getattr(lobby, "link_creating", False)
+
+    def _ensure_elo_embed_updater(self, lobby: LFGLobby) -> None:
+        if not lobby.elo_mode:
+            return
+        if not self._is_lobby_active(lobby):
+            return
+        if lobby.update_task is None or lobby.update_task.done():
+            lobby.update_task = asyncio.create_task(self._run_elo_embed_updater(lobby))
+
+    async def _compute_dynamic_window(self, host_elo: float) -> Tuple[int, int]:
+        return await compute_dynamic_window(
+            host_elo,
+            bracket_id=TOPDECK_BRACKET_ID,
+            firebase_id_token=FIREBASE_ID_TOKEN,
+            min_games=int(LFG_ELO_MIN_GAMES),
+            base_range_default=int(LFG_ELO_BASE_RANGE),
+            range_step_default=int(LFG_ELO_RANGE_STEP),
+            target_pool_frac=float(LFG_ELO_TARGET_POOL_FRAC),
+            min_base_range=int(LFG_ELO_MIN_BASE_RANGE),
+            step_factor=float(LFG_ELO_STEP_FACTOR),
+            min_range_step=int(LFG_ELO_MIN_RANGE_STEP),
+            round_to=int(LFG_ELO_RANGE_ROUND_TO),
+        )
+
+    async def _maybe_announce_high_stakes(
+        self,
+        channel: discord.abc.Messageable,
         guild: discord.Guild,
-        lobby: LFGLobby,
-    ) -> discord.Embed:
-        host = guild.get_member(lobby.host_id)
-        host_mention = host.mention if host else f"<@{lobby.host_id}>"
+        player_ids: List[int],
+    ) -> None:
+        try:
+            if not TOPDECK_BRACKET_ID:
+                return
+            if WAGER_RATE <= 0 or HIGH_STAKES_THRESHOLD <= 0:
+                return
+            if len(player_ids) != 4:
+                return
 
-        embed = discord.Embed(
-            title="🕹️ LFG – Commander",
-            description=(
-                f"{host_mention} is looking for a SpellTable Commander game!\n"
-                f"[Click here to join on SpellTable]({lobby.link})"
-            ),
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(name="Service", value="SpellTable", inline=True)
-        embed.add_field(name="Format", value="Commander", inline=True)
+            members: List[discord.Member] = []
+            for uid in player_ids:
+                m = guild.get_member(uid)
+                if m is None:
+                    try:
+                        m = await guild.fetch_member(uid)
+                    except Exception:
+                        m = None
+                if m is None or not isinstance(m, discord.Member):
+                    return
+                members.append(m)
 
-        # Players field
-        lines = []
-        for i in range(lobby.max_seats):
-            if i < len(lobby.player_ids):
-                uid = lobby.player_ids[i]
-                member = guild.get_member(uid)
-                if member:
-                    name = member.display_name
-                    mention = member.mention
-                else:
-                    name = f"User {uid}"
-                    mention = f"<@{uid}>"
-                suffix = " *(host)*" if uid == lobby.host_id else ""
-                lines.append(f"**Slot {i+1}:** {mention} ({name}){suffix}")
-            else:
-                lines.append(f"**Slot {i+1}:** *(open)*")
-
-        embed.add_field(
-            name=f"Players ({len(lobby.player_ids)}/{lobby.max_seats})",
-            value="\n".join(lines),
-            inline=False,
-        )
-
-        # Invited friends (if any) — they’re not auto-joined, just shown
-        invited_mentions = []
-        for uid in lobby.invited_ids:
-            member = guild.get_member(uid)
-            if member:
-                invited_mentions.append(member.mention)
-            else:
-                invited_mentions.append(f"<@{uid}>")
-        if invited_mentions:
-            embed.add_field(
-                name="Invited friends",
-                value=" ".join(invited_mentions),
-                inline=False,
+            handle_to_best, _ = await get_handle_to_best_cached(
+                TOPDECK_BRACKET_ID,
+                FIREBASE_ID_TOKEN,
+                force_refresh=False,
             )
 
-        # SpellBot credit
-        embed.add_field(
-            name="Support SpellBot",
-            value=(
-                "Support SpellBot – Become a monthly patron or give a one-off tip! ❤️\n"
-                "[Patreon](https://patreon.com/lexicalunit) • "
-                "[Ko-fi](https://ko-fi.com/lexicalunit)"
-            ),
-            inline=False,
+            resolved: List[Tuple[discord.Member, float, int]] = []
+            for m in members:
+                found = resolve_points_games_from_map(m, handle_to_best)
+                if found is None:
+                    return
+                pts, games = found
+                resolved.append((m, float(pts), int(games)))
+
+            stakes = [(m, pts * float(WAGER_RATE)) for (m, pts, _games) in resolved]
+            pot = sum(stake for _m, stake in stakes)
+            approx_pot = int(round(pot))
+
+            if pot < float(HIGH_STAKES_THRESHOLD):
+                return
+
+            await channel.send(
+                f"🚨 **HIGH-STAKES POD DETECTED!** 🚨\n"
+                f"The winner will take home ~**{approx_pot}** points."
+            )
+
+        except Exception as e:
+            print(f"[lfg] Error in _maybe_announce_high_stakes: {type(e).__name__}: {e}")
+
+    # ---- Elo updater ----
+
+    async def _run_elo_embed_updater(self, lobby: LFGLobby) -> None:
+        try:
+            while self._is_lobby_active(lobby) and (lobby.message_id is None or lobby.view is None):
+                await asyncio.sleep(0.5)
+
+            interval_sec = max(int(LFG_ELO_EXPAND_INTERVAL_MIN), 1) * 60
+            grace_sec = max(int(LFG_ELO_LAST_SEAT_GRACE_MIN), 0) * 60
+
+            while self._is_lobby_active(lobby):
+                now = now_utc()
+
+                rng = self._current_downward_range(lobby) or 0.0
+                at_bottom = float(rng) >= float(self._max_downward_range(lobby))
+
+                wake_at: Optional[datetime] = None
+
+                if not at_bottom:
+                    elapsed_sec = (now - lobby.created_at).total_seconds()
+                    step = int(elapsed_sec // interval_sec)
+                    wake_at = lobby.created_at + timedelta(seconds=(step + 1) * interval_sec)
+
+                if lobby.remaining_slots() == 1 and not self._is_last_seat_open(lobby) and lobby.almost_full_at:
+                    grace_at = lobby.almost_full_at + timedelta(seconds=grace_sec)
+                    if wake_at is None or grace_at < wake_at:
+                        wake_at = grace_at
+
+                if wake_at is None:
+                    break
+
+                sleep_s = max(1.0, (wake_at - now).total_seconds())
+                await asyncio.sleep(sleep_s)
+
+                if not self._is_lobby_active(lobby):
+                    break
+
+                guild = self.bot.get_guild(lobby.guild_id)
+                if not guild:
+                    continue
+
+                channel = guild.get_channel(lobby.channel_id)
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+
+                if not lobby.message_id or not lobby.view:
+                    continue
+
+                try:
+                    msg = await channel.fetch_message(lobby.message_id)
+                except Exception:
+                    break
+
+                embed = self._build_lobby_embed(guild, lobby)
+                lobby.view._sync_open_last_seat_button()
+
+                with contextlib.suppress(Exception):
+                    await msg.edit(embed=embed, view=lobby.view)
+
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    def _max_downward_range(self, lobby: LFGLobby) -> float:
+        return float(
+            max_downward_range(
+                lobby,
+                base_range_default=int(LFG_ELO_BASE_RANGE),
+                range_step_default=int(LFG_ELO_RANGE_STEP),
+                max_steps_default=int(LFG_ELO_MAX_STEPS),
+            )
         )
 
-        if lobby.is_full():
-            embed.title = "✅ Lobby is full – ready to play!"
-            embed.color = discord.Color.green()
+    def _current_downward_range(self, lobby: LFGLobby) -> Optional[float]:
+        return current_downward_range(
+            lobby,
+            base_range_default=int(LFG_ELO_BASE_RANGE),
+            range_step_default=int(LFG_ELO_RANGE_STEP),
+            expand_interval_min=int(LFG_ELO_EXPAND_INTERVAL_MIN),
+            max_steps_default=int(LFG_ELO_MAX_STEPS),
+        )
 
-        return embed
+    def _relaxed_last_seat_floor(self, lobby: LFGLobby) -> Optional[float]:
+        return relaxed_last_seat_floor(
+            lobby,
+            base_range_default=int(LFG_ELO_BASE_RANGE),
+            range_step_default=int(LFG_ELO_RANGE_STEP),
+            expand_interval_min=int(LFG_ELO_EXPAND_INTERVAL_MIN),
+            max_steps_default=int(LFG_ELO_MAX_STEPS),
+            last_seat_min_rating=int(LFG_ELO_LAST_SEAT_MIN_RATING),
+        )
+
+    def _is_last_seat_open(self, lobby: LFGLobby) -> bool:
+        return bool(is_last_seat_open(lobby, last_seat_grace_min=int(LFG_ELO_LAST_SEAT_GRACE_MIN)))
+
+    def _effective_elo_floor(self, lobby: LFGLobby) -> Optional[float]:
+        return effective_elo_floor(
+            lobby,
+            base_range_default=int(LFG_ELO_BASE_RANGE),
+            range_step_default=int(LFG_ELO_RANGE_STEP),
+            expand_interval_min=int(LFG_ELO_EXPAND_INTERVAL_MIN),
+            max_steps_default=int(LFG_ELO_MAX_STEPS),
+            last_seat_grace_min=int(LFG_ELO_LAST_SEAT_GRACE_MIN),
+            last_seat_min_rating=int(LFG_ELO_LAST_SEAT_MIN_RATING),
+        )
+
+    async def _get_player_elo(self, member: discord.Member) -> Optional[Tuple[float, int]]:
+        """Return (points, games) for the member based on TopDeck rows.
+
+        Matching is done by normalizing the member's username/global_name/display_name
+        and comparing to TopDeck's stored discord handle (normalized).
+        """
+        if not TOPDECK_BRACKET_ID:
+            return None
+        info = await get_member_points_games(
+            member,
+            bracket_id=TOPDECK_BRACKET_ID,
+            firebase_id_token=FIREBASE_ID_TOKEN,
+            force_refresh=False,
+        )
+        if info is None:
+            return None
+        pts, games = info
+        return float(pts), int(games)
+
+    def _build_lobby_embed(self, guild: discord.Guild, lobby: LFGLobby) -> discord.Embed:
+        """Build the lobby embed (thin wrapper over cogs.lfg.embeds)."""
+
+        elo_info: Optional[EloLobbyInfo] = None
+
+        if lobby.elo_mode and lobby.host_elo is not None:
+            eff_floor = self._effective_elo_floor(lobby)
+            rng = self._current_downward_range(lobby)
+            at_bottom = rng is not None and float(rng) >= float(self._max_downward_range(lobby))
+
+            if eff_floor is not None:
+                last_seat: Optional[LastSeatInfo] = None
+                if lobby.remaining_slots() == 1:
+                    relaxed_floor = self._relaxed_last_seat_floor(lobby)
+                    if relaxed_floor is not None:
+                        if self._is_last_seat_open(lobby):
+                            last_seat = LastSeatInfo(is_open=True, min_rating=int(relaxed_floor), minutes_left=None)
+                        else:
+                            mins_left = int(LFG_ELO_LAST_SEAT_GRACE_MIN)
+                            if lobby.almost_full_at is not None:
+                                elapsed = (now_utc() - lobby.almost_full_at).total_seconds() / 60.0
+                                mins_left = max(0, int(round(LFG_ELO_LAST_SEAT_GRACE_MIN - elapsed)))
+                            last_seat = LastSeatInfo(
+                                is_open=False,
+                                min_rating=int(relaxed_floor),
+                                minutes_left=int(mins_left),
+                            )
+
+                elo_info = EloLobbyInfo(
+                    host_elo=int(lobby.host_elo),
+                    min_rating=int(eff_floor),
+                    at_bottom=bool(at_bottom),
+                    last_seat=last_seat,
+                )
+
+        return build_lobby_embed(
+            guild,
+            lobby,
+            updated_at=now_utc(),
+            icon_url=LFG_EMBED_ICON_URL,
+            elo_info=elo_info,
+            expand_interval_min=int(LFG_ELO_EXPAND_INTERVAL_MIN),
+            last_seat_grace_min=int(LFG_ELO_LAST_SEAT_GRACE_MIN),
+        )
+
+    def _build_ready_embed(self, guild: discord.Guild, lobby: LFGLobby, started_at: datetime) -> discord.Embed:
+        """Build the ready embed (thin wrapper over cogs.lfg.embeds)."""
+
+        return build_ready_embed(
+            guild,
+            lobby,
+            started_at=started_at,
+            icon_url=LFG_EMBED_ICON_URL,
+        )
+
+    async def _handle_open_last_seat(
+        self,
+        interaction: discord.Interaction,
+        view: LFGJoinView,
+        button: discord.ui.Button,
+    ):
+        return await handle_open_last_seat(self, interaction, view, button)
 
     async def _handle_join(
         self,
@@ -192,84 +412,28 @@ class LFGCog(commands.Cog):
         view: LFGJoinView,
         button: discord.ui.Button,
     ):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "This lobby can only be joined from within a server.",
-                ephemeral=True,
-            )
-            return
+        return await handle_join(
+            self,
+            interaction,
+            view,
+            button,
+            elo_min_games=int(LFG_ELO_MIN_GAMES),
+            last_seat_grace_min=int(LFG_ELO_LAST_SEAT_GRACE_MIN),
+        )
 
-        async with self._lock:
-            lobby = self._guild_lobbies.get(guild.id)
-            if lobby is None or lobby is not view.lobby:
-                # Lobby no longer active
-                button.disabled = True
-                with contextlib.suppress(Exception):
-                    await interaction.response.edit_message(
-                        content="This lobby is no longer active.",
-                        view=view,
-                    )
-                return
+    async def _handle_leave(
+        self,
+        interaction: discord.Interaction,
+        view: LFGJoinView,
+        button: discord.ui.Button,
+    ):
+        return await handle_leave(self, interaction, view, button)
 
-            user = interaction.user
-            if not isinstance(user, discord.Member):
-                await interaction.response.send_message(
-                    "Only server members can join this lobby.",
-                    ephemeral=True,
-                )
-                return
+    # -------------------- the rest of your file stays the same --------------------
+    # (Everything below is unchanged from what you pasted.)
+    # ---------------------------------------------------------------------------
 
-            if user.id in lobby.player_ids:
-                await interaction.response.send_message(
-                    "You're already in this lobby.",
-                    ephemeral=True,
-                )
-                return
-
-            if lobby.is_full():
-                button.disabled = True
-                with contextlib.suppress(Exception):
-                    await interaction.response.edit_message(view=view)
-                await interaction.followup.send(
-                    "This lobby is already full.",
-                    ephemeral=True,
-                )
-                return
-
-            lobby.player_ids.append(user.id)
-
-        # Rebuild embed outside of the lock
-        embed = self._build_lobby_embed(guild, lobby)
-
-        # Disable button + clear lobby if it just became full
-        if lobby.is_full():
-            for child in view.children:
-                if isinstance(child, discord.ui.Button):
-                    child.disabled = True
-            self._clear_lobby(guild.id)
-
-        try:
-            await interaction.response.edit_message(embed=embed, view=view)
-        except discord.InteractionResponded:
-            # Fallback if already responded
-            with contextlib.suppress(Exception):
-                await interaction.edit_original_response(embed=embed, view=view)
-
-        # DM joiner with link
-        try:
-            await interaction.user.send(
-                f"You've joined a SpellTable game! Here is the link: {lobby.link}"
-            )
-        except discord.Forbidden:
-            with contextlib.suppress(Exception):
-                await interaction.followup.send(
-                    f"{interaction.user.mention}, I couldn't DM you the game link. "
-                    "Please enable DMs from this server.",
-                    ephemeral=True,
-                )
-
-    # ---------- slash command ----------
+    # ---------- /lfg (normal) ----------
 
     @commands.slash_command(
         name="lfg",
@@ -281,95 +445,230 @@ class LFGCog(commands.Cog):
         ctx: discord.ApplicationContext,
         friends: Optional[str] = Option(
             str,
-            "Mention one or more friends to invite (optional).",
+            "Mention one or more friends to auto-fill the pod (optional).",
             required=False,
         ),
     ):
-        # Only in guilds
         if ctx.guild is None:
-            await ctx.respond(
-                "This command can only be used in a server.",
+            await safe_ctx_respond(ctx, "This command can only be used in a server.", ephemeral=True)
+            return
+
+        already_in_lobby = False
+        async with self.state.lock:
+            already_in_lobby = self._find_user_lobby(ctx.guild.id, ctx.author.id) is not None
+
+        if already_in_lobby:
+            await safe_ctx_respond(
+                ctx,
+                "You're already in an active lobby in this server. Leave it before creating a new one.",
                 ephemeral=True,
             )
             return
 
-        async with self._lock:
-            if ctx.guild.id in self._guild_lobbies:
-                await ctx.respond(
-                    "There is already an active LFG lobby in this server. "
-                    "Please wait for it to fill or expire before creating another.",
-                    ephemeral=True,
-                )
+        await safe_ctx_defer(ctx, label="lfg")
+
+        raw_invited_ids: List[int] = []
+        if friends:
+            for token in friends.split():
+                if token.startswith("<@") and token.endswith(">"):
+                    cleaned = token.strip("<@!>")
+                    if cleaned.isdigit():
+                        raw_invited_ids.append(int(cleaned))
+
+        invited_ids: List[int] = []
+        for uid in raw_invited_ids:
+            if uid == ctx.author.id:
+                continue
+            if uid not in invited_ids:
+                invited_ids.append(uid)
+
+        if len(invited_ids) != 3:
+            if await try_join_existing_for_lfg(self, ctx, invited_ids, elo_min_games=int(LFG_ELO_MIN_GAMES)):
                 return
 
-            # Public response (not ephemeral) – we’re posting the lobby embed
-            await ctx.defer()
+        full_lobby: Optional[LFGLobby] = None
+        lobby: Optional[LFGLobby] = None
 
-            # Parse invited friend mentions from the string
-            invited_ids: List[int] = []
-            if friends:
-                for token in friends.split():
-                    if token.startswith("<@") and token.endswith(">"):
-                        cleaned = token.strip("<@!>")
-                        if cleaned.isdigit():
-                            invited_ids.append(int(cleaned))
-
-            # Create SpellTable game via real helper
-            try:
-                link = await create_spelltable_game(
-                    game_name=f"{ctx.guild.name} – Commander LFG",
-                    format_name="Commander",
-                    is_public=False,
-                )
-            except Exception as e:
-                print(f"[lfg] Failed to create SpellTable game: {e}")
-                await ctx.followup.send(
-                    "I couldn't create a SpellTable game right now. "
-                    "Please try again in a bit.",
-                    ephemeral=True,
-                )
-                return
-
+        async with self.state.lock:
             lobby = LFGLobby(
                 guild_id=ctx.guild.id,
                 channel_id=ctx.channel.id,
                 host_id=ctx.author.id,
-                link=link,
                 max_seats=4,
                 invited_ids=invited_ids,
+                elo_mode=False,
+                host_elo=None,
+                elo_max_steps=int(LFG_ELO_MAX_STEPS),
             )
-            self._guild_lobbies[ctx.guild.id] = lobby
+            lobby.lobby_id = self._alloc_lobby_id()
 
-        # Build embed + view and send
+            for uid in invited_ids:
+                if len(lobby.player_ids) >= lobby.max_seats:
+                    break
+                if uid in lobby.player_ids:
+                    continue
+                if self._find_user_lobby(ctx.guild.id, uid) is not None:
+                    continue
+                lobby.player_ids.append(uid)
+
+            if lobby.is_full():
+                full_lobby = lobby
+            else:
+                self._get_guild_lobbies(ctx.guild.id)[lobby.lobby_id] = lobby
+
+        if full_lobby is not None:
+            try:
+                link = await create_spelltable_game(
+                    game_name="ECL DragonShield",
+                    format_name="Commander",
+                    is_public=False,
+                )
+                full_lobby.link = link
+            except Exception as e:
+                print(f"[lfg] Failed to create SpellTable game (friends fill): {e}")
+                await safe_ctx_followup(
+                    ctx,
+                    "I couldn't create a SpellTable game right now. Please try again in a bit or ping a mod.",
+                    ephemeral=True,
+                )
+                return
+
+            started_at = now_utc()
+            ready_embed = self._build_ready_embed(ctx.guild, full_lobby, started_at)
+
+            msg = await safe_ctx_followup(ctx, embed=ready_embed)
+
+            with contextlib.suppress(Exception):
+                await self._maybe_announce_high_stakes(msg.channel, ctx.guild, full_lobby.player_ids)
+
+            for uid in full_lobby.player_ids:
+                member = ctx.guild.get_member(uid)
+                if not member:
+                    continue
+                with contextlib.suppress(discord.Forbidden):
+                    await member.send(embed=ready_embed)
+
+            return
+
+        if lobby is None:
+            await safe_ctx_followup(ctx, "Something went wrong creating the lobby.", ephemeral=True)
+            return
+
         embed = self._build_lobby_embed(ctx.guild, lobby)
-        view = LFGJoinView(self, lobby)
+        view = LFGJoinView(self, lobby, timeout_seconds=LOBBY_INACTIVITY_MINUTES * 60)
+        lobby.view = view
 
         try:
-            msg = await ctx.followup.send(embed=embed, view=view)
+            msg = await safe_ctx_followup(ctx, embed=embed, view=view)
         except Exception as e:
             print(f"[lfg] Failed to send lobby message: {e}")
-            # Cleanup on failure
-            self._clear_lobby(ctx.guild.id)
-            await ctx.followup.send(
-                "Something went wrong creating the lobby message.",
-                ephemeral=True,
-            )
+            self._clear_lobby(ctx.guild.id, lobby.lobby_id)
+            await safe_ctx_followup(ctx, "Something went wrong creating the lobby message.", ephemeral=True)
             return
 
         lobby.message_id = msg.id
 
-        # DM host with link
-        try:
-            await ctx.author.send(
-                f"Your SpellTable Commander lobby is ready: {link}"
+    # ---------- /lfgelo ----------
+
+    @commands.slash_command(
+        name="lfgelo",
+        description="Open an Elo-matched SpellTable Commander lobby (4 players max).",
+        guild_ids=[GUILD_ID] if GUILD_ID else None,
+    )
+    async def lfgelo(self, ctx: discord.ApplicationContext):
+        if ctx.guild is None:
+            await safe_ctx_respond(ctx, "This command can only be used in a server.", ephemeral=True)
+            return
+
+        today_day = datetime.now(timezone.utc).day
+        if today_day < LFG_ELO_MIN_DAY:
+            await safe_ctx_respond(
+                ctx,
+                f"/lfgelo will only be available from day {LFG_ELO_MIN_DAY} of the month.",
+                ephemeral=True,
             )
-        except discord.Forbidden:
-            with contextlib.suppress(Exception):
-                await ctx.followup.send(
-                    "I couldn't DM you the SpellTable link. "
-                    "Please enable DMs from this server.",
-                    ephemeral=True,
-                )
+            return
+
+        already_in_lobby = False
+        async with self.state.lock:
+            already_in_lobby = self._find_user_lobby(ctx.guild.id, ctx.author.id) is not None
+
+        if already_in_lobby:
+            await safe_ctx_respond(
+                ctx,
+                "You're already in an active lobby in this server. Leave it before creating a new one.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_ctx_defer(ctx, label="lfgelo")
+
+        if not isinstance(ctx.author, discord.Member):
+            await safe_ctx_followup(ctx, "Only server members can use /lfgelo.", ephemeral=True)
+            return
+
+        if await try_join_existing_for_lfgelo(self, ctx, elo_min_games=int(LFG_ELO_MIN_GAMES)):
+            return
+
+        host_info = await self._get_player_elo(ctx.author)
+        if host_info is None:
+            await safe_ctx_followup(
+                ctx,
+                "You don't have a league rating yet, so you can't host /lfgelo pods.\n"
+                "Use /lfg instead or play some matches first!",
+                ephemeral=True,
+            )
+            return
+
+        host_elo, host_games = host_info
+        if host_games < LFG_ELO_MIN_GAMES:
+            await safe_ctx_followup(
+                ctx,
+                f"You need at least **{LFG_ELO_MIN_GAMES}** league games to host /lfgelo.\n"
+                f"You currently have **{host_games}**.\n"
+                "Use /lfg for now and come back once you've got more games logged.",
+                ephemeral=True,
+            )
+            return
+
+        base_range, range_step = await self._compute_dynamic_window(host_elo)
+
+        lobby: Optional[LFGLobby] = None
+        async with self.state.lock:
+            lobby = LFGLobby(
+                guild_id=ctx.guild.id,
+                channel_id=ctx.channel.id,
+                host_id=ctx.author.id,
+                max_seats=4,
+                invited_ids=[],
+                elo_mode=True,
+                host_elo=host_elo,
+                elo_max_steps=int(LFG_ELO_MAX_STEPS),
+            )
+            lobby.elo_base_range = int(base_range)
+            lobby.elo_range_step = int(range_step)
+
+            lobby.lobby_id = self._alloc_lobby_id()
+            self._get_guild_lobbies(ctx.guild.id)[lobby.lobby_id] = lobby
+
+        if lobby is None:
+            await safe_ctx_followup(ctx, "Something went wrong creating the Elo lobby.", ephemeral=True)
+            return
+
+        embed = self._build_lobby_embed(ctx.guild, lobby)
+        view = LFGJoinView(self, lobby, timeout_seconds=LOBBY_INACTIVITY_MINUTES * 60)
+        lobby.view = view
+
+        try:
+            msg = await safe_ctx_followup(ctx, embed=embed, view=view)
+        except Exception as e:
+            print(f"[lfgelo] Failed to send Elo lobby message: {e}")
+            self._clear_lobby(ctx.guild.id, lobby.lobby_id)
+            await safe_ctx_followup(ctx, "Something went wrong creating the Elo lobby.", ephemeral=True)
+            return
+
+        lobby.message_id = msg.id
+        lobby.update_task = asyncio.create_task(self._run_elo_embed_updater(lobby))
 
 
 def setup(bot: commands.Bot):

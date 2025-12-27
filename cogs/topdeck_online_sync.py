@@ -2,15 +2,17 @@
 
 import os
 import re
-import json
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import aiohttp
 import discord
 from discord.ext import commands
+
+from db import online_games
+from online_games_store import OnlineGameRecord, upsert_record
 
 from topdeck_fetch import (
     Match,
@@ -27,16 +29,16 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
-FIRESTORE_TOURNAMENT_URL_TEMPLATE = os.getenv(
-    "FIRESTORE_TOURNAMENT_URL_TEMPLATE",
-    "https://firestore.googleapis.com/v1/projects/eminence-1b40b/"
-    "databases/(default)/documents/tournaments/{bracket_id}",
+FIRESTORE_TOURNAMENT_URL_TEMPLATE = (
+    os.getenv("FIRESTORE_DOC_URL_TEMPLATE", "")
+    .strip()
+    .strip('"')
+    .strip("'")
 )
 
 SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
 SPELLBOT_USER_ID = int(os.getenv("SPELLBOT_USER_ID", "0"))
 
-TOPDECK_ONLINE_JSON = os.getenv("TOPDECK_ONLINE_JSON", "topdeck_online_games.json")
 
 ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
 ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
@@ -106,10 +108,15 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
     """
     Fetch TopDeck matches for the configured bracket and return
     only matches that started on/after the first day of this month.
-    We keep ALL such matches; some may later be marked offline.
+    We keep ALL such matches; some may later be marked online.
     """
     if not TOPDECK_BRACKET_ID:
         raise RuntimeError("TOPDECK_BRACKET_ID is not configured.")
+
+    if not FIRESTORE_TOURNAMENT_URL_TEMPLATE:
+        raise RuntimeError(
+            "FIRESTORE_TOURNAMENT_URL_TEMPLATE is not configured in environment variables."
+        )
 
     month_start = _month_start_utc()
     print(
@@ -118,7 +125,16 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
     )
 
     players_url = f"https://topdeck.gg/PublicPData/{TOPDECK_BRACKET_ID}"
-    doc_url = FIRESTORE_TOURNAMENT_URL_TEMPLATE.format(bracket_id=TOPDECK_BRACKET_ID)
+
+    raw_doc_url = FIRESTORE_TOURNAMENT_URL_TEMPLATE.format(
+        bracket_id=TOPDECK_BRACKET_ID
+    )
+    doc_url = raw_doc_url.strip().strip('"').strip("'")
+    if raw_doc_url != doc_url:
+        print(
+            "[online-sync] Normalized Firestore URL template from "
+            f"{raw_doc_url!r} to {doc_url!r}."
+        )
 
     async with aiohttp.ClientSession() as session:
         players = await _fetch_json(session, players_url, token=None)
@@ -151,7 +167,6 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
         raw_start = float(m.start)
 
         # Detect ms vs s and normalize to seconds
-        # "Normal" epoch seconds ~ 1.7e9; ms will be ~1.7e12
         if raw_start > 10_000_000_000:  # treat as ms
             start_ts = raw_start / 1000.0
             unit = "ms"
@@ -317,8 +332,10 @@ def _match_spellbot_to_topdeck(
     - exact set of normalized handles (ignoring duplicates and blanks)
     - and closest timestamp within max_time_diff_seconds.
 
-    Each SpellBot ready game can match at most one TopDeck match
-    and vice-versa (per handle-set cluster).
+    Each SpellBot ready game can match at most one TopDeck match.
+    Additionally, for each handle-set cluster, any extra TopDeck
+    matches close in time to a known-online match are also treated
+    as online (to catch multiple games on the same SpellTable link).
     """
     print(
         f"[online-sync] {_now_iso()} Matching SpellBot ↔ TopDeck "
@@ -355,6 +372,8 @@ def _match_spellbot_to_topdeck(
     total_online = 0
     debug_unmatched_printed = 0
     debug_matched_printed = 0
+
+    # --- First pass: direct SpellBot ↔ TopDeck matches ---
 
     for key, sb_list in sb_by_key.items():
         td_list = td_by_key.get(key)
@@ -412,6 +431,46 @@ def _match_spellbot_to_topdeck(
                 )
                 debug_matched_printed += 1
 
+    # --- Second pass: extra TopDeck matches in same handle-set near online ones ---
+
+    extra_online = 0
+    extra_debug_printed = 0
+    reuse_window = max_time_diff_seconds  # reuse same window for simplicity
+
+    for key, td_list in td_by_key.items():
+        td_sorted = sorted(td_list, key=lambda m: m.start_ts)
+        online_indices = [
+            idx
+            for idx, mi in enumerate(td_sorted)
+            if match_online.get((mi.season, mi.table), False)
+        ]
+        if not online_indices:
+            continue
+
+        for idx, mi in enumerate(td_sorted):
+            match_key = (mi.season, mi.table)
+            if match_online.get(match_key, False):
+                continue
+
+            dt_to_nearest = min(
+                abs(mi.start_ts - td_sorted[j].start_ts) for j in online_indices
+            )
+            if dt_to_nearest <= reuse_window:
+                match_online[match_key] = True
+                extra_online += 1
+                for uid in mi.uids:
+                    per_player_online[uid] = per_player_online.get(uid, 0) + 1
+
+                if extra_debug_printed < 5:
+                    print(
+                        "[online-sync] DEBUG marked extra online game in same handle-set "
+                        f"{list(key)}; dt_to_nearest={dt_to_nearest:.0f}s; "
+                        f"season={mi.season}, table={mi.table}",
+                    )
+                    extra_debug_printed += 1
+
+    total_online += extra_online
+
     print(
         f"[online-sync] {_now_iso()} Matching complete (handles + time). "
         f"Clusters with overlap: {clusters_with_overlap}, "
@@ -422,16 +481,76 @@ def _match_spellbot_to_topdeck(
     return match_online, per_player_online
 
 
-def _save_online_json(payload: Dict) -> None:
-    print(
-        f"[online-sync] {_now_iso()} Writing JSON to {TOPDECK_ONLINE_JSON!r} "
-        f"(matches: {len(payload.get('matches', []))})."
-    )
-    with open(TOPDECK_ONLINE_JSON, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+# ---------- Persist helper (SpellBot view + timer view) ----------
 
 
-# ---------- Cog ----------
+async def _save_online_stats_to_db(new_payload: Dict[str, Any]) -> None:
+    """Persist /synconline results to Mongo.
+
+    We store one document per match, and we **never downgrade** online=True → False.
+    """
+    bracket_id = str(new_payload.get("bracket_id") or "")
+    month_str = str(new_payload.get("month") or "")
+    if not bracket_id or not month_str:
+        return
+
+    try:
+        year = int(month_str.split("-")[0])
+        month = int(month_str.split("-")[1])
+    except Exception:
+        return
+
+    existing_online: set[tuple[int, int]] = set()
+    async for doc in online_games.find(
+        {"bracket_id": bracket_id, "year": year, "month": month, "online": True},
+        projection={"_id": 0, "season": 1, "tid": 1},
+    ):
+        try:
+            existing_online.add((int(doc["season"]), int(doc["tid"])))
+        except Exception:
+            continue
+
+    for m in (new_payload.get("matches") or []):
+        try:
+            season = int(m.get("season") or 0)
+            tid = int(m.get("table") or 0)
+            if not season or not tid:
+                continue
+
+            entrant_ids: List[int] = []
+            for x in (m.get("player_entrants") or []):
+                try:
+                    entrant_ids.append(int(x))
+                except Exception:
+                    continue
+
+            topdeck_uids: List[str] = []
+            for u in (m.get("player_uids") or []):
+                if u is None:
+                    continue
+                s = str(u).strip()
+                if s:
+                    topdeck_uids.append(s)
+
+            seen = set()
+            topdeck_uids = [x for x in topdeck_uids if not (x in seen or seen.add(x))]
+
+            online_flag = bool(m.get("online"))
+            if (season, tid) in existing_online:
+                online_flag = True
+
+            rec = OnlineGameRecord(
+                season=season,
+                tid=tid,
+                start_ts=float(m.get("start_ts") or 0.0) or None,
+                entrant_ids=entrant_ids,
+                topdeck_uids=topdeck_uids,
+                online=online_flag,
+            )
+            await upsert_record(bracket_id, year, month, rec)
+        except Exception:
+            continue
+
 
 
 class TopdeckOnlineSyncCog(commands.Cog):
@@ -441,7 +560,9 @@ class TopdeckOnlineSyncCog(commands.Cog):
     - Scans SpellBot 'Your game is ready!' embeds in SPELLBOT_LFG_CHANNEL_ID
     - Fetches all TopDeck matches for TOPDECK_BRACKET_ID this month
     - Marks each TopDeck match as online/offline using handles + timestamps
-    - Writes a JSON file with per-match data and per-player online-game counts.
+    - Writes results to MongoDB (collection: online_games).
+
+    No automatic hook is registered; this is manual-only.
     """
 
     def __init__(self, bot: commands.Bot):
@@ -510,7 +631,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                 )
 
                 # 4) Build entries for ALL TopDeck matches
-                entries: List[Dict] = []
+                entries: List[Dict[str, Any]] = []
                 online_count = 0
                 for mi in topdeck_matches:
                     key = (mi.season, mi.table)
@@ -530,7 +651,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                         }
                     )
 
-                # 5) Save JSON
+                # 5) Save JSON (merged with existing/timer-written data)
                 payload = {
                     "bracket_id": TOPDECK_BRACKET_ID,
                     "guild_id": guild.id,
@@ -540,7 +661,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                     "matches": entries,
                     "per_player_online": per_player_online,
                 }
-                _save_online_json(payload)
+                await _save_online_stats_to_db(payload)
 
             except Exception as e:
                 print(f"[online-sync] Error during sync: {type(e).__name__}: {e}")
@@ -566,7 +687,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                 f"TopDeck matches this month: **{len(topdeck_matches)}**\n"
                 f"Matched *online* TopDeck games (by players + time): **{online_count}**\n"
                 f"Players with ≥1 online game: **{len(per_player_online)}**\n\n"
-                f"Data saved to `{TOPDECK_ONLINE_JSON}`."
+                "Data saved to MongoDB (collection: online_games)."
             ),
             ephemeral=True,
         )

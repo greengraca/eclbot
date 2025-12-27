@@ -1,0 +1,121 @@
+"""MongoDB (Motor) setup for the ECL bot.
+
+Subscriptions/free-entry data is important and should persist across restarts.
+
+Env vars:
+  - MONGO_URI (or MONGODB_URI)
+  - MONGO_DB_NAME (optional)
+  - IS_DEV=1 (optional)
+"""
+
+from __future__ import annotations
+
+import os
+
+import motor.motor_asyncio
+from pymongo import ASCENDING, IndexModel
+
+
+MONGO_URI = (os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "").strip()
+IS_DEV = os.getenv("IS_DEV", "0") == "1"
+
+_default_name = "eclbot_dev" if IS_DEV else "eclbot"
+DB_NAME = os.getenv("MONGO_DB_NAME", _default_name)
+
+if not MONGO_URI:
+    raise RuntimeError("Missing MONGO_URI/MONGODB_URI env var. Subscriptions require MongoDB.")
+
+_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+
+try:
+    db = _client.get_default_database() or _client[DB_NAME]
+except Exception:
+    db = _client[DB_NAME]
+
+
+# ---------------------------- Collections ---------------------------------
+
+# One document per (guild_id, user_id, month)
+subs_access = db.subs_access
+
+# De-dupe Ko-fi events by transaction id
+subs_kofi_events = db.subs_kofi_events
+
+# One doc per (guild_id, user_id, month)
+subs_free_entries = db.subs_free_entries
+
+# Small job lock collection to avoid duplicate reminder/cleanup runs
+subs_jobs = db.subs_jobs
+
+# One doc per (bracket_id, year, month, season, tid)
+online_games = db.online_games
+
+
+async def ping() -> bool:
+    await _client.admin.command("ping")
+    return True
+
+
+async def ensure_indexes() -> None:
+    await subs_access.create_indexes(
+        [
+            IndexModel(
+                [("guild_id", ASCENDING), ("user_id", ASCENDING), ("month", ASCENDING)],
+                unique=True,
+                name="uniq_guild_user_month",
+            ),
+            IndexModel(
+                [("guild_id", ASCENDING), ("user_id", ASCENDING), ("kind", ASCENDING), ("expires_at", ASCENDING)],
+                name="by_guild_user_kind_expires",
+            )
+        ]
+    )
+
+    await subs_kofi_events.create_indexes(
+        [
+            IndexModel([("txn_id", ASCENDING)], unique=True, name="uniq_kofi_txn"),
+        ]
+    )
+
+    await subs_free_entries.create_indexes(
+        [
+            IndexModel(
+                [("guild_id", ASCENDING), ("user_id", ASCENDING), ("month", ASCENDING)],
+                unique=True,
+                name="uniq_free_guild_user_month",
+            )
+        ]
+    )
+
+    await online_games.create_indexes(
+        [
+            IndexModel(
+                [
+                    ("bracket_id", ASCENDING),
+                    ("year", ASCENDING),
+                    ("month", ASCENDING),
+                    ("season", ASCENDING),
+                    ("tid", ASCENDING),
+                ],
+                unique=True,
+                name="uniq_bracket_month_match",
+            ),
+            IndexModel(
+                [("bracket_id", ASCENDING), ("year", ASCENDING), ("month", ASCENDING)],
+                name="by_bracket_month",
+            ),
+            IndexModel([("entrant_ids", ASCENDING)], name="by_entrant_ids"),
+            IndexModel([("topdeck_uids", ASCENDING)], name="by_topdeck_uids"),
+            IndexModel(
+                [("bracket_id", ASCENDING), ("year", ASCENDING), ("month", ASCENDING), ("online", ASCENDING)],
+                name="by_bracket_month_online",
+            ),
+        ]
+    )
+
+
+    # NOTE:
+    # MongoDB already has a unique _id index on every collection.
+    # Do NOT try to create a "unique" index on _id; Atlas will error.
+    # We keep subs_jobs using _id as the job id without creating extra indexes.
+    return
