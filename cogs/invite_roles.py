@@ -23,6 +23,11 @@ LFG_RR_CHANNEL_ID = int(os.getenv("LFG_RR_CHANNEL_ID", "0"))
 LFG_RR_MESSAGE_ID = int(os.getenv("LFG_RR_MESSAGE_ID", "0"))
 LFG_RR_EMOJI = (os.getenv("LFG_RR_EMOJI", "") or "").strip()
 
+DM_OPTIN_ROLE_ID = int(os.getenv("DM_OPTIN_ROLE_ID", "0"))
+DM_OPTIN_RR_CHANNEL_ID = int(os.getenv("DM_OPTIN_RR_CHANNEL_ID", "0"))
+DM_OPTIN_RR_MESSAGE_ID = int(os.getenv("DM_OPTIN_RR_MESSAGE_ID", "0"))
+DM_OPTIN_RR_EMOJI = (os.getenv("DM_OPTIN_RR_EMOJI", "") or "").strip()
+
 
 def _emoji_matches_config(payload_emoji: discord.PartialEmoji) -> bool:
     """Return True if the event's emoji matches ECL_RR_EMOJI."""
@@ -249,6 +254,31 @@ class InviteRoles(commands.Cog):
                                 f"[invite_roles] ⚠️ Error adding LFGLEAGUE (reaction): {e}"
                             )
                     return
+                
+        # ----- DM OPT-IN block -----
+        if DM_OPTIN_RR_CHANNEL_ID and DM_OPTIN_RR_MESSAGE_ID and DM_OPTIN_RR_EMOJI:
+            if (
+                payload.channel_id == DM_OPTIN_RR_CHANNEL_ID
+                and payload.message_id == DM_OPTIN_RR_MESSAGE_ID
+            ):
+                if _emoji_matches_generic(DM_OPTIN_RR_EMOJI, payload.emoji):
+                    role = guild.get_role(DM_OPTIN_ROLE_ID)
+                    if not role:
+                        print("[invite_roles] ⚠️ DM opt-in role not found for reaction-role.")
+                        return
+
+                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+                    if member and not member.bot:
+                        try:
+                            await member.add_roles(role, reason="Reaction role (DM opt-in)")
+                            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
+                            print(f"[invite_roles] ✅ DM OPT-IN ADDED: {member} via {payload.emoji} • {msg_link}")
+                        except discord.Forbidden:
+                            print("[invite_roles] ⚠️ Missing permission to add DM opt-in role.")
+                        except Exception as e:
+                            print(f"[invite_roles] ⚠️ Error adding DM opt-in role: {e}")
+                    return
+
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):

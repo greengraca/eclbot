@@ -8,71 +8,33 @@ What it does:
   - Supports per-user free-entry for a given month (e.g., Top16 cut) stored in Mongo
   - Sends DM reminders (3 days before month end and on the last day)
   - Removes ECL role on the last day of the month for members not eligible for next month
-
-Ko-fi note:
-Ko-fi webhooks only fire on payments (not on cancellation). So we treat each
-payment as a 30-day pass (duration-based).
-
-Deployment (Heroku worker dyno):
-We follow your existing pattern: a Cloudflare/Zapier/etc. forwards the Ko-fi
-payload into a Discord channel using a Discord webhook. The bot listens to that
-channel and processes JSON payloads.
 """
 
 import asyncio
 import contextlib
 import json
-import os
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Set, Tuple, List
+from typing import Any, Dict, Optional, Set, Tuple  # (drop Dict too if you switch to dict)
 
 import discord
 from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
-from zoneinfo import ZoneInfo
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events
 
-
-# -------------------- safe env helpers --------------------
-
-def _env_int(name: str, default: int = 0) -> int:
-    raw = (os.getenv(name) or "").strip()
-    try:
-        return int(raw)
-    except Exception:
-        return default
+from utils.settings import (
+    SUBS,
+    LISBON_TZ,
+    TOPDECK_BRACKET_ID,
+    NEXT_MONTH_TOPDECK_BRACKET_ID,
+    FIREBASE_ID_TOKEN,
+)
 
 
-def _env_float(name: str, default: float = 0.0) -> float:
-    raw = (os.getenv(name) or "").strip()
-    try:
-        return float(raw)
-    except Exception:
-        return default
-
-
-def _parse_int_set(csv: str) -> Set[int]:
-    out: Set[int] = set()
-    for part in re.split(r"[\s,]+", (csv or "").strip()):
-        if not part:
-            continue
-        if part.isdigit():
-            out.add(int(part))
-    return out
-
-
-# -------------------- constants --------------------
-
-GUILD_ID = _env_int("GUILD_ID", 0)
-LISBON_TZ = ZoneInfo("Europe/Lisbon")
-# Safety gate: prevents accidental mass removals in production.
-# Override with SUBS_ENFORCEMENT_START (ISO datetime or YYYY-MM-DD).
-DEFAULT_SUBS_ENFORCEMENT_START = datetime(2026, 1, 1, 0, 0, 0, tzinfo=LISBON_TZ)
+GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 
 
 # -------------------- date helpers --------------------
@@ -178,115 +140,6 @@ def extract_json_from_message_content(content: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-# -------------------- config --------------------
-
-@dataclass(frozen=True)
-class SubsConfig:
-    guild_id: int
-    ecl_role_id: int
-    patreon_role_ids: Set[int]
-    kofi_role_ids: Set[int]  # Ko-fi membership roles granted by Ko-fi Discord bot
-    free_entry_role_ids: Set[int]
-    kofi_inbox_channel_id: int
-    kofi_verify_token: str
-    entitlement_cutoff_day: int
-    kofi_one_time_days: int  # one-time Ko-fi pass duration in days
-    enforcement_start: datetime  # when role removals/audits are allowed to start (Lisbon TZ)
-    dm_enabled: bool
-    dm_concurrency: int
-    dm_sleep_seconds: float
-    log_channel_id: int
-    ecl_mod_role_id: int
-
-    top16_role_id: int
-    top16_min_online_games: int
-    top16_min_total_games: int
-
-    topcut_close_pts: int  # points margin for 'very close' Top16 prize reminder
-
-    # Marketing / links
-    kofi_url: str
-    patreon_url: str
-
-    # Cosmetics
-    embed_thumbnail_url: str
-    embed_color: int
-
-def load_config() -> SubsConfig:
-    guild_id = _env_int("GUILD_ID", 0)
-    ecl_role_id = _env_int("ECL_ROLE", 0)
-    ecl_mod_role_id = _env_int("ECL_MOD_ROLE_ID", 0)
-
-    patreon_role_ids = _parse_int_set(os.getenv("PATREON_ROLE_IDS", ""))
-    kofi_role_ids = _parse_int_set(os.getenv("KOFI_ROLE_IDS", ""))
-    free_entry_role_ids = _parse_int_set(os.getenv("FREE_ENTRY_ROLE_IDS", ""))
-
-    kofi_inbox_channel_id = _env_int("KOFI_INBOX_CHANNEL_ID", 0)
-    kofi_verify_token = (os.getenv("KOFI_VERIFY_TOKEN") or "").strip()
-
-    cutoff_day = _env_int("SUBS_CUTOFF_DAY", 23)
-    kofi_one_time_days = max(1, _env_int("KOFI_ONE_TIME_DAYS", 30))
-
-    # Safety gate: do not revoke ECL / run audits before this datetime.
-    enforcement_raw = (os.getenv("SUBS_ENFORCEMENT_START") or "").strip()
-    enforcement_start = DEFAULT_SUBS_ENFORCEMENT_START
-    if enforcement_raw:
-        try:
-            enforcement_start = datetime.fromisoformat(enforcement_raw)
-        except Exception:
-            try:
-                y, m, d = enforcement_raw.split("-")
-                enforcement_start = datetime(int(y), int(m), int(d), 0, 0, 0)
-            except Exception:
-                enforcement_start = DEFAULT_SUBS_ENFORCEMENT_START
-    if enforcement_start.tzinfo is None:
-        enforcement_start = enforcement_start.replace(tzinfo=LISBON_TZ)
-    enforcement_start = enforcement_start.astimezone(LISBON_TZ)
-    dm_enabled = (os.getenv("SUBS_DM_ENABLED") or "1").strip() == "1"
-    dm_concurrency = max(1, _env_int("SUBS_DM_CONCURRENCY", 5))
-    dm_sleep_seconds = max(0.0, _env_float("SUBS_DM_SLEEP_SECONDS", 0.8))
-    log_channel_id = _env_int("SUBS_LOG_CHANNEL_ID", 0)
-
-    # Links for the DM buttons (must be real https URLs)
-    kofi_url = (os.getenv("SUBS_KOFI_URL") or "").strip()
-    patreon_url = (os.getenv("SUBS_PATREON_URL") or "").strip()
-
-    # Cosmetics
-    embed_thumbnail_url = (os.getenv("LFG_EMBED_ICON_URL") or "").strip()
-    embed_color = _env_int("SUBS_EMBED_COLOR", 0x2ECC71)
-
-    top16_role_id = _env_int("TOP16_ROLE_ID", 0)
-    top16_min_online_games = _env_int("TOP16_MIN_ONLINE_GAMES", 10)
-    top16_min_total_games = _env_int("TOP16_MIN_TOTAL_GAMES", 10)
-    topcut_close_pts = _env_int("TOPCUT_CLOSE_PTS", 250)
-
-    return SubsConfig(
-        guild_id=guild_id,
-        ecl_role_id=ecl_role_id,
-        patreon_role_ids=patreon_role_ids,
-        kofi_role_ids=kofi_role_ids,
-        free_entry_role_ids=free_entry_role_ids,
-        kofi_inbox_channel_id=kofi_inbox_channel_id,
-        kofi_verify_token=kofi_verify_token,
-        entitlement_cutoff_day=cutoff_day,
-        kofi_one_time_days=kofi_one_time_days,
-        enforcement_start=enforcement_start,
-        dm_enabled=dm_enabled,
-        dm_concurrency=dm_concurrency,
-        dm_sleep_seconds=dm_sleep_seconds,
-        log_channel_id=log_channel_id,
-        top16_role_id=top16_role_id,
-        top16_min_online_games=top16_min_online_games,
-        top16_min_total_games=top16_min_total_games,
-        topcut_close_pts=topcut_close_pts,
-        kofi_url=kofi_url,
-        patreon_url=patreon_url,
-        embed_thumbnail_url=embed_thumbnail_url,
-        embed_color=embed_color,
-        ecl_mod_role_id=ecl_mod_role_id,
-    )
-
-
 # -------------------- views --------------------
 
 class SubsLinksView(discord.ui.View):
@@ -319,7 +172,7 @@ class SubsLinksView(discord.ui.View):
 class SubscriptionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.cfg = load_config()
+        self.cfg = SUBS
         self._bootstrapped = False
         self._tick.start()
         self._access_audit.start()
@@ -342,6 +195,14 @@ class SubscriptionsCog(commands.Cog):
             now = now.replace(tzinfo=LISBON_TZ)
         now = now.astimezone(LISBON_TZ)
         return now >= start
+    
+    def _dm_opted_in(self, member: discord.Member) -> bool:
+        """If DM_OPTIN_ROLE_ID is set, only DM members who have that role."""
+        rid = int(getattr(self.cfg, "dm_optin_role_id", 0) or 0)
+        if not rid:
+            return True  # backwards compatible: no opt-in role configured => DM everyone
+        return any(r.id == rid for r in (member.roles or []))
+
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -405,8 +266,6 @@ class SubscriptionsCog(commands.Cog):
                 await asyncio.sleep(cfg.dm_sleep_seconds)
 
         await self._log(f"[subs] mod summary DM sent {sent}/{len(mods)} — {summary}")
-        print(f"[subs] mod summary DM sent {sent}/{len(mods)} — {summary}")
-
 
     async def _count_registered_for_month(self, guild: discord.Guild, mk: str) -> int:
         cfg = self.cfg
@@ -588,8 +447,9 @@ class SubscriptionsCog(commands.Cog):
     def _build_flip_mods_embed(self, guild: discord.Guild, mk: str) -> discord.Embed:
         cfg = self.cfg
 
-        current_bracket = (os.getenv("TOPDECK_BRACKET_ID") or "").strip() or "(not set)"
-        next_bracket = (os.getenv("NEXT_MONTH_TOPDECK_BRACKET_ID") or "").strip() or "(not set)"
+        current_bracket = TOPDECK_BRACKET_ID or "(not set)"
+        next_bracket = NEXT_MONTH_TOPDECK_BRACKET_ID or "(not set)"
+
 
         # Build free-entry role names (mentions render as names)
         role_ids = sorted(int(x) for x in (cfg.free_entry_role_ids or set()) if int(x))
@@ -673,6 +533,31 @@ class SubscriptionsCog(commands.Cog):
         await self._log(f"[subs] mod embed sent {sent}/{len(mods)} — {embed.title}")
 
 
+    # -------------------- Ko-fi inbox reactions --------------------
+            
+    async def _react_kofi(
+        self,
+        message: discord.Message,
+        ok: bool,
+        *,
+        note: str = "",
+    ) -> None:
+        """
+        React on the Ko-fi inbox webhook message so mods can see what happened.
+
+        ok=True  -> ✅
+        ok=False -> ❌
+        note is optional; logs only (keeps inbox clean).
+        """
+        emoji = "✅" if ok else "❌"
+
+        with contextlib.suppress(Exception):
+            await message.add_reaction(emoji)
+
+        if note:
+            await self._log(f"[subs] kofi inbox {emoji} — {note}")
+
+
     # -------------------- Top16 online-games reminder helpers --------------------
 
     async def _top16_unqualified_for_month(
@@ -689,8 +574,9 @@ class SubscriptionsCog(commands.Cog):
         """
         cfg = self.cfg
 
-        bracket_id = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
-        firebase_token = os.getenv("FIREBASE_ID_TOKEN", None)
+        bracket_id = TOPDECK_BRACKET_ID
+        firebase_token = FIREBASE_ID_TOKEN
+
         if not bracket_id:
             return ([], ["TOPDECK_BRACKET_ID not set"])
 
@@ -936,35 +822,38 @@ class SubscriptionsCog(commands.Cog):
 
         payload = extract_json_from_message_content(message.content or "")
         if not payload:
+            await self._react_kofi(message, False, note="no JSON payload / parse failed")
             return
+
 
         # Verify token (optional)
         if cfg.kofi_verify_token:
             token = str(payload.get("verification_token") or "").strip()
             if not token or token != cfg.kofi_verify_token:
-                await self._log("[subs] Ignored Ko-fi payload: bad verification_token")
+                await self._react_kofi(message, False, note="bad verification_token")
                 return
+
 
         txn_id = str(payload.get("kofi_transaction_id") or payload.get("transaction_id") or "").strip()
         if not txn_id:
-            await self._log("[subs] Ignored Ko-fi payload: missing transaction id")
+            await self._react_kofi(message, False, note="missing transaction id")
             return
+
 
         # If Ko-fi Discord bot already grants/removes roles for MEMBERSHIPS,
         # ignore subscription payments here to avoid fighting over roles / double entitlement.
         if bool(payload.get("is_subscription_payment")):
-            await self._log(f"[subs] Ignored Ko-fi subscription payment txn={txn_id} (handled by Ko-fi bot roles).")
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            await self._react_kofi(message, True, note=f"ignored subscription payment txn={txn_id}")
             return
+
+
 
         # We only handle one-time tips (single-month passes)
         user_id = extract_discord_user_id(payload)
         if not user_id:
-            await self._log(f"[subs] Ko-fi txn {txn_id}: could not find Discord user id in payload")
+            await self._react_kofi(message, False, note=f"txn={txn_id} could not extract discord user id")
             return
+
 
         # Optional: enforce minimum one-time amount (EUR 7)
         currency = str(payload.get("currency") or "").upper().strip()
@@ -974,12 +863,10 @@ class SubscriptionsCog(commands.Cog):
             amount = 0.0
 
         if currency == "EUR" and amount < 7.0:
-            await self._log(f"[subs] Ignored Ko-fi one-time payment txn={txn_id}: amount={amount} {currency} (< 7 EUR).")
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            await self._react_kofi(message, False, note=f"txn={txn_id} amount too low: {amount} {currency}")
             return
+
+
 
         # Timestamp parsing
         when = datetime.now(timezone.utc)
@@ -1055,11 +942,10 @@ class SubscriptionsCog(commands.Cog):
                 }
             )
         except DuplicateKeyError:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            await self._react_kofi(message, True, note=f"duplicate txn already processed txn={txn_id}")
             return
+
+
 
         # Store / extend rolling access pass
         await subs_access.update_one(
@@ -1091,11 +977,13 @@ class SubscriptionsCog(commands.Cog):
         # Give ECL now (access is time-based)
         await self._grant_ecl(user_id, reason=f"Ko-fi one-time pass (expires {expires_at_utc.astimezone(LISBON_TZ).strftime('%Y-%m-%d')})")
         await self._log(f"[subs] ✅ Ko-fi one-time processed: user_id={user_id} purchase_month={purchase_mk} expires={expires_at_utc.astimezone(LISBON_TZ).strftime('%Y-%m-%d %H:%M')} txn={txn_id}")
+        await self._react_kofi(
+            message,
+            True,
+            note=f"processed one-time pass txn={txn_id} user_id={user_id} effective_month={effective_mk}",
+        )
 
-        try:
-            await message.delete()
-        except Exception:
-            pass
+
 
     # -------------------- Patreon + role-based free entry --------------------
 
@@ -1107,146 +995,82 @@ class SubscriptionsCog(commands.Cog):
         if after.bot:
             return
 
-        before_ids = {r.id for r in before.roles}
-        after_ids = {r.id for r in after.roles}
+        before_ids = {r.id for r in (before.roles or [])}
+        after_ids = {r.id for r in (after.roles or [])}
 
-        watched = cfg.patreon_role_ids | cfg.kofi_role_ids | cfg.free_entry_role_ids
+        watched = set(cfg.patreon_role_ids or set()) | set(cfg.kofi_role_ids or set()) | set(cfg.free_entry_role_ids or set())
         if not watched:
             return
 
-        if before_ids.intersection(watched) == after_ids.intersection(watched):
+        # Only react if watched roles actually changed
+        before_watch = before_ids.intersection(watched)
+        after_watch = after_ids.intersection(watched)
+        if before_watch == after_watch:
             return
+
+        added = sorted(after_watch - before_watch)
+        removed = sorted(before_watch - after_watch)
+
+        def _label_role(rid: int) -> str:
+            r = after.guild.get_role(int(rid))
+            if r:
+                return f"{r.name}({rid})"
+            return f"(missing:{rid})"
+
+        added_lbl = ", ".join(_label_role(r) for r in added) if added else "-"
+        removed_lbl = ", ".join(_label_role(r) for r in removed) if removed else "-"
 
         now_lisbon = datetime.now(LISBON_TZ)
         mk = month_key(now_lisbon)
-        ok, _ = await self._eligibility(after, mk, at=now_lisbon)
 
-        if ok:
-            await self._grant_ecl(after.id, reason="Eligibility role gained")
-        else:
-            # Safety: don't revoke before enforcement start (pre-season).
-            if self._enforcement_active(now_lisbon):
-                await self._revoke_ecl_member(after, reason="Eligibility role lost", dm=True)
-            else:
-                await self._log(f"[subs] (pre-enforcement) would revoke ECL for user_id={after.id} (role lost)")
+        # ---- eligibility snapshot (so logs are unambiguous) ----
+        has_patreon = self._has_any_role_id(after, cfg.patreon_role_ids)
+        has_kofi_role = self._has_any_role_id(after, cfg.kofi_role_ids)
+        has_free_role = self._has_any_role_id(after, cfg.free_entry_role_ids)
+        has_free_list = await self._has_free_entry(after.id, mk)
+        has_db_access = await self._has_db_access(after.id, mk, at=now_lisbon)
 
-    # -------------------- Admin commands --------------------
-    
-    @commands.slash_command(
-        name="subtesttop16reminder",
-        description="DM yourself a preview of ALL Top16-online reminder embeds that would be sent (choose 5/3/1 days).",
-        guild_ids=[GUILD_ID] if GUILD_ID else None,
-    )
-    async def subtesttop16reminder(
-        self,
-        ctx: discord.ApplicationContext,
-        days: int = 5,               # 5 | 3 | 1  (1 = last day)
-        mk: Optional[str] = None,    # YYYY-MM (defaults to current month)
-    ):
-        if not ctx.user.guild_permissions.manage_roles:
-            await ctx.respond("You need **Manage Roles**.", ephemeral=True)
-            return
-        if ctx.guild is None:
-            await ctx.respond("This command can only be used in a server.", ephemeral=True)
-            return
+        ok = any([has_patreon, has_kofi_role, has_free_role, has_free_list, has_db_access])
 
-        try:
-            days = int(days)
-        except Exception:
-            days = 5
-        if days not in (5, 3, 1):
-            days = 5
-
-        kind = "5d" if days == 5 else ("3d" if days == 3 else "last")
-
-        mk = (mk or month_key(datetime.now(LISBON_TZ))).strip()
-        if not re.match(r"^20\d{2}-(0[1-9]|1[0-2])$", mk):
-            await ctx.respond("mk must be **YYYY-MM**.", ephemeral=True)
-            return
-
-        # compute targets
-        try:
-            entries, misses = await self._top16_unqualified_for_month(ctx.guild, mk=mk)
-        except Exception as e:
-            await ctx.respond(f"Failed to compute targets: {type(e).__name__}: {e}", ephemeral=True)
-            return
-
-        if misses:
-            print(f"[subs] Top16-online TEST mapping misses ({mk} {kind}): {misses[:20]}")
-            await self._log(f"[subs] Top16-online TEST mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
-
-        if not entries:
-            print(f"[subs] Top16-online TEST ({mk} {kind}): 0 targets")
-            await self._log(f"[subs] Top16-online TEST ({mk} {kind}): 0 targets")
-            await ctx.respond(f"✅ No targets for mk={mk}, days={days}.", ephemeral=True)
-            return
-
-        # build embeds for ALL targets (so preview matches real sends)
-        embeds: list[discord.Embed] = []
-        recipient_lines: list[str] = []
-
-        need_total = int(self.cfg.top16_min_online_games)
-
-        for e in entries:
-            try:
-                did = int(e["discord_id"])
-                rank = int(e["rank"])
-                og = int(e["online_games"])
-            except Exception:
-                continue
-
-            row = e.get("row")
-            name = str(getattr(row, "name", "") or "Player")
-
-            # Try to resolve member for nicer logging + mention
-            member = None
-            try:
-                member = ctx.guild.get_member(did) or await ctx.guild.fetch_member(did)
-            except Exception:
-                member = None
-
-            mention = member.mention if member else f"<@{did}>"
-            recip_label = f"{mention} ({member.display_name})" if member else mention
-            recipient_lines.append(f"#{rank:02d} {name} -> {recip_label} | online={og}/{need_total}")
-
-            emb = await self._build_top16_online_reminder_embed(
-                kind=kind,
-                mk=mk,
-                rank=rank,
-                name=name,
-                online_games=og,
-                need_total=need_total,
-                mention=mention,  # ✅ "Hey @discordname" in the embed (preview + real)
-            )
-            embeds.append(emb)
-
-        # log/print recipients
-        print(f"[subs] Top16-online TEST ({mk} {kind}) targets={len(embeds)}:\n  " + "\n  ".join(recipient_lines))
-        await self._log(f"[subs] Top16-online TEST ({mk} {kind}) targets={len(embeds)}:\n" + "\n".join(recipient_lines))
-
-        # DM yourself previews (batch up to 10 embeds per message due to Discord limits)
-        try:
-            chunk_size = 10
-            for i in range(0, len(embeds), chunk_size):
-                await ctx.user.send(embeds=embeds[i : i + chunk_size])
-        except Exception:
-            await ctx.respond("❌ Couldn’t DM you (privacy settings).", ephemeral=True)
-            return
-
-        # ephemeral summary
-        preview_text = "\n".join(recipient_lines[:30])
-        if len(recipient_lines) > 30:
-            preview_text += f"\n... (+{len(recipient_lines) - 30} more)"
-
-        await ctx.respond(
-            f"✅ Sent you **{len(embeds)}** preview embed(s).\n"
-            f"- mk: `{mk}`\n"
-            f"- days: `{days}` (kind=`{kind}`)\n\n"
-            f"```{preview_text}```",
-            ephemeral=True,
+        sources = (
+            f"patreon={int(has_patreon)} "
+            f"kofi_role={int(has_kofi_role)} "
+            f"free_role={int(has_free_role)} "
+            f"free_list={int(has_free_list)} "
+            f"db_access={int(has_db_access)}"
         )
 
+        # Useful context: do they currently have ECL?
+        ecl_role = after.guild.get_role(cfg.ecl_role_id) if cfg.ecl_role_id else None
+        has_ecl = bool(ecl_role and ecl_role in (after.roles or []))
 
+        await self._log(
+            "[subs] watched roles changed "
+            f"user_id={after.id} mk={mk} "
+            f"added=[{added_lbl}] removed=[{removed_lbl}] "
+            f"has_ecl={int(has_ecl)} sources=({sources})"
+        )
+
+        if ok:
+            await self._grant_ecl(after.id, reason="Eligibility re-check after role change")
+            return
+
+        # Not eligible after the change: only revoke if enforcement is active
+        if self._enforcement_active(now_lisbon):
+            await self._log(
+                "[subs] revoking ECL (eligibility false) "
+                f"user_id={after.id} mk={mk} "
+                f"added=[{added_lbl}] removed=[{removed_lbl}] sources=({sources})"
+            )
+            await self._revoke_ecl_member(after, reason="Eligibility lost", dm=True)
+        else:
+            await self._log(
+                "[subs] (pre-enforcement) would revoke ECL (eligibility false) "
+                f"user_id={after.id} mk={mk} "
+                f"added=[{added_lbl}] removed=[{removed_lbl}] sources=({sources})"
+            )
+
+    # -------------------- Admin commands --------------------
 
     @commands.slash_command(
         name="subfreeadd",
@@ -1416,99 +1240,6 @@ class SubscriptionsCog(commands.Cog):
             return
 
         await ctx.followup.send("✅ Sent you all embed previews (one per DM).", ephemeral=True)
-
-
-    @commands.slash_command(
-        name="subremindnow",
-        description="Run reminder logic now (dry-run by default).",
-        guild_ids=[GUILD_ID] if GUILD_ID else None,
-    )
-    async def subremindnow(
-        self,
-        ctx: discord.ApplicationContext,
-        kind: str = "3d",  # "3d" or "last"
-        target_month: Optional[str] = None,
-        dry_run: bool = True,
-        limit: int = 5,
-    ):
-        if not ctx.user.guild_permissions.manage_roles:
-            await ctx.respond("You need **Manage Roles**.", ephemeral=True)
-            return
-
-        limit = max(1, min(50, int(limit or 5)))
-
-        if target_month is None:
-            now = datetime.now(LISBON_TZ)
-            target_month = add_months(month_key(now), 1)
-        else:
-            if not re.match(r"^20\d{2}-(0[1-9]|1[0-2])$", target_month):
-                await ctx.respond("target_month must be **YYYY-MM**.", ephemeral=True)
-                return
-
-        flip_at = month_bounds(target_month)[0]
-
-        guild = ctx.guild
-        cfg = self.cfg
-        role = guild.get_role(cfg.ecl_role_id) if cfg.ecl_role_id else None
-        if not role:
-            await ctx.respond("❌ ECL role not found / not configured.", ephemeral=True)
-            return
-
-        members = list(role.members)
-        if len(members) < 50:
-            members = [m async for m in guild.fetch_members(limit=None)]
-            members = [m for m in members if role in m.roles]
-
-        flip_at = month_bounds(target_month)[0]
-
-        to_dm: list[discord.Member] = []
-        for m in members:
-            if m.bot:
-                continue
-            ok, _ = await self._eligibility(m, target_month, at=flip_at)
-            if not ok:
-                to_dm.append(m)
-
-        preview = ", ".join([m.mention for m in to_dm[:10]]) or "(none)"
-        await ctx.respond(
-            f"**Reminder `{kind}` for `{target_month}`**\n"
-            f"- not eligible (would DM): **{len(to_dm)}**\n"
-            f"- sample: {preview}\n"
-            f"- dry_run: `{dry_run}`\n"
-            f"- limit: `{limit}`",
-            ephemeral=True,
-        )
-
-        count = await self._count_registered_for_month(guild, target_month)
-        emb = await self._build_reminder_embed(
-            kind=("last" if kind == "last" else "3d"),
-            target_month=target_month,
-            registered_count=count,
-        )
-
-        if dry_run:
-            try:
-                await ctx.user.send(embed=emb, view=self._build_links_view())
-            except Exception:
-                pass
-            return
-
-        sent = 0
-        sem = asyncio.Semaphore(cfg.dm_concurrency)
-
-        async def _send(member: discord.Member):
-            nonlocal sent
-            async with sem:
-                try:
-                    await member.send(embed=emb, view=self._build_links_view())
-                    sent += 1
-                except Exception:
-                    pass
-                if cfg.dm_sleep_seconds:
-                    await asyncio.sleep(cfg.dm_sleep_seconds)
-
-        await asyncio.gather(*[_send(m) for m in to_dm[:limit]])
-        await self._log(f"[subs] subremindnow sent {sent}/{min(limit, len(to_dm))} for {target_month} kind={kind}")
 
     # -------------------- Scheduler --------------------
 
@@ -1753,8 +1484,8 @@ class SubscriptionsCog(commands.Cog):
     ) -> tuple[list[int], list[str]]:
         cfg = self.cfg
 
-        bracket_id = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
-        firebase_token = os.getenv("FIREBASE_ID_TOKEN", None)
+        bracket_id = TOPDECK_BRACKET_ID
+        firebase_token = FIREBASE_ID_TOKEN
         if not bracket_id:
             return ([], ["TOPDECK_BRACKET_ID not set"])
 
@@ -1844,8 +1575,8 @@ class SubscriptionsCog(commands.Cog):
         """Top16 cut (prize eligible): skip ineligible players and promote next eligible."""
         cfg = self.cfg
 
-        bracket_id = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
-        firebase_token = os.getenv("FIREBASE_ID_TOKEN", None)
+        bracket_id = TOPDECK_BRACKET_ID
+        firebase_token = FIREBASE_ID_TOKEN
         if not bracket_id:
             return ([], ["TOPDECK_BRACKET_ID not set"])
 
@@ -1927,8 +1658,9 @@ class SubscriptionsCog(commands.Cog):
         """Targets for 'prize eligibility' reminder."""
         cfg = self.cfg
 
-        bracket_id = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
-        firebase_token = os.getenv("FIREBASE_ID_TOKEN", None)
+        bracket_id = TOPDECK_BRACKET_ID
+        firebase_token = FIREBASE_ID_TOKEN
+
         if not bracket_id:
             return ([], ["TOPDECK_BRACKET_ID not set"], 0)
 
@@ -2129,7 +1861,6 @@ class SubscriptionsCog(commands.Cog):
 
         await asyncio.gather(*[_send_one(e) for e in targets])
         await self._log(f"[subs] ✅ Topcut-prize reminder ({mk} {kind}) sent {sent}/{len(targets)}")
-        print(f"[subs] ✅ Topcut-prize reminder ({mk} {kind}) sent {sent}/{len(targets)}")
         await self._dm_mods_summary(
             guild,
             summary=f"[ECL] Topcut-prize reminder ({mk} {kind}) — sent {sent}/{len(targets)} DMs.",
@@ -2217,6 +1948,9 @@ class SubscriptionsCog(commands.Cog):
     async def _dm_access_removed(self, member: discord.Member) -> None:
         """One-time DM when we remove ECL due to lost eligibility."""
         cfg = self.cfg
+        
+        if not self._dm_opted_in(member):
+            return
 
         now_lisbon = datetime.now(LISBON_TZ)
         if not self._enforcement_active(now_lisbon):
@@ -2295,18 +2029,31 @@ class SubscriptionsCog(commands.Cog):
             members = [m async for m in guild.fetch_members(limit=None)]
             members = [m for m in members if role in m.roles]
 
-        to_dm: list[discord.Member] = []
+        # Build the raw target list (ineligible for target_month)
+        to_dm_all: list[discord.Member] = []
         for m in members:
             if m.bot:
                 continue
             ok, _ = await self._eligibility(m, target_month, at=flip_at)
             if not ok:
-                to_dm.append(m)
+                to_dm_all.append(m)
+
+        # ✅ Opt-in gate: only DM members who opted in (if DM opt-in role is configured)
+        to_dm = [m for m in to_dm_all if self._dm_opted_in(m)]
+        skipped_optout = len(to_dm_all) - len(to_dm)
 
         count = await self._count_registered_for_month(guild, target_month)
-        emb = await self._build_reminder_embed(kind=kind, target_month=target_month, registered_count=count)
+        emb = await self._build_reminder_embed(
+            kind=kind,
+            target_month=target_month,
+            registered_count=count,
+        )
 
-        await self._log(f"[subs] Reminder '{kind}' for {target_month}: {len(to_dm)} users (registered={count})")
+        await self._log(
+            f"[subs] Reminder '{kind}' for {target_month}: "
+            f"ineligible={len(to_dm_all)} opted_in={len(to_dm)} skipped_optout={skipped_optout} "
+            f"(registered={count})"
+        )
 
         sem = asyncio.Semaphore(cfg.dm_concurrency)
         sent = 0
@@ -2325,12 +2072,15 @@ class SubscriptionsCog(commands.Cog):
         await asyncio.gather(*[_send(m) for m in to_dm])
 
         await self._log(f"[subs] ✅ Reminder '{kind}' for {target_month}: sent {sent}/{len(to_dm)}")
-        print(f"[subs] ✅ Reminder '{kind}' for {target_month}: sent {sent}/{len(to_dm)}")
 
         await self._dm_mods_summary(
             guild,
-            summary=f"[ECL] Subscription reminder ({target_month} {kind}) — sent {sent}/{len(to_dm)} DMs.",
+            summary=(
+                f"[ECL] Subscription reminder ({target_month} {kind}) — "
+                f"sent {sent}/{len(to_dm)} DMs (skipped_optout={skipped_optout})."
+            ),
         )
+
 
 
     async def _apply_top16_cut_for_next_month(self, guild: discord.Guild, *, cut_month: str, target_month: str):

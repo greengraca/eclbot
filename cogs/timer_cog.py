@@ -88,6 +88,24 @@ def _norm_handle(s: str) -> str:
     """Normalize a Discord handle for fuzzy matching."""
     return "".join(ch for ch in s.lower() if ch.isalnum()) if s else ""
 
+def _norm_member_handles(m: discord.Member) -> set[str]:
+    out: set[str] = set()
+
+    for cand in (m.name, getattr(m, "display_name", None), getattr(m, "global_name", None)):
+        if isinstance(cand, str):
+            h = _norm_handle(cand)
+            if h:
+                out.add(h)
+
+    discrim = getattr(m, "discriminator", None)
+    if discrim and discrim != "0":
+        h = _norm_handle(f"{m.name}#{discrim}")
+        if h:
+            out.add(h)
+
+    return out
+
+
 
 # ---------------- voice helpers ----------------
 
@@ -513,6 +531,39 @@ class ECLTimerCog(commands.Cog):
         self.timer_messages.pop(timer_id, None)
         self.timer_tasks.pop(timer_id, None)
 
+
+    def _caller_in_vc(self, member: Optional[discord.Member], vc: discord.VoiceChannel) -> bool:
+        if not member or not member.voice or not isinstance(member.voice.channel, discord.VoiceChannel):
+            return False
+        return member.voice.channel.id == vc.id
+
+
+    async def _caller_is_pod_player(
+        self,
+        member: discord.Member,
+        vc: discord.VoiceChannel,
+    ) -> Optional[bool]:
+        """
+        Returns:
+        True  -> verified pod player
+        False -> verified NOT a pod player
+        None  -> couldn't resolve pod (TopDeck mismatch / fetch error)
+        """
+        try:
+            pod = await self._match_vc_to_in_progress_pod(vc, _non_bot_members(vc))
+        except Exception as e:
+            print(f"[timer/topdeck] pod check failed: {type(e).__name__}: {e}")
+            return None
+
+        if not pod:
+            return None
+
+        pod_handles = {h for h in (getattr(pod, "entrant_discords_norm", []) or []) if h}
+        caller_handles = _norm_member_handles(member)
+        return bool(pod_handles.intersection(caller_handles))
+
+
+
     # ---------- TopDeck online tagging helpers ----------
 
     async def _match_vc_to_in_progress_pod(
@@ -527,7 +578,12 @@ class ECLTimerCog(commands.Cog):
         - Allow extra people in VC (judge/spectator)
         - Require good overlap: at least 3 shared names AND >=75% of the pod
         """
-        handles = {_norm_handle(m.name) for m in members if _norm_handle(m.name)}
+        handles: set[str] = set()
+        for m in members:
+            if m.bot:
+                continue
+            handles |= _norm_member_handles(m)
+
         handles_sorted = sorted(handles)
         print(
             f"[timer/topdeck] VC {voice_channel.name} -> "
@@ -1180,13 +1236,46 @@ class ECLTimerCog(commands.Cog):
             await safe_ctx_respond(ctx, f"There's no active timer to pause for **{voice_channel.name}**.", ephemeral=True)
             return
 
-        owner_id = self._timer_owner_id(timer_id)
-        if owner_id is not None and owner_id != ctx.author.id:
-            await safe_ctx_respond(ctx, "Only the person who started the timer for this table can pause it.", ephemeral=True)
+        # owner_id = self._timer_owner_id(timer_id)
+        # if owner_id is not None and owner_id != ctx.author.id:
+        #     await safe_ctx_respond(ctx, "Only the person who started the timer for this table can pause it.", ephemeral=True)
+        #     return
+        
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        if not member:
+            await safe_ctx_respond(ctx, "Only server members can use this.", ephemeral=True)
+            return
+
+        if not self._is_mod_member(member) and not self._caller_in_vc(member, voice_channel):
+            await safe_ctx_respond(
+                ctx,
+                f"You must be in **{voice_channel.name}** to pause that timer.",
+                ephemeral=True,
+            )
             return
 
         # ✅ ACK FAST (prevents 10062)
         await safe_ctx_defer(ctx, ephemeral=False, label="pausetimer")
+        
+        if not self._is_mod_member(member):
+            is_player = await self._caller_is_pod_player(member, voice_channel)
+
+            if is_player is False:
+                await safe_ctx_followup(ctx, "Only players in the current TopDeck pod can pause this timer.", ephemeral=True)
+                return
+
+            if is_player is None:
+                # Fallback: if we can't verify TopDeck pod, only the timer starter can control
+                owner_id = self._timer_owner_id(timer_id)
+                if owner_id is not None and owner_id != member.id:
+                    await safe_ctx_followup(
+                        ctx,
+                        "I couldn't verify the TopDeck pod for this table right now. "
+                        "Only the timer starter (or a mod) can pause it.",
+                        ephemeral=True,
+                    )
+                    return
+
 
         await self._cancel_tasks(timer_id)
 
@@ -1254,13 +1343,47 @@ class ECLTimerCog(commands.Cog):
             await safe_ctx_respond(ctx,f"No paused timer found for **{voice_channel.name}**.", ephemeral=True)
             return
 
-        owner_id = self._timer_owner_id(timer_id)
-        if owner_id is not None and owner_id != ctx.author.id:
-            await safe_ctx_respond(ctx,"Only the person who started the timer for this table can resume it.", ephemeral=True)
+        # owner_id = self._timer_owner_id(timer_id)
+        # if owner_id is not None and owner_id != ctx.author.id:
+        #     await safe_ctx_respond(ctx,"Only the person who started the timer for this table can resume it.", ephemeral=True)
+        #     return
+        
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        if not member:
+            await safe_ctx_respond(ctx, "Only server members can use this.", ephemeral=True)
             return
+
+        if not self._is_mod_member(member) and not self._caller_in_vc(member, voice_channel):
+            await safe_ctx_respond(
+                ctx,
+                f"You must be in **{voice_channel.name}** to resume that timer.",
+                ephemeral=True,
+            )
+            return
+
 
         # ✅ ACK FAST (prevents 10062)
         await safe_ctx_defer(ctx, ephemeral=False, label="resumetimer")
+        
+        if not self._is_mod_member(member):
+            is_player = await self._caller_is_pod_player(member, voice_channel)
+
+            if is_player is False:
+                await safe_ctx_followup(ctx, "Only players in the current TopDeck pod can resume this timer.", ephemeral=True)
+                return
+
+            if is_player is None:
+                # Fallback: if we can't verify TopDeck pod, only the timer starter can control
+                owner_id = self._timer_owner_id(timer_id)
+                if owner_id is not None and owner_id != member.id:
+                    await safe_ctx_followup(
+                        ctx,
+                        "I couldn't verify the TopDeck pod for this table right now. "
+                        "Only the timer starter (or a mod) can resume it.",
+                        ephemeral=True,
+                    )
+                    return
+
 
         paused = self.paused_timers.pop(timer_id)
 

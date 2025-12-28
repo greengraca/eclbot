@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Mapping
 
 import discord
 
@@ -110,6 +110,7 @@ def build_ready_embed(
     *,
     started_at: datetime,
     icon_url: str = "",
+    pts_by_id: Optional[Mapping[int, int]] = None,  # ✅ new
 ) -> discord.Embed:
     started_at = started_at.astimezone(timezone.utc)
     started_ts = ts(started_at)
@@ -122,11 +123,15 @@ def build_ready_embed(
 
     lines: List[str] = []
     for uid in lobby.player_ids:
+        pts_suffix = ""
+        if pts_by_id is not None and int(uid) in pts_by_id:
+            pts_suffix = f" (**{int(pts_by_id[int(uid)])}**)"
+
         member = guild.get_member(uid)
         if member:
-            lines.append(f"{member.mention} ({member.display_name})")
+            lines.append(f"{member.mention} ({member.display_name}){pts_suffix}")
         else:
-            lines.append(f"<@{uid}> (User {uid})")
+            lines.append(f"<@{uid}> (User {uid}){pts_suffix}")
 
     embed.add_field(name="Players", value="\n".join(lines) if lines else "*Unknown players*", inline=False)
     embed.add_field(name="Format", value="Commander", inline=True)

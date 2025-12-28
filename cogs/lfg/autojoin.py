@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 import contextlib
 from typing import Dict, List, Optional
 
@@ -10,20 +10,53 @@ from utils.interactions import safe_ctx_followup
 
 from .models import LFGLobby, now_utc
 
+# ✅ Autojoin is ONLY allowed in this channel (0 = disabled / allow anywhere)
+SPELLBOT_LFG_CHANNEL_ID = int((os.getenv("SPELLBOT_LFG_CHANNEL_ID") or "0").strip() or "0")
 
-def open_lobbies_sorted(cog, guild_id: int, preferred_channel_id: int) -> List[LFGLobby]:
-    """Open (not full) lobbies, preferring the current channel then oldest-first."""
 
+def _autojoin_allowed(ctx: discord.ApplicationContext) -> bool:
+    if SPELLBOT_LFG_CHANNEL_ID <= 0:
+        return True
+    try:
+        return int(getattr(ctx.channel, "id", 0)) == SPELLBOT_LFG_CHANNEL_ID
+    except Exception:
+        return False
+
+
+def open_lobbies_sorted(
+    cog,
+    guild_id: int,
+    preferred_channel_id: int,
+) -> List[LFGLobby]:
+    """Open (not full) lobbies, preferring the current channel then oldest-first.
+
+    If SPELLBOT_LFG_CHANNEL_ID is set, only consider lobbies in that channel.
+    """
     lobbies = list(cog.state.peek_guild_lobbies(guild_id).values())
-    open_lobbies = [
-        lob for lob in lobbies
-        if cog._is_lobby_active(lob) and not lob.is_full()
-    ]
+
+    open_lobbies = []
+    for lob in lobbies:
+        if SPELLBOT_LFG_CHANNEL_ID > 0 and int(lob.channel_id) != int(SPELLBOT_LFG_CHANNEL_ID):
+            continue
+        if cog._is_lobby_active(lob) and not lob.is_full():
+            open_lobbies.append(lob)
 
     def key(lob: LFGLobby):
         return (0 if lob.channel_id == preferred_channel_id else 1, lob.created_at)
 
     return sorted(open_lobbies, key=key)
+
+
+async def _send_ephemeral(ctx: discord.ApplicationContext, content: str) -> None:
+    try:
+        inter = getattr(ctx, "interaction", None)
+        if inter and not inter.response.is_done():
+            await ctx.respond(content, ephemeral=True)
+        else:
+            await ctx.followup.send(content, ephemeral=True)
+    except Exception:
+        pass
+
 
 
 async def can_member_join_elo_lobby(
@@ -181,7 +214,6 @@ async def autojoin_specific_lobby_group(
                 if current is not None and current is lobby:
                     lobby.link = link_created
                     lobby.link_creating = False
-                    lobby.link_creating = False
 
             ready_embed = cog._build_ready_embed(guild, lobby, started_at)
 
@@ -336,7 +368,9 @@ async def autojoin_specific_lobby_from_lfg(
                 if current is not None and current is lobby:
                     lobby.link = link_created
 
-            ready_embed = cog._build_ready_embed(guild, lobby, started_at)
+            # ready_embed = cog._build_ready_embed(guild, lobby, started_at) 
+            ready_embed = await cog._build_ready_embed(guild, lobby, started_at)  # ✅
+
 
             if msg:
                 with contextlib.suppress(Exception):
@@ -399,6 +433,10 @@ async def try_join_existing_for_lfgelo(
     if ctx.guild is None or not isinstance(ctx.author, discord.Member):
         return False
 
+    # ✅ hard gate: no autojoin outside lfg-league
+    if not _autojoin_allowed(ctx):
+        return False
+
     guild_id = ctx.guild.id
     preferred_channel_id = ctx.channel.id
     joiner: discord.Member = ctx.author
@@ -413,10 +451,8 @@ async def try_join_existing_for_lfgelo(
             continue
         if lob.remaining_slots() <= 0:
             continue
-
         if not await can_member_join_elo_lobby(cog, lob, joiner, elo_min_games=int(elo_min_games)):
             continue
-
         if await autojoin_specific_lobby_from_lfg(cog, ctx, lob, []):
             return True
 
@@ -431,6 +467,10 @@ async def try_join_existing_for_lfg(
     elo_min_games: int,
 ) -> bool:
     if ctx.guild is None or not isinstance(ctx.author, discord.Member):
+        return False
+
+    # ✅ hard gate: no autojoin outside lfg-league
+    if not _autojoin_allowed(ctx):
         return False
 
     guild = ctx.guild
@@ -487,15 +527,14 @@ async def try_join_existing_for_lfg(
                 failures.append(f"{m.mention}: {reason}")
 
         if failures:
-            with contextlib.suppress(Exception):
-                await safe_ctx_followup(
-                    ctx,
-                    "Can't join the existing **Elo** lobby with this group:\n"
-                    + "\n".join(f"• {x}" for x in failures)
-                    + "\n\nOpening a **normal** /lfg instead.",
-                    ephemeral=True,
-                )
+            await _send_ephemeral(
+                ctx,
+                "Can't join the existing **Elo** lobby with this group:\n"
+                + "\n".join(f"• {x}" for x in failures)
+                + "\n\nOpening a **normal** /lfg instead.",
+            )
             return False
+
 
         if await autojoin_specific_lobby_group(cog, ctx, lob, join_ids):
             return True

@@ -137,6 +137,7 @@ async def handle_join(
 
     # After room creation succeeds
     ready_embed_for_dm: Optional[discord.Embed] = None
+    ready_lobby_ref = None  # keep a reference to build embed OUTSIDE the lock
     dms_to_send: List[int] = []
     lobby_id_to_clear: Optional[int] = None
     should_check_high_stakes = False
@@ -188,7 +189,6 @@ async def handle_join(
                                     f"This Elo pod currently requires **≥ {int(floor)}** points.\n"
                                     f"Your rating: **{int(user_elo)}**.\n"
                                 )
-
 
                                 if lobby.remaining_slots() == 1 and not cog._is_last_seat_open(lobby):
                                     relaxed_floor = cog._relaxed_last_seat_floor(lobby)
@@ -284,8 +284,8 @@ async def handle_join(
             lobby.link = link_created
             lobby.link_creating = False
 
-            ready_embed = cog._build_ready_embed(guild, lobby, create_room_started_at)
-            ready_embed_for_dm = ready_embed
+            # ✅ DO NOT build the ready embed here (async) — capture ref and do it outside lock
+            ready_lobby_ref = lobby
             dms_to_send = list(lobby.player_ids)
             lobby_id_to_clear = lobby.lobby_id
             should_check_high_stakes = True
@@ -294,13 +294,16 @@ async def handle_join(
             with contextlib.suppress(Exception):
                 view.stop()
 
-    if not link_created or ready_embed_for_dm is None or lobby_id_to_clear is None:
+    if not link_created or ready_lobby_ref is None or lobby_id_to_clear is None:
         await safe_i_send(
             interaction,
             "The lobby filled, but I couldn't create the SpellTable room. Please try /lfg again or ping a mod.",
             ephemeral=True,
         )
         return
+
+    # ✅ Build READY embed (includes pts) OUTSIDE the lock
+    ready_embed_for_dm = await cog._build_ready_embed(guild, ready_lobby_ref, create_room_started_at)
 
     # Edit lobby message to READY + remove buttons
     await safe_i_edit(interaction, embed=ready_embed_for_dm, view=None)
@@ -309,7 +312,7 @@ async def handle_join(
     async with cog.state.lock:
         cog._clear_lobby(guild.id, lobby_id_to_clear)
 
-    # High-stakes announcement
+    # High-stakes announcement (+ logs now in _maybe_announce_high_stakes)
     if should_check_high_stakes and interaction.channel:
         with contextlib.suppress(Exception):
             await cog._maybe_announce_high_stakes(interaction.channel, guild, high_stakes_player_ids)
@@ -321,6 +324,7 @@ async def handle_join(
             continue
         with contextlib.suppress(discord.Forbidden):
             await member.send(embed=ready_embed_for_dm)
+
 
 
 async def handle_leave(

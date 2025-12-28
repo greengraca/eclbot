@@ -368,8 +368,8 @@ class JoinLeagueCog(commands.Cog):
             value="If something looks wrong, open a ticket and an admin will help you.",
             inline=False,
         )
-        if ctx.guild and ctx.guild.icon:
-            emb1.set_thumbnail(url=ctx.guild.icon.url)
+        # if ctx.guild and ctx.guild.icon:
+        #     emb1.set_thumbnail(url=ctx.guild.icon.url)
         emb1.set_footer(text="DragonShield ECL — Join the League")
 
         view_links = JoinLinksView(kofi_url=cfg.kofi_url, patreon_url=cfg.patreon_url)

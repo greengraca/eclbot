@@ -169,22 +169,32 @@ class LFGCog(commands.Cog):
         player_ids: List[int],
     ) -> None:
         try:
+            print(
+                "[lfg] high-stakes check: "
+                f"bracket_set={bool(TOPDECK_BRACKET_ID)} wager_rate={WAGER_RATE} "
+                f"threshold={HIGH_STAKES_THRESHOLD} players={player_ids}"
+            )
+
             if not TOPDECK_BRACKET_ID:
+                print("[lfg] high-stakes: skipped (TOPDECK_BRACKET_ID not set)")
                 return
             if WAGER_RATE <= 0 or HIGH_STAKES_THRESHOLD <= 0:
+                print("[lfg] high-stakes: skipped (feature disabled via envs)")
                 return
             if len(player_ids) != 4:
+                print(f"[lfg] high-stakes: skipped (expected 4 players, got {len(player_ids)})")
                 return
 
             members: List[discord.Member] = []
             for uid in player_ids:
-                m = guild.get_member(uid)
+                m = guild.get_member(int(uid))
                 if m is None:
                     try:
-                        m = await guild.fetch_member(uid)
+                        m = await guild.fetch_member(int(uid))
                     except Exception:
                         m = None
-                if m is None or not isinstance(m, discord.Member):
+                if not isinstance(m, discord.Member):
+                    print(f"[lfg] high-stakes: aborted (could not resolve member id={uid})")
                     return
                 members.append(m)
 
@@ -198,17 +208,25 @@ class LFGCog(commands.Cog):
             for m in members:
                 found = resolve_points_games_from_map(m, handle_to_best)
                 if found is None:
+                    print(f"[lfg] high-stakes: aborted (no TopDeck mapping for {m} / {m.id})")
                     return
                 pts, games = found
                 resolved.append((m, float(pts), int(games)))
 
             stakes = [(m, pts * float(WAGER_RATE)) for (m, pts, _games) in resolved]
-            pot = sum(stake for _m, stake in stakes)
+            pot = float(sum(stake for _m, stake in stakes))
             approx_pot = int(round(pot))
 
+            print(f"[lfg] high-stakes calc: pot≈{approx_pot} threshold={HIGH_STAKES_THRESHOLD}")
+            for m, pts, _games in resolved:
+                stake = pts * float(WAGER_RATE)
+                print(f"[lfg]   player={m.display_name!r} id={m.id} pts={pts:.1f} stake≈{stake:.1f}")
+
             if pot < float(HIGH_STAKES_THRESHOLD):
+                print("[lfg] high-stakes: below threshold -> no announcement")
                 return
 
+            print(f"[lfg] HIGH-STAKES POD DETECTED -> announcing pot≈{approx_pot}")
             await channel.send(
                 f"🚨 **HIGH-STAKES POD DETECTED!** 🚨\n"
                 f"The winner will take home ~**{approx_pot}** points."
@@ -216,6 +234,7 @@ class LFGCog(commands.Cog):
 
         except Exception as e:
             print(f"[lfg] Error in _maybe_announce_high_stakes: {type(e).__name__}: {e}")
+
 
     # ---- Elo updater ----
 
@@ -344,59 +363,54 @@ class LFGCog(commands.Cog):
         return float(pts), int(games)
 
     def _build_lobby_embed(self, guild: discord.Guild, lobby: LFGLobby) -> discord.Embed:
-        """Build the lobby embed (thin wrapper over cogs.lfg.embeds)."""
-
-        elo_info: Optional[EloLobbyInfo] = None
-
-        if lobby.elo_mode and lobby.host_elo is not None:
-            eff_floor = self._effective_elo_floor(lobby)
-            rng = self._current_downward_range(lobby)
-            at_bottom = rng is not None and float(rng) >= float(self._max_downward_range(lobby))
-
-            if eff_floor is not None:
-                last_seat: Optional[LastSeatInfo] = None
-                if lobby.remaining_slots() == 1:
-                    relaxed_floor = self._relaxed_last_seat_floor(lobby)
-                    if relaxed_floor is not None:
-                        if self._is_last_seat_open(lobby):
-                            last_seat = LastSeatInfo(is_open=True, min_rating=int(relaxed_floor), minutes_left=None)
-                        else:
-                            mins_left = int(LFG_ELO_LAST_SEAT_GRACE_MIN)
-                            if lobby.almost_full_at is not None:
-                                elapsed = (now_utc() - lobby.almost_full_at).total_seconds() / 60.0
-                                mins_left = max(0, int(round(LFG_ELO_LAST_SEAT_GRACE_MIN - elapsed)))
-                            last_seat = LastSeatInfo(
-                                is_open=False,
-                                min_rating=int(relaxed_floor),
-                                minutes_left=int(mins_left),
-                            )
-
-                elo_info = EloLobbyInfo(
-                    host_elo=int(lobby.host_elo),
-                    min_rating=int(eff_floor),
-                    at_bottom=bool(at_bottom),
-                    last_seat=last_seat,
-                )
-
         return build_lobby_embed(
             guild,
             lobby,
             updated_at=now_utc(),
             icon_url=LFG_EMBED_ICON_URL,
-            elo_info=elo_info,
-            expand_interval_min=int(LFG_ELO_EXPAND_INTERVAL_MIN),
-            last_seat_grace_min=int(LFG_ELO_LAST_SEAT_GRACE_MIN),
+            #pass elo_info here too later
         )
 
-    def _build_ready_embed(self, guild: discord.Guild, lobby: LFGLobby, started_at: datetime) -> discord.Embed:
-        """Build the ready embed (thin wrapper over cogs.lfg.embeds)."""
+
+
+    async def _build_ready_embed(self, guild: discord.Guild, lobby: LFGLobby, started_at: datetime) -> discord.Embed:
+        pts_by_id: Dict[int, int] = {}
+
+        if TOPDECK_BRACKET_ID:
+            try:
+                handle_to_best, _ = await get_handle_to_best_cached(
+                    TOPDECK_BRACKET_ID,
+                    FIREBASE_ID_TOKEN,
+                    force_refresh=False,
+                )
+
+                for uid in (lobby.player_ids or []):
+                    member = guild.get_member(int(uid))
+                    if member is None:
+                        with contextlib.suppress(Exception):
+                            member = await guild.fetch_member(int(uid))
+
+                    if not isinstance(member, discord.Member):
+                        continue
+
+                    found = resolve_points_games_from_map(member, handle_to_best)
+                    if found is None:
+                        continue
+
+                    pts, _games = found
+                    pts_by_id[int(uid)] = int(round(float(pts)))
+
+            except Exception as e:
+                print(f"[lfg] Error fetching pts for ready embed: {type(e).__name__}: {e}")
 
         return build_ready_embed(
             guild,
             lobby,
             started_at=started_at,
             icon_url=LFG_EMBED_ICON_URL,
+            pts_by_id=pts_by_id or None,
         )
+
 
     async def _handle_open_last_seat(
         self,
@@ -534,7 +548,7 @@ class LFGCog(commands.Cog):
                 return
 
             started_at = now_utc()
-            ready_embed = self._build_ready_embed(ctx.guild, full_lobby, started_at)
+            ready_embed = await self._build_ready_embed(ctx.guild, full_lobby, started_at)
 
             msg = await safe_ctx_followup(ctx, embed=ready_embed)
 

@@ -11,13 +11,13 @@ Centralizes:
 Keep these helpers mostly pure so cogs stay thin.
 """
 
+import re
 import math
 from typing import Dict, List, Optional, Tuple
 
 import discord
 
 from topdeck_fetch import (
-    get_handle_to_best_cached,
     get_league_rows_cached,
     normalize_topdeck_discord,
 )
@@ -239,22 +239,42 @@ def effective_elo_floor(
 
     return base_floor
 
+def _extract_discord_id(text: str) -> Optional[int]:
+    if not text:
+        return None
+    t = text.strip()
+    m = re.search(r"<@!?(\d{15,25})>", t)
+    if m:
+        return int(m.group(1))
+    m2 = re.search(r"\b(\d{15,25})\b", t)
+    if m2:
+        return int(m2.group(1))
+    return None
+
 
 def member_handle_candidates(member: discord.Member) -> List[str]:
-    """Return normalized handle candidates for TopDeck matching."""
-    candidates: List[str] = []
-    raw_names = {
-        getattr(member, "name", None),
-        getattr(member, "global_name", None),
+    """Return normalized handle candidates for TopDeck matching (stable order)."""
+    cands: List[str] = []
+
+    ordered = [
         getattr(member, "display_name", None),
-    }
-    for raw in raw_names:
+        getattr(member, "global_name", None),
+        getattr(member, "name", None),
+    ]
+
+    # add name#discriminator when it exists (older accounts / bots)
+    discrim = getattr(member, "discriminator", None)
+    if discrim and discrim != "0" and getattr(member, "name", None):
+        ordered.append(f"{member.name}#{discrim}")
+
+    for raw in ordered:
         if not raw:
             continue
         h = normalize_topdeck_discord(str(raw))
-        if h and h not in candidates:
-            candidates.append(h)
-    return candidates
+        if h and h not in cands:
+            cands.append(h)
+
+    return cands
 
 
 def resolve_points_games_from_map(
@@ -275,10 +295,17 @@ async def get_member_points_games(
     firebase_id_token: Optional[str],
     force_refresh: bool = False,
 ) -> Optional[Tuple[float, int]]:
+    """
+    Safer resolver:
+      1) match TopDeck row.discord by Discord ID (mention or raw digits) if present
+      2) fallback to handle match, BUT only if it maps to exactly 1 row (unique)
+         (if ambiguous, return None instead of guessing)
+    """
     if not bracket_id:
         return None
+
     try:
-        handle_to_best, _ = await get_handle_to_best_cached(
+        rows, _ = await get_league_rows_cached(
             bracket_id,
             firebase_id_token,
             force_refresh=force_refresh,
@@ -286,4 +313,41 @@ async def get_member_points_games(
     except Exception:
         return None
 
-    return resolve_points_games_from_map(member, handle_to_best)
+    if not rows:
+        return None
+
+    # 1) Strong match: Discord ID
+    target_id = int(member.id)
+    for r in rows:
+        did = _extract_discord_id(getattr(r, "discord", "") or "")
+        if did == target_id:
+            return float(getattr(r, "pts", 0) or 0), int(getattr(r, "games", 0) or 0)
+
+    # 2) Build handle -> (best pts,games) AND handle -> count
+    handle_best: Dict[str, Tuple[float, int]] = {}
+    handle_count: Dict[str, int] = {}
+
+    for r in rows:
+        h = normalize_topdeck_discord(getattr(r, "discord", "") or "")
+        if not h:
+            continue
+
+        handle_count[h] = handle_count.get(h, 0) + 1
+
+        pts = float(getattr(r, "pts", 0) or 0)
+        games = int(getattr(r, "games", 0) or 0)
+
+        prev = handle_best.get(h)
+        if prev is None or pts > prev[0] or (pts == prev[0] and games > prev[1]):
+            handle_best[h] = (pts, games)
+
+    # 3) Only accept UNIQUE handle matches (count == 1)
+    candidates = member_handle_candidates(member)
+    for h in candidates:
+        if handle_count.get(h, 0) == 1 and h in handle_best:
+            pts, games = handle_best[h]
+            return float(pts), int(games)
+
+    # If handle match exists but ambiguous, DO NOT guess
+    # (prevents “both players have 771”)
+    return None
