@@ -363,13 +363,50 @@ class LFGCog(commands.Cog):
         return float(pts), int(games)
 
     def _build_lobby_embed(self, guild: discord.Guild, lobby: LFGLobby) -> discord.Embed:
+        elo_info: Optional[EloLobbyInfo] = None
+
+        if lobby.elo_mode and lobby.host_elo is not None:
+            floor = self._effective_elo_floor(lobby)
+            if floor is not None:
+                rng = float(self._current_downward_range(lobby) or 0.0)
+                at_bottom = rng >= float(self._max_downward_range(lobby))
+
+                last_seat: Optional[LastSeatInfo] = None
+                if lobby.remaining_slots() == 1:
+                    is_open = self._is_last_seat_open(lobby)
+
+                    relaxed_floor = self._relaxed_last_seat_floor(lobby)
+                    last_seat_floor = int(relaxed_floor if relaxed_floor is not None else floor)
+
+                    minutes_left: Optional[int] = None
+                    if (not is_open) and lobby.almost_full_at:
+                        grace_at = lobby.almost_full_at + timedelta(minutes=int(LFG_ELO_LAST_SEAT_GRACE_MIN))
+                        secs_left = (grace_at - now_utc()).total_seconds()
+                        minutes_left = max(0, int((secs_left + 59) // 60))  # ceil to minutes
+
+                    last_seat = LastSeatInfo(
+                        is_open=is_open,
+                        min_rating=last_seat_floor,
+                        minutes_left=minutes_left,
+                    )
+
+                elo_info = EloLobbyInfo(
+                    host_elo=int(lobby.host_elo),
+                    min_rating=int(floor),
+                    at_bottom=bool(at_bottom),
+                    last_seat=last_seat,
+                )
+
         return build_lobby_embed(
             guild,
             lobby,
             updated_at=now_utc(),
             icon_url=LFG_EMBED_ICON_URL,
-            #pass elo_info here too later
+            elo_info=elo_info,
+            expand_interval_min=int(LFG_ELO_EXPAND_INTERVAL_MIN),
+            last_seat_grace_min=int(LFG_ELO_LAST_SEAT_GRACE_MIN),
         )
+
 
 
 
