@@ -1,4 +1,5 @@
-"""MongoDB (Motor) setup for the ECL bot.
+"""
+MongoDB (Motor) setup for the ECL bot.
 
 Subscriptions/free-entry data is important and should persist across restarts.
 
@@ -13,7 +14,7 @@ from __future__ import annotations
 import os
 
 import motor.motor_asyncio
-from pymongo import ASCENDING, IndexModel
+from pymongo import ASCENDING, DESCENDING, IndexModel
 
 
 MONGO_URI = (os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "").strip()
@@ -50,6 +51,11 @@ subs_jobs = db.subs_jobs
 # One doc per (bracket_id, year, month, season, tid)
 online_games = db.online_games
 
+# TopDeck exports / dumps
+topdeck_pods = db["topdeck_pods"]
+topdeck_month_dump_runs = db["topdeck_month_dump_runs"]
+topdeck_month_dump_chunks = db["topdeck_month_dump_chunks"]
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
@@ -67,7 +73,7 @@ async def ensure_indexes() -> None:
             IndexModel(
                 [("guild_id", ASCENDING), ("user_id", ASCENDING), ("kind", ASCENDING), ("expires_at", ASCENDING)],
                 name="by_guild_user_kind_expires",
-            )
+            ),
         ]
     )
 
@@ -113,6 +119,64 @@ async def ensure_indexes() -> None:
         ]
     )
 
+    # ---- TopDeck exports ----
+
+    await topdeck_pods.create_indexes(
+        [
+            IndexModel(
+                [("bracket_id", ASCENDING), ("month", ASCENDING)],
+                name="by_bracket_month",
+            ),
+            IndexModel(
+                [("bracket_id", ASCENDING), ("season", ASCENDING), ("pod_id", ASCENDING)],
+                name="by_bracket_season_pod",
+            ),
+            IndexModel(
+                [("bracket_id", ASCENDING), ("pod_id", ASCENDING)],
+                name="by_bracket_pod",
+            ),
+            IndexModel(
+                [("month", ASCENDING)],
+                name="by_month",
+            ),
+            # multikey (array of entrants objects)
+            IndexModel(
+                [("entrants.uid", ASCENDING)],
+                name="by_entrants_uid",
+            ),
+        ]
+    )
+
+    await topdeck_month_dump_runs.create_indexes(
+        [
+            IndexModel(
+                [("bracket_id", ASCENDING), ("month", ASCENDING), ("created_at", DESCENDING)],
+                name="by_bracket_month_created_desc",
+            ),
+            # optional but recommended: prevent accidental duplicate run_id for same bracket/month
+            IndexModel(
+                [("bracket_id", ASCENDING), ("month", ASCENDING), ("run_id", ASCENDING)],
+                unique=True,
+                name="uniq_bracket_month_run_id",
+            ),
+        ]
+    )
+
+    await topdeck_month_dump_chunks.create_indexes(
+        [
+            IndexModel([("run_doc_id", ASCENDING)], name="by_run_doc_id"),
+            IndexModel(
+                [("bracket_id", ASCENDING), ("month", ASCENDING), ("run_id", ASCENDING)],
+                name="by_bracket_month_run",
+            ),
+            # recommended: stable ordering + de-dupe safety for chunk assembly
+            IndexModel(
+                [("run_doc_id", ASCENDING), ("chunk_index", ASCENDING)],
+                unique=True,
+                name="uniq_run_doc_chunk_index",
+            ),
+        ]
+    )
 
     # NOTE:
     # MongoDB already has a unique _id index on every collection.

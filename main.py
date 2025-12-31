@@ -34,6 +34,7 @@ INITIAL_EXTENSIONS = [
     "cogs.topdeck_online_sync",
     "cogs.lfg_cog",
     "cogs.join_league_cog",
+    "cogs.topdeck_month_dump",
 ]
 
 _MONGO_BOOTSTRAPPED = False

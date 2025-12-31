@@ -21,9 +21,12 @@ import discord
 from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
 
-from topdeck_fetch import get_league_rows_cached, PlayerRow
+from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events
+from .topdeck_month_dump import dump_topdeck_month_to_mongo
+
+
 
 from utils.settings import (
     SUBS,
@@ -38,6 +41,13 @@ GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 
 
 # -------------------- date helpers --------------------
+
+def league_close_at(mk: str) -> datetime:
+    """League closes at 19:00 Lisbon time on the last day of mk (YYYY-MM)."""
+    _, end = month_bounds(mk)  # end is first day of next month @ 00:00 Lisbon
+    last_day = (end - timedelta(days=1)).astimezone(LISBON_TZ)
+    return datetime(last_day.year, last_day.month, last_day.day, 19, 0, 0, tzinfo=LISBON_TZ)
+
 
 def month_key(dt: datetime) -> str:
     return f"{dt.year:04d}-{dt.month:02d}"
@@ -148,6 +158,7 @@ class SubsLinksView(discord.ui.View):
         self.kofi_url = (kofi_url or "").strip()
         self.patreon_url = (patreon_url or "").strip()
 
+
     @staticmethod
     def _ok(url: str) -> bool:
         return url.startswith("http://") or url.startswith("https://")
@@ -180,6 +191,13 @@ class SubscriptionsCog(commands.Cog):
         # small locks to avoid overlap
         self._top16_reminder_lock = asyncio.Lock()
         self._access_audit_lock = asyncio.Lock()
+        self._topdeck_dump_lock = asyncio.Lock()
+        self._month_close_lock = asyncio.Lock()
+
+        # log throttles (avoid spamming every 5 mins)
+        self._warned_missing_inprogress_checker = False
+        self._warned_revoke_delayed_for: set[str] = set()
+
 
     def cog_unload(self):
         self._tick.cancel()
@@ -709,6 +727,39 @@ class SubscriptionsCog(commands.Cog):
             emb.set_thumbnail(url=cfg.embed_thumbnail_url)
 
         return emb
+    
+    async def _run_topdeck_month_dump_flip_job(self, guild: discord.Guild, *, month_str: str) -> None:
+        job_id = f"topdeckdumpmonth:auto:{guild.id}:{month_str}"
+        if await subs_jobs.find_one({"_id": job_id}):
+            return
+        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+
+        async with self._topdeck_dump_lock:
+            try:
+                meta = await dump_topdeck_month_to_mongo(
+                    guild_id=guild.id,
+                    month_str=month_str,
+                    bracket_id=TOPDECK_BRACKET_ID,
+                    firebase_id_token=FIREBASE_ID_TOKEN,
+                )
+                await self._log(
+                    f"[subs] ✅ TopDeck month dump stored: month={month_str} "
+                    f"run_id={meta['run_id']} chunks={meta['chunks']} sha256={meta['sha256'][:12]}…"
+                )
+                await self._dm_mods_summary(
+                    guild,
+                    summary=(
+                        f"[ECL] TopDeck month dump stored: {month_str} "
+                        f"(run_id={meta['run_id']}, chunks={meta['chunks']})"
+                    ),
+                )
+            except Exception as e:
+                await self._log(f"[subs] ❌ TopDeck month dump FAILED for {month_str}: {type(e).__name__}: {e}")
+                await self._dm_mods_summary(
+                    guild,
+                    summary=f"[ECL] TopDeck month dump FAILED for {month_str}: {type(e).__name__}: {e}",
+                )
+
 
     async def _run_top16_online_reminder_job(self, guild: discord.Guild, *, mk: str, kind: str) -> None:
         """
@@ -1242,6 +1293,162 @@ class SubscriptionsCog(commands.Cog):
         await ctx.followup.send("✅ Sent you all embed previews (one per DM).", ephemeral=True)
 
     # -------------------- Scheduler --------------------
+    
+    def _month_close_pending_job_id(self, guild_id: int, cut_month: str) -> str:
+        return f"month-close-pending:{guild_id}:{cut_month}"
+
+    def _month_close_done_job_id(self, guild_id: int, cut_month: str) -> str:
+        return f"month-close:{guild_id}:{cut_month}"
+
+    async def _in_progress_games_count(self) -> Optional[int]:
+        """
+        Returns:
+        - int >= 0 when we can determine the in-progress count
+        - None when unknown (fail-safe => do NOT run 7pm close logic)
+        """
+        if not TOPDECK_BRACKET_ID:
+            await self._log("[subs] ⚠️ TOPDECK_BRACKET_ID not set; month-close will NOT run (fail-safe).")
+            return None
+
+        try:
+            pods = await get_in_progress_pods(
+                TOPDECK_BRACKET_ID,
+                firebase_id_token=FIREBASE_ID_TOKEN,
+            )
+            return len(pods)
+        except Exception as e:
+            await self._log(
+                f"[subs] ⚠️ in-progress check failed: {type(e).__name__}: {e} "
+                "(fail-safe, month-close paused)"
+            )
+            return None
+
+    async def _ensure_month_close_pending(self, guild: discord.Guild, *, cut_month: str) -> None:
+        """Create the pending marker once the close window begins (idempotent)."""
+        pid = self._month_close_pending_job_id(guild.id, cut_month)
+        if await subs_jobs.find_one({"_id": pid}):
+            return
+        await subs_jobs.insert_one({"_id": pid, "ran_at": datetime.now(timezone.utc)})
+
+    async def _run_month_close_logic(self, guild: discord.Guild, *, cut_month: str) -> None:
+        """
+        The 7pm close logic (may run later if games are still in progress).
+        """
+        target_month = add_months(cut_month, 1)
+
+        # 1) Apply Top16 cut => free entry next month + Top16 role
+        await self._apply_top16_cut_for_next_month(
+            guild,
+            cut_month=cut_month,
+            target_month=target_month,
+        )
+
+        # 2) Mods checklist for the NEXT month
+        await self._run_flip_mods_reminder_job(guild, mk=target_month)
+
+        # 3) Free-role info DMs for the NEXT month
+        await self._run_free_role_flip_info_job(guild, mk=target_month)
+
+        # 4) Dump the CLOSED month (cut_month) to Mongo
+        await self._run_topdeck_month_dump_flip_job(guild, month_str=cut_month)
+
+    async def _maybe_run_month_close_job(self, guild: discord.Guild, *, cut_month: str) -> None:
+        """
+        If pending exists and not done, run when in-progress games == 0.
+        """
+        done_id = self._month_close_done_job_id(guild.id, cut_month)
+        if await subs_jobs.find_one({"_id": done_id}):
+            return
+
+        pending_id = self._month_close_pending_job_id(guild.id, cut_month)
+        pending = await subs_jobs.find_one({"_id": pending_id})
+        if not pending:
+            return  # not scheduled / not started
+
+        # gate on in-progress games
+        n = await self._in_progress_games_count()
+        if n is None:
+            return  # fail-safe: unknown => don't run
+        if n > 0:
+            await self._log(f"[subs] month-close pending ({cut_month}) blocked: {n} game(s) still in progress")
+            return
+
+        async with self._month_close_lock:
+            # re-check inside lock
+            if await subs_jobs.find_one({"_id": done_id}):
+                return
+
+            try:
+                await self._log(f"[subs] ✅ month-close starting for {cut_month} (in-progress=0)")
+                await self._run_month_close_logic(guild, cut_month=cut_month)
+            except Exception as e:
+                await self._log(f"[subs] ❌ month-close FAILED for {cut_month}: {type(e).__name__}: {e}")
+                return
+
+            await subs_jobs.insert_one({"_id": done_id, "ran_at": datetime.now(timezone.utc)})
+            await self._log(f"[subs] ✅ month-close done for {cut_month}")
+
+    async def _run_monthly_midnight_revoke_job(self, guild: discord.Guild, *, target_month: str) -> None:
+        """
+        Remove ECL for members not eligible for target_month (new month).
+        Idempotent per month.
+        """
+        cfg = self.cfg
+        job_id = f"monthly-revoke:{guild.id}:{target_month}"
+        if await subs_jobs.find_one({"_id": job_id}):
+            return
+
+        # If month-close for previous month is pending but not done, delay revoke to avoid
+        # wrongly removing Top16 winners before their free-entry is written.
+        prev_month = add_months(target_month, -1)
+        prev_pending = await subs_jobs.find_one({"_id": self._month_close_pending_job_id(guild.id, prev_month)})
+        prev_done = await subs_jobs.find_one({"_id": self._month_close_done_job_id(guild.id, prev_month)})
+        if prev_pending and not prev_done:
+            if target_month not in self._warned_revoke_delayed_for:
+                self._warned_revoke_delayed_for.add(target_month)
+                await self._log(f"[subs] monthly revoke delayed for {target_month}: month-close still pending for {prev_month}")
+            return
+
+        if not self._enforcement_active(datetime.now(LISBON_TZ)):
+            await self._log("[subs] monthly revoke skipped: enforcement not active yet")
+            return
+
+        if not cfg.ecl_role_id:
+            return
+        role = guild.get_role(cfg.ecl_role_id)
+        if not role:
+            return
+
+        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+
+        flip_at = month_bounds(target_month)[0]  # start of target_month @ 00:00 Lisbon
+
+        members = list(role.members)
+        if len(members) < 50:
+            try:
+                members = [m async for m in guild.fetch_members(limit=None)]
+                members = [m for m in members if role in m.roles]
+            except Exception:
+                members = list(role.members)
+
+        removed = 0
+        checked = 0
+
+        for m in members:
+            if m.bot:
+                continue
+            checked += 1
+            ok, _ = await self._eligibility(m, target_month, at=flip_at)
+            if ok:
+                continue
+            did = await self._revoke_ecl_member(m, reason=f"Monthly reset: not eligible for {target_month}", dm=True)
+            if did:
+                removed += 1
+            if cfg.dm_sleep_seconds:
+                await asyncio.sleep(cfg.dm_sleep_seconds)
+
+        await self._log(f"[subs] monthly revoke {target_month}: checked={checked} removed={removed}")
+
 
     @tasks.loop(minutes=5)
     async def _tick(self):
@@ -1268,13 +1475,42 @@ class SubscriptionsCog(commands.Cog):
                 await self._run_reminder_job(guild, target_month, kind="last")
 
         # Run the month flip cleanup shortly AFTER midnight on the 1st (avoid early removals).
-        if now.day == 1 and now.hour < 6 and now.minute < 5:
-            await self._run_flip_mods_reminder_job(guild, mk=month_key(now))
-            await self._run_free_role_flip_info_job(guild, mk=month_key(now))
-            if self._enforcement_active(now):
-                await self._run_cleanup_job(guild, month_key(now))
-            else:
-                await self._log("[subs] cleanup skipped: enforcement not active yet")
+        # if now.day == 1 and now.hour < 6 and now.minute < 5:
+        #     await self._run_flip_mods_reminder_job(guild, mk=month_key(now))
+        #     await self._run_free_role_flip_info_job(guild, mk=month_key(now))
+        #     ended_mk = add_months(month_key(now), -1)  # dump the month that just ended
+        #     await self._run_topdeck_month_dump_flip_job(guild, month_str=ended_mk)
+
+        #     if self._enforcement_active(now):
+        #         await self._run_cleanup_job(guild, month_key(now))
+        #     else:
+        #         await self._log("[subs] cleanup skipped: enforcement not active yet")
+        
+        # Monthly reset: ONLY remove ECL for ineligible users (new month).
+        # We attempt hourly on day 1 (:00-:04 window), and it self-delays if month-close is still pending.
+        if now.day == 1 and now.minute < 5:
+            await self._run_monthly_midnight_revoke_job(guild, target_month=month_key(now))
+            
+        # -------------------- 19:00 month close logic (last day) --------------------
+        # Close current month at 19:00 Lisbon, but ONLY when no games are in progress.
+        # If games exist, keep retrying every 5 mins until 0, then run once.
+
+        now_mk = month_key(now)
+        close_at = league_close_at(now_mk)
+
+        # When we reach/past close time on the last day, mark pending and try to run.
+        if now >= close_at:
+            # only create pending for the current month once the close window begins
+            await self._ensure_month_close_pending(guild, cut_month=now_mk)
+            await self._maybe_run_month_close_job(guild, cut_month=now_mk)
+
+        # Also: if we crossed into the new month but last month close is still pending,
+        # keep trying to finish it (e.g., games ran long).
+        prev_mk = add_months(now_mk, -1)
+        if await subs_jobs.find_one({"_id": self._month_close_pending_job_id(guild.id, prev_mk)}):
+            await self._maybe_run_month_close_job(guild, cut_month=prev_mk)
+
+
 
         # --- Top16 online-games reminders for CURRENT month ---
         # We DM players who are currently in TopDeck Top16 but don't meet online-games requirement.
@@ -1636,7 +1872,8 @@ class SubscriptionsCog(commands.Cog):
             if not member or member.bot:
                 continue
 
-            ok, _ = await self._eligibility(member, cut_month, at=month_end_inclusive(cut_month))
+            ok, _ = await self._eligibility(member, cut_month, at=league_close_at(cut_month))
+
             if not ok:
                 continue
 
@@ -1724,7 +1961,7 @@ class SubscriptionsCog(commands.Cog):
             if not member or member.bot:
                 continue
 
-            ok, _ = await self._eligibility(member, mk, at=month_end_inclusive(mk))
+            ok, _ = await self._eligibility(member, mk, at=league_close_at(mk))
 
             pts_int = int(round(float(getattr(r, "pts", 0) or 0)))
             checked.append({

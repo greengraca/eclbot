@@ -226,21 +226,6 @@ def _norm_handle_basic(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower()) if isinstance(s, str) else ""
 
 
-# def normalize_topdeck_discord(discord_raw: str) -> str:
-#     """
-#     Take the TopDeck 'discord' field and turn it into something that
-#     should match the real Discord username, same idea as the JS helper.
-#     """
-#     if not discord_raw:
-#         return ""
-#     s = str(discord_raw).strip()
-#     for sep in (" ", "("):
-#         if sep in s:
-#             s = s.split(sep, 1)[0]
-#     if "#" in s:
-#         s = s.split("#", 1)[0]
-#     return _norm_handle_basic(s)
-
 def normalize_topdeck_discord(discord_raw: str) -> str:
     if not discord_raw:
         return ""
@@ -255,9 +240,6 @@ def normalize_topdeck_discord(discord_raw: str) -> str:
         if sep in s:
             s = s.split(sep, 1)[0]
 
-    # IMPORTANT: do NOT strip "#1234"
-    # letting _norm_handle_basic remove the "#" but keep digits:
-    # "name#1234" -> "name1234"
     return _norm_handle_basic(s)
 
 

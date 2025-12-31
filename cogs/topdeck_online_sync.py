@@ -38,6 +38,7 @@ FIRESTORE_TOURNAMENT_URL_TEMPLATE = (
 
 SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
 SPELLBOT_USER_ID = int(os.getenv("SPELLBOT_USER_ID", "0"))
+ECLBOT_USER_ID   = int(os.getenv("ECLBOT_USER_ID", "0"))
 
 
 ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
@@ -246,9 +247,13 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
 
     games: List[SpellbotReadyGame] = []
 
+    allowed_bot_ids = {int(x) for x in (SPELLBOT_USER_ID, ECLBOT_USER_ID) if int(x)}
+    author_counts: Dict[int, int] = {}
+
     async for msg in channel.history(limit=None, after=month_start):
-        if SPELLBOT_USER_ID:
-            if msg.author.id != SPELLBOT_USER_ID:
+        # ✅ allow SpellBot + ECLBot if configured, else accept any bot
+        if allowed_bot_ids:
+            if msg.author.id not in allowed_bot_ids:
                 continue
         else:
             if not msg.author.bot:
@@ -261,6 +266,9 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
         title = (embed.title or "").lower()
         if "your game is ready" not in title:
             continue
+        
+        author_counts[msg.author.id] = author_counts.get(msg.author.id, 0) + 1
+
 
         players_field = next(
             (f for f in embed.fields if "player" in f.name.lower()),
@@ -314,6 +322,10 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
             "[online-sync] Example SpellBot normalized handles for first ready game:",
             games[0].handles_norm,
         )
+    
+    if author_counts:
+        print(f"[online-sync] Ready-message authors seen: {author_counts}")
+
 
     return games
 
