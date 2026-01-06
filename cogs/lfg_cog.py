@@ -413,7 +413,8 @@ class LFGCog(commands.Cog):
     async def _build_ready_embed(self, guild: discord.Guild, lobby: LFGLobby, started_at: datetime) -> discord.Embed:
         pts_by_id: Dict[int, int] = {}
 
-        if TOPDECK_BRACKET_ID:
+        # ✅ only fetch/show points for Elo lobbies
+        if lobby.elo_mode and TOPDECK_BRACKET_ID:
             try:
                 handle_to_best, _ = await get_handle_to_best_cached(
                     TOPDECK_BRACKET_ID,
@@ -445,7 +446,7 @@ class LFGCog(commands.Cog):
             lobby,
             started_at=started_at,
             icon_url=LFG_EMBED_ICON_URL,
-            pts_by_id=pts_by_id or None,
+            pts_by_id=pts_by_id or None,  # will be None for normal /lfg
         )
 
 
@@ -480,9 +481,6 @@ class LFGCog(commands.Cog):
     ):
         return await handle_leave(self, interaction, view, button)
 
-    # -------------------- the rest of your file stays the same --------------------
-    # (Everything below is unchanged from what you pasted.)
-    # ---------------------------------------------------------------------------
 
     # ---------- /lfg (normal) ----------
 

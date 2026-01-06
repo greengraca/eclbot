@@ -25,6 +25,7 @@ from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, PlayerRo
 from online_games_store import count_online_games_by_topdeck_uid_str
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
+import traceback
 
 
 
@@ -1453,81 +1454,77 @@ class SubscriptionsCog(commands.Cog):
     @tasks.loop(minutes=5)
     async def _tick(self):
         await self.bot.wait_until_ready()
-        cfg = self.cfg
-        if not cfg.guild_id:
+
+        try:
+            cfg = self.cfg
+            if not cfg.guild_id:
+                return
+            guild = self.bot.get_guild(cfg.guild_id)
+            if not guild:
+                return
+
+            now = datetime.now(LISBON_TZ)
+            now_mk = month_key(now)
+
+            last_day = last_day_of_month(now)
+            last_day_date = last_day.date()
+
+            print(
+                "[subs] debug",
+                "now=", now.isoformat(),
+                "mk=", now_mk,
+                "close_at=", league_close_at(now_mk).isoformat(),
+            )
+
+            # regular "register for next month" reminders
+            target_month = add_months(now_mk, 1)  # next month
+            d3 = (last_day - timedelta(days=3)).date()
+
+            if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
+                if now.date() == d3:
+                    await self._run_reminder_job(guild, target_month, kind="3d")
+                elif now.date() == last_day_date:
+                    await self._run_reminder_job(guild, target_month, kind="last")
+
+            # Monthly reset: ONLY remove ECL for ineligible users (new month).
+            # We attempt hourly on day 1 (:00-:04 window), and it self-delays if month-close is still pending.
+            if now.day == 1 and now.minute < 5:
+                await self._run_monthly_midnight_revoke_job(guild, target_month=now_mk)
+
+            # -------------------- 19:00 month close logic (last day) --------------------
+            close_at = league_close_at(now_mk)
+
+            # When we reach/past close time on the last day, mark pending and try to run.
+            if now >= close_at:
+                await self._ensure_month_close_pending(guild, cut_month=now_mk)
+                await self._maybe_run_month_close_job(guild, cut_month=now_mk)
+
+            # Also: if we crossed into the new month but last month close is still pending,
+            # keep trying to finish it (e.g., games ran long).
+            prev_mk = add_months(now_mk, -1)
+            if await subs_jobs.find_one({"_id": self._month_close_pending_job_id(guild.id, prev_mk)}):
+                await self._maybe_run_month_close_job(guild, cut_month=prev_mk)
+
+            # --- Top16 online-games reminders for CURRENT month ---
+            if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
+                mk_current = now_mk
+                d5 = (last_day - timedelta(days=5)).date()
+                d1 = (last_day - timedelta(days=1)).date()
+
+                if now.date() == d5:
+                    await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="5d")
+                    await self._run_topcut_prize_reminder_job(guild, mk=mk_current, kind="5d")
+                elif now.date() == d3:
+                    await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="3d")
+                elif now.date() == d1:
+                    await self._run_topcut_prize_reminder_job(guild, mk=mk_current, kind="1d")
+                elif now.date() == last_day_date:
+                    await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="last")
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            await self._log(f"[subs] ❌ _tick crashed: {type(e).__name__}: {e}\n{tb}")
             return
-        guild = self.bot.get_guild(cfg.guild_id)
-        if not guild:
-            return
-
-        now = datetime.now(LISBON_TZ)
-        last_day = last_day_of_month(now)
-        last_day_date = last_day.date()
-
-        # regular "register for next month" reminders
-        target_month = add_months(month_key(now), 1)  # next month
-        d3 = (last_day - timedelta(days=3)).date()
-
-        if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
-            if now.date() == d3:
-                await self._run_reminder_job(guild, target_month, kind="3d")
-            elif now.date() == last_day_date:
-                await self._run_reminder_job(guild, target_month, kind="last")
-
-        # Run the month flip cleanup shortly AFTER midnight on the 1st (avoid early removals).
-        # if now.day == 1 and now.hour < 6 and now.minute < 5:
-        #     await self._run_flip_mods_reminder_job(guild, mk=month_key(now))
-        #     await self._run_free_role_flip_info_job(guild, mk=month_key(now))
-        #     ended_mk = add_months(month_key(now), -1)  # dump the month that just ended
-        #     await self._run_topdeck_month_dump_flip_job(guild, month_str=ended_mk)
-
-        #     if self._enforcement_active(now):
-        #         await self._run_cleanup_job(guild, month_key(now))
-        #     else:
-        #         await self._log("[subs] cleanup skipped: enforcement not active yet")
-        
-        # Monthly reset: ONLY remove ECL for ineligible users (new month).
-        # We attempt hourly on day 1 (:00-:04 window), and it self-delays if month-close is still pending.
-        if now.day == 1 and now.minute < 5:
-            await self._run_monthly_midnight_revoke_job(guild, target_month=month_key(now))
-            
-        # -------------------- 19:00 month close logic (last day) --------------------
-        # Close current month at 19:00 Lisbon, but ONLY when no games are in progress.
-        # If games exist, keep retrying every 5 mins until 0, then run once.
-
-        now_mk = month_key(now)
-        close_at = league_close_at(now_mk)
-
-        # When we reach/past close time on the last day, mark pending and try to run.
-        if now >= close_at:
-            # only create pending for the current month once the close window begins
-            await self._ensure_month_close_pending(guild, cut_month=now_mk)
-            await self._maybe_run_month_close_job(guild, cut_month=now_mk)
-
-        # Also: if we crossed into the new month but last month close is still pending,
-        # keep trying to finish it (e.g., games ran long).
-        prev_mk = add_months(now_mk, -1)
-        if await subs_jobs.find_one({"_id": self._month_close_pending_job_id(guild.id, prev_mk)}):
-            await self._maybe_run_month_close_job(guild, cut_month=prev_mk)
-
-
-
-        # --- Top16 online-games reminders for CURRENT month ---
-        # We DM players who are currently in TopDeck Top16 but don't meet online-games requirement.
-        if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
-            mk = month_key(now)  # current month
-            d5 = (last_day - timedelta(days=5)).date()
-            d1 = (last_day - timedelta(days=1)).date()
-
-            if now.date() == d5:
-                await self._run_top16_online_reminder_job(guild, mk=mk, kind="5d")
-                await self._run_topcut_prize_reminder_job(guild, mk=mk, kind="5d")
-            elif now.date() == d3:
-                await self._run_top16_online_reminder_job(guild, mk=mk, kind="3d")
-            elif now.date() == d1:
-                await self._run_topcut_prize_reminder_job(guild, mk=mk, kind="1d")
-            elif now.date() == last_day_date:
-                await self._run_top16_online_reminder_job(guild, mk=mk, kind="last")
 
     @_tick.before_loop
     async def _before_tick(self):

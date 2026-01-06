@@ -124,8 +124,8 @@ def build_ready_embed(
     lines: List[str] = []
     for uid in lobby.player_ids:
         pts_suffix = ""
-        if pts_by_id is not None and int(uid) in pts_by_id:
-            pts_suffix = f" (**{int(pts_by_id[int(uid)])}**)"
+        if lobby.elo_mode and pts_by_id is not None and int(uid) in pts_by_id:
+            pts_suffix = f" (**{int(pts_by_id[int(uid)])} pts**)"
 
         member = guild.get_member(uid)
         if member:
