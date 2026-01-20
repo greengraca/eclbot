@@ -11,6 +11,8 @@ import aiohttp
 import discord
 from discord.ext import commands
 
+from utils.logger import format_console
+
 from db import online_games
 from online_games_store import OnlineGameRecord, upsert_record
 
@@ -48,6 +50,15 @@ ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
 ONLINE_MATCH_MAX_TIME_DIFF_SECONDS = int(
     os.getenv("ONLINE_MATCH_MAX_TIME_DIFF_SECONDS", str(5 * 60 * 60))  # default 5h
 )
+
+def _log(text: str, level: str = "info") -> None:
+    """Console logger with the same formatting as other cogs (see utils/logger.py)."""
+    raw = str(text or "")
+    try:
+        print(format_console(raw, level=level))
+    except Exception:
+        print(raw)
+
 
 
 def _month_start_utc() -> datetime:
@@ -120,7 +131,7 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
         )
 
     month_start = _month_start_utc()
-    print(
+    _log(
         f"[online-sync] {_now_iso()} Starting TopDeck fetch for bracket "
         f"{TOPDECK_BRACKET_ID!r} from {month_start.isoformat()}."
     )
@@ -132,7 +143,7 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
     )
     doc_url = raw_doc_url.strip().strip('"').strip("'")
     if raw_doc_url != doc_url:
-        print(
+        _log(
             "[online-sync] Normalized Firestore URL template from "
             f"{raw_doc_url!r} to {doc_url!r}."
         )
@@ -179,9 +190,9 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
             continue
 
         if not example_logged:
-            print(
-                "[online-sync] Example TopDeck start time normalisation:",
-                f"raw={raw_start} ({unit}), normalized={start_ts}",
+            _log(
+                f"[online-sync] Example TopDeck start time normalisation: raw={raw_start} ({unit}), normalized={start_ts}",
+                level="debug",
             )
             example_logged = True
 
@@ -209,14 +220,14 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
             )
         )
 
-    print(
+    _log(
         f"[online-sync] {_now_iso()} TopDeck fetch complete. "
         f"Matches this month (after filtering by date): {len(infos)}."
     )
     if infos:
-        print(
-            "[online-sync] Example TopDeck normalized handles for first match:",
-            infos[0].discords_norm,
+        _log(
+            f"[online-sync] Example TopDeck normalized handles for first match: {infos[0].discords_norm}",
+            level="debug",
         )
 
     return infos
@@ -240,7 +251,7 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
         )
 
     month_start = _month_start_utc()
-    print(
+    _log(
         f"[online-sync] {_now_iso()} Scanning SpellBot channel "
         f"{SPELLBOT_LFG_CHANNEL_ID} for ready games since {month_start.isoformat()}."
     )
@@ -250,7 +261,16 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
     allowed_bot_ids = {int(x) for x in (SPELLBOT_USER_ID, ECLBOT_USER_ID) if int(x)}
     author_counts: Dict[int, int] = {}
 
-    async for msg in channel.history(limit=None, after=month_start):
+    async for msg in channel.history(limit=None, after=month_start, oldest_first=False):
+        # Safety: if the API ever returns older messages, stop as soon as we cross month_start.
+        dt0 = msg.created_at
+        if dt0.tzinfo is None:
+            dt0 = dt0.replace(tzinfo=timezone.utc)
+        if dt0 < month_start:
+            break
+
+        # Mentions are already resolved on the message payload; use them to avoid extra HTTP fetches.
+        mentions_by_id = {m.id: m for m in getattr(msg, "mentions", [])}
         # ✅ allow SpellBot + ECLBot if configured, else accept any bot
         if allowed_bot_ids:
             if msg.author.id not in allowed_bot_ids:
@@ -284,7 +304,7 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
 
         handles_norm: List[str] = []
         for uid in ids:
-            member = guild.get_member(uid)
+            member = mentions_by_id.get(uid) or guild.get_member(uid)
             if member is None:
                 try:
                     member = await guild.fetch_member(uid)
@@ -293,7 +313,7 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
             if member is None:
                 handles_norm = []
                 break
-            handles_norm.append(_norm_handle(member.name))
+            handles_norm.append(_norm_handle(getattr(member, "name", "") or ""))
 
         if not handles_norm:
             continue
@@ -313,18 +333,18 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
             )
         )
 
-    print(
+    _log(
         f"[online-sync] {_now_iso()} SpellBot scan complete. "
         f"Ready games found: {len(games)}."
     )
     if games:
-        print(
-            "[online-sync] Example SpellBot normalized handles for first ready game:",
-            games[0].handles_norm,
+        _log(
+            f"[online-sync] Example SpellBot normalized handles for first ready game: {games[0].handles_norm}",
+            level="debug",
         )
     
     if author_counts:
-        print(f"[online-sync] Ready-message authors seen: {author_counts}")
+        _log(f"[online-sync] Ready-message authors seen: {author_counts}")
 
 
     return games
@@ -349,7 +369,7 @@ def _match_spellbot_to_topdeck(
     matches close in time to a known-online match are also treated
     as online (to catch multiple games on the same SpellTable link).
     """
-    print(
+    _log(
         f"[online-sync] {_now_iso()} Matching SpellBot ↔ TopDeck "
         f"with max time diff {max_time_diff_seconds} seconds."
     )
@@ -375,7 +395,7 @@ def _match_spellbot_to_topdeck(
             continue
         td_by_key.setdefault(handles, []).append(mi)
 
-    print(
+    _log(
         f"[online-sync] {_now_iso()} SpellBot handle clusters: {len(sb_by_key)}; "
         f"TopDeck handle clusters (with non-empty handles): {len(td_by_key)}."
     )
@@ -416,11 +436,12 @@ def _match_spellbot_to_topdeck(
                     closest_dt = min(
                         abs(mi.start_ts - sb.ready_ts) for mi in td_list
                     )
-                    print(
+                    _log(
                         "[online-sync] DEBUG no time match for handle-set "
                         f"{list(key)}; closest dt ~= {closest_dt:.0f}s; "
                         f"sb_ready_ts={sb.ready_ts}, "
                         f"sample_td_start_ts={td_list[0].start_ts}",
+                        level="debug",
                     )
                     debug_unmatched_printed += 1
                 continue
@@ -436,10 +457,11 @@ def _match_spellbot_to_topdeck(
 
             if debug_matched_printed < 5:
                 dt_dbg = abs(mi.start_ts - sb.ready_ts)
-                print(
+                _log(
                     "[online-sync] DEBUG matched online game for handles "
                     f"{list(key)}; dt={dt_dbg:.0f}s; "
                     f"season={mi.season}, table={mi.table}",
+                    level="debug",
                 )
                 debug_matched_printed += 1
 
@@ -474,16 +496,17 @@ def _match_spellbot_to_topdeck(
                     per_player_online[uid] = per_player_online.get(uid, 0) + 1
 
                 if extra_debug_printed < 5:
-                    print(
+                    _log(
                         "[online-sync] DEBUG marked extra online game in same handle-set "
                         f"{list(key)}; dt_to_nearest={dt_to_nearest:.0f}s; "
                         f"season={mi.season}, table={mi.table}",
+                        level="debug",
                     )
                     extra_debug_printed += 1
 
     total_online += extra_online
 
-    print(
+    _log(
         f"[online-sync] {_now_iso()} Matching complete (handles + time). "
         f"Clusters with overlap: {clusters_with_overlap}, "
         f"Online TopDeck games: {total_online}, "
@@ -622,7 +645,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
             return
 
         month_str = _month_start_utc().strftime("%Y-%m")
-        print(f"[online-sync] {_now_iso()} /synconline started for month {month_str}.")
+        _log(f"[online-sync] {_now_iso()} /synconline started for month {month_str}.")
 
         await ctx.defer(ephemeral=True)
 
@@ -676,7 +699,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                 await _save_online_stats_to_db(payload)
 
             except Exception as e:
-                print(f"[online-sync] Error during sync: {type(e).__name__}: {e}")
+                _log(f"[online-sync] Error during sync: {type(e).__name__}: {e}")
                 await ctx.followup.send(
                     "Something went wrong while rebuilding online-game stats. "
                     "Check the bot logs for details.",
@@ -684,7 +707,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                 )
                 return
 
-        print(
+        _log(
             f"[online-sync] {_now_iso()} /synconline finished. "
             f"SpellBot ready games: {len(spellbot_games)}, "
             f"TopDeck matches: {len(topdeck_matches)}, "

@@ -8,6 +8,8 @@ from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
+from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
+
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
@@ -47,6 +49,18 @@ async def _load_online_counts() -> Dict[str, int]:
     )
     return counts
 
+async def _get_member_index(guild: discord.Guild):
+    # Prefer cache (fast). If empty, fetch from API.
+    members = list(getattr(guild, "members", []) or [])
+    if not members:
+        try:
+            members = [m async for m in guild.fetch_members(limit=None)]
+            print(f"[topdeck/identity] fetched {len(members)} members for identity index (cache was empty).")
+        except Exception as e:
+            print(f"[topdeck/identity] fetch_members failed; using empty index: {type(e).__name__}: {e}")
+            members = []
+    return build_member_index(members)
+
 
 class TopdeckLeagueCog(commands.Cog):
     """Slash commands that expose TopDeck league stats inside Discord."""
@@ -81,50 +95,26 @@ class TopdeckLeagueCog(commands.Cog):
         member: discord.Member,
         rows: List[PlayerRow],
     ) -> Optional[PlayerRow]:
-        """
-        Match the Discord member to a TopDeck PlayerRow, primarily by username.
+        """Match the Discord member to a TopDeck PlayerRow.
 
-        - First, match member's username/global_name/display_name to row.discord
-          (which is assumed to be the stored Discord username).
-        - Then, fall back to matching those same names to row.name.
+        Prefer Discord ID stored in row.discord (mention/raw digits). Then fall back
+        to unique handle match, then unique name match.
         """
 
-        def norm(v: Optional[str]) -> Optional[str]:
-            if not isinstance(v, str):
-                return None
-            v = v.strip()
-            return v.lower() if v else None
-
-        # Candidate names from Discord
-        candidates_raw = {
-            member.name,
-            getattr(member, "global_name", None),
-            getattr(member, "display_name", None),
-        }
-
-        # If the account still has a discriminator, include username#discrim too
-        discrim = getattr(member, "discriminator", None)
-        if discrim and discrim != "0":
-            candidates_raw.add(f"{member.name}#{discrim}")
-
-        candidates = {c for c in (norm(x) for x in candidates_raw) if c}
-
-        if not candidates:
+        m = find_row_for_member(rows, member)
+        if not m:
             return None
 
-        # --- 1) Exact match against row.discord (preferred) ---
-        for row in rows:
-            row_disc = norm(row.discord)
-            if row_disc and row_disc in candidates:
-                return row
+        # Lightweight debug signal for confidence (helps spot bad TopDeck discord fields)
+        try:
+            print(
+                "[topdeck/identity] author row match: "
+                f"member_id={member.id} conf={m.confidence} key={m.matched_key!r} detail={m.detail}"
+            )
+        except Exception:
+            pass
 
-        # --- 2) Fallback: exact match against row.name ---
-        for row in rows:
-            row_name = norm(row.name)
-            if row_name and row_name in candidates:
-                return row
-
-        return None
+        return m.row
 
     # ------------- /mostgames -------------
 
@@ -198,10 +188,15 @@ class TopdeckLeagueCog(commands.Cog):
                 inline=False,
             )
         else:
+            index = await _get_member_index(ctx.guild)
+
             lines = []
             for i, r in enumerate(top5, start=1):
+                res = resolve_row_discord_id(r, index)
+                tag = f"<@{res.discord_id}>" if res.discord_id else "`(unmapped)`"
                 dropped_suffix = " *(dropped)*" if r.dropped else ""
-                lines.append(f"`#{i}` **{r.name}** — **{r.games}** games{dropped_suffix}")
+                lines.append(f"`#{i}` {tag} — {r.name} — **{r.games}** games{dropped_suffix}")
+            
             embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
 
         await ctx.followup.send(embed=embed)
@@ -386,10 +381,14 @@ class TopdeckLeagueCog(commands.Cog):
                 title="Top 16 — Qualified Players",
                 description="Players with **>= 10 online games** in the current bracket.",
             )
+            index = await _get_member_index(ctx.guild)
 
             lines = []
             for i, r in enumerate(qualified_top16, start=1):
-                lines.append(f"`#{i:02}` **{r.name}** – {int(round(r.pts))} pts")
+                res = resolve_row_discord_id(r, index)
+                tag = f"<@{res.discord_id}>" if res.discord_id else "`(unmapped)`"
+                lines.append(f"`#{i:02}` {tag} — {r.name} - {int(round(r.pts))} pts")
+
 
             embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
             await _safe_followup_send(embed=embed, ephemeral=False)

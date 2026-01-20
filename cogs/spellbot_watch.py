@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow, WAGER_RATE
+from utils.topdeck_identity import find_row_for_member
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
@@ -195,44 +196,10 @@ class SpellBotWatchCog(commands.Cog):
                 f"(fetched_at={fetched_at.isoformat()})."
             )
 
-            def norm(v: Optional[str]) -> Optional[str]:
-                if not isinstance(v, str):
-                    return None
-                v = v.strip()
-                return v.lower() if v else None
-
-            def find_row_for_member(member: discord.Member) -> Optional[PlayerRow]:
-                candidates_raw = {
-                    member.name,
-                    getattr(member, "global_name", None),
-                    getattr(member, "display_name", None),
-                }
-                discrim = getattr(member, "discriminator", None)
-                if discrim and discrim != "0":
-                    candidates_raw.add(f"{member.name}#{discrim}")
-
-                candidates = {c for c in (norm(x) for x in candidates_raw) if c}
-                if not candidates:
-                    return None
-
-                # 1) match row.discord
-                for row in rows:
-                    rd = norm(row.discord)
-                    if rd and rd in candidates:
-                        return row
-
-                # 2) fallback: row.name
-                for row in rows:
-                    rn = norm(row.name)
-                    if rn and rn in candidates:
-                        return row
-
-                return None
-
             matched_rows: List[PlayerRow] = []
             for m in members:
-                row = find_row_for_member(m)
-                if not row:
+                match = find_row_for_member(rows, m)
+                if not match:
                     self._debug(
                         f"_handle_high_stakes: no TopDeck row for member {m} ({m.id}), aborting."
                     )
@@ -241,7 +208,17 @@ class SpellBotWatchCog(commands.Cog):
                         f"no TopDeck row found for member {m} ({m.id})."
                     )
                     return
-                matched_rows.append(row)
+
+                # Log confidence: discord_id / handle / name
+                try:
+                    self._debug(
+                        "_handle_high_stakes: identity match "
+                        f"member_id={m.id} conf={match.confidence} key={match.matched_key!r} detail={match.detail}"
+                    )
+                except Exception:
+                    pass
+
+                matched_rows.append(match.row)
 
             # Compute pot using current points and WAGER_RATE
             stakes = [(r, r.pts * WAGER_RATE) for r in matched_rows]

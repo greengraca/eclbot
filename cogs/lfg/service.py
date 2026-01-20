@@ -8,6 +8,7 @@ import discord
 
 from spelltable_client import create_spelltable_game
 from utils.interactions import safe_i_send, safe_i_edit
+from utils.logger import format_console
 
 from .models import now_utc
 from .views import LFGJoinView
@@ -243,6 +244,13 @@ async def handle_join(
     if edit_content is not None or edit_embed is not None or edit_view is not None:
         await safe_i_edit(interaction, content=edit_content, embed=edit_embed, view=edit_view)
 
+    # Persist lobby state after successful join (refresh expiration too)
+    if reply_ephemeral is None and view.lobby is not None:
+        try:
+            await cog._save_lobby_to_db(view.lobby)
+        except Exception as e:
+            print(format_console(f"[lfg] Failed to persist lobby after join: {e}", level="error"))
+
     if reply_ephemeral is not None:
         # Clear a stale/full lobby if we disabled its view
         if lobby_id_to_clear is not None:
@@ -265,7 +273,7 @@ async def handle_join(
             is_public=False,
         )
     except Exception as e:
-        print(f"[lfg] Failed to create SpellTable game: {e}")
+        print(format_console(f"[lfg] Failed to create SpellTable game: {e}", level="error"))
 
     # Apply the created link if the lobby is still active + still full
     async with cog.state.lock:
@@ -410,6 +418,13 @@ async def handle_leave(
     # Outside lock: edits / deletes / responses
     if edit_content is not None or edit_embed is not None or edit_view is not None:
         await safe_i_edit(interaction, content=edit_content, embed=edit_embed, view=edit_view)
+
+    # Persist lobby state after successful leave (if lobby still exists)
+    if edit_embed is not None and view.lobby is not None and not delete_message_id:
+        try:
+            await cog._save_lobby_to_db(view.lobby)
+        except Exception as e:
+            print(format_console(f"[lfg] Failed to persist lobby after leave: {e}", level="error"))
 
     if delete_channel_id and delete_message_id:
         channel = guild.get_channel(delete_channel_id)

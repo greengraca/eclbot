@@ -26,6 +26,9 @@ from online_games_store import count_online_games_by_topdeck_uid_str
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
 import traceback
+from utils.logger import get_logger
+
+from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id
 
 
 
@@ -185,6 +188,7 @@ class SubscriptionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.cfg = SUBS
+        self.log = get_logger(bot, self.cfg)
         self._bootstrapped = False
         self._tick.start()
         self._access_audit.start()
@@ -270,7 +274,7 @@ class SubscriptionsCog(commands.Cog):
                 return
 
         if not mods:
-            await self._log(f"[subs] mod summary skipped: no members found for ECL_MOD_ROLE_ID={rid}")
+            await self.log.info(f"[subs] mod summary skipped: no members found for ECL_MOD_ROLE_ID={rid}")
             return
 
         sent = 0
@@ -284,7 +288,7 @@ class SubscriptionsCog(commands.Cog):
             if cfg.dm_sleep_seconds:
                 await asyncio.sleep(cfg.dm_sleep_seconds)
 
-        await self._log(f"[subs] mod summary DM sent {sent}/{len(mods)} — {summary}")
+        await self.log.info(f"[subs] mod summary DM sent {sent}/{len(mods)} — {summary}")
 
     async def _count_registered_for_month(self, guild: discord.Guild, mk: str) -> int:
         cfg = self.cfg
@@ -549,7 +553,7 @@ class SubscriptionsCog(commands.Cog):
             if cfg.dm_sleep_seconds:
                 await asyncio.sleep(cfg.dm_sleep_seconds)
 
-        await self._log(f"[subs] mod embed sent {sent}/{len(mods)} — {embed.title}")
+        await self.log.info(f"[subs] mod embed sent {sent}/{len(mods)} — {embed.title}")
 
 
     # -------------------- Ko-fi inbox reactions --------------------
@@ -574,7 +578,7 @@ class SubscriptionsCog(commands.Cog):
             await message.add_reaction(emoji)
 
         if note:
-            await self._log(f"[subs] kofi inbox {emoji} — {note}")
+            await self.log.info(f"[subs] kofi inbox {emoji} — {note}")
 
 
     # -------------------- Top16 online-games reminder helpers --------------------
@@ -625,22 +629,13 @@ class SubscriptionsCog(commands.Cog):
         active = sorted(active, key=lambda r: (-r.pts, -r.games))
         top16 = active[:16]
 
-        # Pre-build name->discord id mapping for fallbacks
-        members = [m async for m in guild.fetch_members(limit=None)]
-        name_to_id: dict[str, int] = {}
-        for m in members:
-            if m.bot:
-                continue
-            for cand in (m.name, getattr(m, "global_name", None), getattr(m, "display_name", None)):
-                if isinstance(cand, str) and cand.strip():
-                    name_to_id.setdefault(self._norm_name(cand), int(m.id))
-
-            discrim = getattr(m, "discriminator", None)
-            if discrim and discrim != "0":
-                name_to_id.setdefault(self._norm_name(f"{m.name}#{discrim}"), int(m.id))
+        # Shared identity index (Discord ID first; unique handle/name fallback)
+        index = await self._build_member_index(guild)
 
         entries: list[dict] = []
         misses: list[str] = []
+
+        conf_counts: dict[str, int] = {}
 
         for idx, r in enumerate(top16, start=1):
             uid = (r.uid or "").strip()
@@ -649,22 +644,25 @@ class SubscriptionsCog(commands.Cog):
             if need <= 0:
                 continue  # already qualified
 
-            # Map to Discord ID (best-effort)
-            discord_id: Optional[int] = None
+            # Map to Discord ID (ID -> unique handle -> unique name)
+            res = resolve_row_discord_id(r, index)
+            conf_counts[res.confidence] = conf_counts.get(res.confidence, 0) + 1
 
-            did = self._extract_discord_id_from_text(r.discord or "")
-            if did:
-                discord_id = did
-            elif r.discord:
-                key = self._norm_name(r.discord)
-                discord_id = name_to_id.get(key)
-            elif r.name:
-                key = self._norm_name(r.name)
-                discord_id = name_to_id.get(key)
-
-            if not discord_id:
-                misses.append(r.discord or r.name or "unknown")
+            if not res.discord_id:
+                misses.append(
+                    f"{r.discord or r.name or 'unknown'} ({res.confidence}{(' ' + res.matched_key) if res.matched_key else ''})"
+                )
                 continue
+
+            discord_id = int(res.discord_id)
+
+            # Log when we had to fall back (or when ambiguous/no-match happens)
+            if res.confidence != "discord_id":
+                await self.log.info(
+                    "[subs/identity] top16-unqualified "
+                    f"mk={mk} row={getattr(r, 'name', '')!r} discord={getattr(r, 'discord', '')!r} "
+                    f"-> discord_id={discord_id} conf={res.confidence} key={res.matched_key!r}"
+                )
 
             entries.append({
                 "rank": idx,
@@ -673,6 +671,10 @@ class SubscriptionsCog(commands.Cog):
                 "missing": int(need),
                 "discord_id": int(discord_id),
             })
+
+        if conf_counts:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(conf_counts.items()))
+            await self.log.info(f"[subs/identity] top16-unqualified mk={mk} mapping_counts: {parts}")
 
         return entries, misses
 
@@ -755,7 +757,7 @@ class SubscriptionsCog(commands.Cog):
                     ),
                 )
             except Exception as e:
-                await self._log(f"[subs] ❌ TopDeck month dump FAILED for {month_str}: {type(e).__name__}: {e}")
+                await self.log.error(f"[subs] ❌ TopDeck month dump FAILED for {month_str}: {type(e).__name__}: {e}")
                 await self._dm_mods_summary(
                     guild,
                     summary=f"[ECL] TopDeck month dump FAILED for {month_str}: {type(e).__name__}: {e}",
@@ -779,10 +781,10 @@ class SubscriptionsCog(commands.Cog):
             entries, misses = await self._top16_unqualified_for_month(guild, mk=mk)
 
             if misses:
-                await self._log(f"[subs] Top16-online mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
+                await self.log.info(f"[subs] Top16-online mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
 
             if not entries:
-                await self._log(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
+                await self.log.info(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
                 print(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
                 await self._dm_mods_summary(
                     guild,
@@ -839,7 +841,7 @@ class SubscriptionsCog(commands.Cog):
                             name=str(getattr(entry["row"], "name", "") or ""),
                             online_games=int(entry["online_games"]),
                             need_total=int(cfg.top16_min_online_games),
-                            mention=member.mention,  # ✅ "Hey @discordname" in real DMs
+                            mention=member.mention,  
                         )
                         await member.send(embed=emb)
                         sent += 1
@@ -850,7 +852,7 @@ class SubscriptionsCog(commands.Cog):
                         await asyncio.sleep(cfg.dm_sleep_seconds)
 
             await asyncio.gather(*[_send_one(e) for e in entries])
-            await self._log(f"[subs] ✅ Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
+            await self.log.ok(f"[subs] Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
             print(f"[subs] ✅ Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
             await self._dm_mods_summary(
                 guild,
@@ -1028,7 +1030,7 @@ class SubscriptionsCog(commands.Cog):
 
         # Give ECL now (access is time-based)
         await self._grant_ecl(user_id, reason=f"Ko-fi one-time pass (expires {expires_at_utc.astimezone(LISBON_TZ).strftime('%Y-%m-%d')})")
-        await self._log(f"[subs] ✅ Ko-fi one-time processed: user_id={user_id} purchase_month={purchase_mk} expires={expires_at_utc.astimezone(LISBON_TZ).strftime('%Y-%m-%d %H:%M')} txn={txn_id}")
+        await self.log.ok(f"[subs] Ko-fi one-time processed: user_id={user_id} purchase_month={purchase_mk} expires={expires_at_utc.astimezone(LISBON_TZ).strftime('%Y-%m-%d %H:%M')} txn={txn_id}")
         await self._react_kofi(
             message,
             True,
@@ -1133,7 +1135,7 @@ class SubscriptionsCog(commands.Cog):
         self,
         ctx: discord.ApplicationContext,
         member: discord.Member,
-        month: str,
+        month: str= discord.Option(str, "Month in format YYYY-MM (e.g., 2026-01)"), 
         reason: str = "free-entry",
     ):
         if not ctx.user.guild_permissions.manage_roles:
@@ -1143,16 +1145,26 @@ class SubscriptionsCog(commands.Cog):
             await ctx.respond("Month must be **YYYY-MM**.", ephemeral=True)
             return
 
+        discord_name = member.display_name
+        discord_username = member.name
+
         await subs_free_entries.update_one(
             {"guild_id": ctx.guild.id, "user_id": member.id, "month": month},
             {
                 "$setOnInsert": {
                     "guild_id": ctx.guild.id,
                     "user_id": member.id,
+                    "discord_name": discord_name,
+                    "discord_username": discord_username,
                     "month": month,
                     "created_at": datetime.now(timezone.utc),
                 },
-                "$set": {"reason": reason, "updated_at": datetime.now(timezone.utc)},
+                "$set": {
+                    "reason": reason,
+                    "discord_name": discord_name,
+                    "discord_username": discord_username,
+                    "updated_at": datetime.now(timezone.utc),
+                },
             },
             upsert=True,
         )
@@ -1178,11 +1190,7 @@ class SubscriptionsCog(commands.Cog):
             ephemeral=True,
         )
 
-    @commands.slash_command(
-        name="subtestdm",
-        description="DM yourself a preview of ALL subscription-related embeds (one per message).",
-        guild_ids=[GUILD_ID] if GUILD_ID else None,
-    )
+
     async def subtestdm(self, ctx: discord.ApplicationContext):
         if not ctx.user.guild_permissions.manage_roles:
             await ctx.respond("You need **Manage Roles**.", ephemeral=True)
@@ -1191,7 +1199,7 @@ class SubscriptionsCog(commands.Cog):
             await ctx.respond("This command can only be used in a server.", ephemeral=True)
             return
 
-        # ✅ ACK immediately so the interaction doesn't expire
+        # ACK immediately so the interaction doesn't expire
         await ctx.defer(ephemeral=True)
 
         cfg = self.cfg
@@ -1308,7 +1316,7 @@ class SubscriptionsCog(commands.Cog):
         - None when unknown (fail-safe => do NOT run 7pm close logic)
         """
         if not TOPDECK_BRACKET_ID:
-            await self._log("[subs] ⚠️ TOPDECK_BRACKET_ID not set; month-close will NOT run (fail-safe).")
+            await self.log.warn("[subs] TOPDECK_BRACKET_ID not set; month-close will NOT run (fail-safe).")
             return None
 
         try:
@@ -1371,7 +1379,7 @@ class SubscriptionsCog(commands.Cog):
         if n is None:
             return  # fail-safe: unknown => don't run
         if n > 0:
-            await self._log(f"[subs] month-close pending ({cut_month}) blocked: {n} game(s) still in progress")
+            await self.log.info(f"[subs] month-close pending ({cut_month}) blocked: {n} game(s) still in progress")
             return
 
         async with self._month_close_lock:
@@ -1380,14 +1388,14 @@ class SubscriptionsCog(commands.Cog):
                 return
 
             try:
-                await self._log(f"[subs] ✅ month-close starting for {cut_month} (in-progress=0)")
+                await self.log.ok(f"[subs] month-close starting for {cut_month} (in-progress=0)")
                 await self._run_month_close_logic(guild, cut_month=cut_month)
             except Exception as e:
-                await self._log(f"[subs] ❌ month-close FAILED for {cut_month}: {type(e).__name__}: {e}")
+                await self.log.error(f"[subs] month-close FAILED for {cut_month}: {type(e).__name__}: {e}")
                 return
 
             await subs_jobs.insert_one({"_id": done_id, "ran_at": datetime.now(timezone.utc)})
-            await self._log(f"[subs] ✅ month-close done for {cut_month}")
+            await self.log.ok(f"[subs] month-close done for {cut_month}")
 
     async def _run_monthly_midnight_revoke_job(self, guild: discord.Guild, *, target_month: str) -> None:
         """
@@ -1407,11 +1415,11 @@ class SubscriptionsCog(commands.Cog):
         if prev_pending and not prev_done:
             if target_month not in self._warned_revoke_delayed_for:
                 self._warned_revoke_delayed_for.add(target_month)
-                await self._log(f"[subs] monthly revoke delayed for {target_month}: month-close still pending for {prev_month}")
+                await self.log.info(f"[subs] monthly revoke delayed for {target_month}: month-close still pending for {prev_month}")
             return
 
         if not self._enforcement_active(datetime.now(LISBON_TZ)):
-            await self._log("[subs] monthly revoke skipped: enforcement not active yet")
+            await self.log.info("[subs] monthly revoke skipped: enforcement not active yet")
             return
 
         if not cfg.ecl_role_id:
@@ -1448,7 +1456,7 @@ class SubscriptionsCog(commands.Cog):
             if cfg.dm_sleep_seconds:
                 await asyncio.sleep(cfg.dm_sleep_seconds)
 
-        await self._log(f"[subs] monthly revoke {target_month}: checked={checked} removed={removed}")
+        await self.log.info(f"[subs] monthly revoke {target_month}: checked={checked} removed={removed}")
 
 
     @tasks.loop(minutes=5)
@@ -1523,7 +1531,7 @@ class SubscriptionsCog(commands.Cog):
 
         except Exception as e:
             tb = traceback.format_exc()
-            await self._log(f"[subs] ❌ _tick crashed: {type(e).__name__}: {e}\n{tb}")
+            await self.log.error(f"[subs] ❌ _tick crashed: {type(e).__name__}: {e}\n{tb}")
             return
 
     @_tick.before_loop
@@ -1594,8 +1602,8 @@ class SubscriptionsCog(commands.Cog):
             if cfg.dm_sleep_seconds:
                 await asyncio.sleep(cfg.dm_sleep_seconds)
 
-        await self._log(f"[subs] access-audit {mk}: checked={checked} removed={removed}")
-        print(f"[subs] access-audit {mk}: checked={checked} removed={removed}")
+        await self.log.info(f"[subs] access-audit {mk}: checked={checked} removed={removed}")
+        # print(f"[subs] access-audit {mk}: checked={checked} removed={removed}")
 
 
     # -------------------- Core operations --------------------
@@ -1640,74 +1648,17 @@ class SubscriptionsCog(commands.Cog):
         doc = await subs_free_entries.find_one({"guild_id": self.cfg.guild_id, "user_id": int(user_id), "month": month})
         return bool(doc)
 
-    def _norm_name(self, s: str) -> str:
-        s = (s or "").strip()
-        if s.startswith("@"):
-            s = s[1:]
-        return "".join(ch for ch in s.lower() if ch.isalnum())
+    async def _build_member_index(self, guild: discord.Guild) -> MemberIndex:
+        """Fetch members once and build a shared identity index.
 
-    def _extract_discord_id_from_text(self, text: str) -> Optional[int]:
-        if not text:
-            return None
-        t = text.strip()
-        m = re.search(r"<@!?(\d{15,25})>", t)
-        if m:
-            return int(m.group(1))
-        m2 = re.search(r"\b(\d{15,25})\b", t)
-        if m2:
-            return int(m2.group(1))
-        return None
-
-    async def _build_member_index(self, guild: discord.Guild) -> tuple[dict[str, int], dict[int, discord.Member]]:
-        """Fetch members once and build:
-          - norm_name -> discord_id
-          - discord_id -> Member
+        Used for TopDeck row -> Discord ID resolution.
         """
-        members = []
+        members: list[discord.Member] = []
         try:
             members = [m async for m in guild.fetch_members(limit=None)]
         except Exception:
             members = []
-
-        name_to_id: dict[str, int] = {}
-        id_to_member: dict[int, discord.Member] = {}
-
-        for m in members:
-            if not isinstance(m, discord.Member):
-                continue
-            id_to_member[int(m.id)] = m
-            if m.bot:
-                continue
-
-            for cand in (m.name, getattr(m, "global_name", None), getattr(m, "display_name", None)):
-                if isinstance(cand, str) and cand.strip():
-                    name_to_id.setdefault(self._norm_name(cand), int(m.id))
-
-            discrim = getattr(m, "discriminator", None)
-            if discrim and discrim != "0":
-                name_to_id.setdefault(self._norm_name(f"{m.name}#{discrim}"), int(m.id))
-
-        return name_to_id, id_to_member
-
-    def _discord_id_for_row(self, row: PlayerRow, name_to_id: dict[str, int]) -> Optional[int]:
-        """Resolve a TopDeck row to a Discord user id using row.discord then row.name."""
-        did = self._extract_discord_id_from_text(getattr(row, "discord", "") or "")
-        if did:
-            return did
-
-        disc = getattr(row, "discord", None)
-        if isinstance(disc, str) and disc.strip():
-            key = self._norm_name(disc)
-            if key in name_to_id:
-                return int(name_to_id[key])
-
-        nm = getattr(row, "name", None)
-        if isinstance(nm, str) and nm.strip():
-            key = self._norm_name(nm)
-            if key in name_to_id:
-                return int(name_to_id[key])
-
-        return None
+        return build_member_index(members)
 
 
     async def _qualified_top16_discord_ids_for_month(
@@ -1758,54 +1709,54 @@ class SubscriptionsCog(commands.Cog):
         if not qualified_top16:
             return ([], ["no qualified top16"])
 
-        members = [m async for m in guild.fetch_members(limit=None)]
-        name_to_id: dict[str, int] = {}
-
-        for m in members:
-            if m.bot:
-                continue
-            for cand in (m.name, getattr(m, "global_name", None), getattr(m, "display_name", None)):
-                if isinstance(cand, str) and cand.strip():
-                    name_to_id.setdefault(self._norm_name(cand), int(m.id))
-
-            discrim = getattr(m, "discriminator", None)
-            if discrim and discrim != "0":
-                name_to_id.setdefault(self._norm_name(f"{m.name}#{discrim}"), int(m.id))
+        # Shared identity index (Discord ID first; unique handle/name fallback)
+        index = await self._build_member_index(guild)
 
         discord_ids: list[int] = []
         missing: list[str] = []
+        conf_counts: dict[str, int] = {}
 
         for r in qualified_top16:
-            did = self._extract_discord_id_from_text(r.discord or "")
-            if did:
-                discord_ids.append(did)
+            res = resolve_row_discord_id(r, index)
+            conf_counts[res.confidence] = conf_counts.get(res.confidence, 0) + 1
+
+            if res.discord_id:
+                discord_ids.append(int(res.discord_id))
+                if res.confidence != "discord_id":
+                    await self.log.info(
+                        "[subs/identity] qualified-top16 "
+                        f"mk={cut_month} row={getattr(r, 'name', '')!r} discord={getattr(r, 'discord', '')!r} "
+                        f"-> discord_id={int(res.discord_id)} conf={res.confidence} key={res.matched_key!r}"
+                    )
                 continue
 
-            if r.discord:
-                key = self._norm_name(r.discord)
-                if key in name_to_id:
-                    discord_ids.append(name_to_id[key])
-                    continue
+            missing.append(
+                f"{r.discord or r.name or 'unknown'} ({res.confidence}{(' ' + res.matched_key) if res.matched_key else ''})"
+            )
 
-            if r.name:
-                key = self._norm_name(r.name)
-                if key in name_to_id:
-                    discord_ids.append(name_to_id[key])
-                    continue
-
-            missing.append(r.discord or r.name or "unknown")
+        if conf_counts:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(conf_counts.items()))
+            await self.log.info(f"[subs/identity] qualified-top16 mk={cut_month} mapping_counts: {parts}")
 
         seen = set()
         discord_ids = [x for x in discord_ids if not (x in seen or seen.add(x))]
 
         return (discord_ids, missing)
 
-    async def _eligible_top16_discord_ids_for_month(
+    async def _eligible_top16_entries_for_month(
         self,
         guild: discord.Guild,
         cut_month: str,
-    ) -> tuple[list[int], list[str]]:
-        """Top16 cut (prize eligible): skip ineligible players and promote next eligible."""
+    ) -> tuple[list[dict], list[str]]:
+        """Top16 cut (prize eligible): skip ineligible players and promote next eligible.
+
+        Returns:
+          - entries: [{discord_id, row, pts, games}] in award order (after de-dupe)
+          - missing: mapping misses (TopDeck row -> Discord)
+
+        NOTE: To keep behavior stable, we still stop after 16 *raw* eligible picks,
+        then de-dupe at the end (same as _eligible_top16_discord_ids_for_month did).
+        """
         cfg = self.cfg
 
         bracket_id = TOPDECK_BRACKET_ID
@@ -1848,18 +1799,33 @@ class SubscriptionsCog(commands.Cog):
         if not qualified:
             return ([], ["no qualified candidates"])
 
-        name_to_id, id_to_member = await self._build_member_index(guild)
+        index = await self._build_member_index(guild)
 
-        eligible_ids: list[int] = []
+        entries_raw: list[dict] = []
         missing: list[str] = []
 
+        conf_counts: dict[str, int] = {}
+
         for r in qualified:
-            did = self._discord_id_for_row(r, name_to_id)
-            if not did:
-                missing.append(r.discord or r.name or "unknown")
+            res = resolve_row_discord_id(r, index)
+            conf_counts[res.confidence] = conf_counts.get(res.confidence, 0) + 1
+
+            if not res.discord_id:
+                missing.append(
+                    f"{r.discord or r.name or 'unknown'} ({res.confidence}{(' ' + res.matched_key) if res.matched_key else ''})"
+                )
                 continue
 
-            member = id_to_member.get(int(did)) or guild.get_member(int(did))
+            did = int(res.discord_id)
+
+            if res.confidence != "discord_id":
+                await self.log.info(
+                    "[subs/identity] eligible-top16 "
+                    f"mk={cut_month} row={getattr(r, 'name', '')!r} discord={getattr(r, 'discord', '')!r} "
+                    f"-> discord_id={did} conf={res.confidence} key={res.matched_key!r}"
+                )
+
+            member = index.id_to_member.get(int(did)) or guild.get_member(int(did))
             if member is None:
                 try:
                     member = await guild.fetch_member(int(did))
@@ -1874,14 +1840,44 @@ class SubscriptionsCog(commands.Cog):
             if not ok:
                 continue
 
-            eligible_ids.append(int(did))
-            if len(eligible_ids) >= 16:
+            # Keep this aligned with the original behavior:
+            # stop after 16 raw picks, then de-dupe afterwards.
+            pts_i = int(round(float(getattr(r, "pts", 0) or 0)))
+            games_i = int(getattr(r, "games", 0) or 0)
+            entries_raw.append({
+                "discord_id": int(did),
+                "row": r,
+                "pts": pts_i,
+                "games": games_i,
+            })
+
+            if len(entries_raw) >= 16:
                 break
 
-        seen = set()
-        eligible_ids = [x for x in eligible_ids if not (x in seen or seen.add(x))]
+        if conf_counts:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(conf_counts.items()))
+            await self.log.info(f"[subs/identity] eligible-top16 mk={cut_month} mapping_counts: {parts}")
 
-        return (eligible_ids, missing)
+        # De-dupe, preserving first occurrence (matches previous return behavior)
+        seen: set[int] = set()
+        entries: list[dict] = []
+        for e in entries_raw:
+            did = int(e.get("discord_id") or 0)
+            if not did or did in seen:
+                continue
+            seen.add(did)
+            entries.append(e)
+
+        return (entries, missing)
+
+    async def _eligible_top16_discord_ids_for_month(
+        self,
+        guild: discord.Guild,
+        cut_month: str,
+    ) -> tuple[list[int], list[str]]:
+        """Top16 cut (prize eligible): skip ineligible players and promote next eligible."""
+        entries, missing = await self._eligible_top16_entries_for_month(guild, cut_month)
+        return ([int(e["discord_id"]) for e in (entries or [])], missing)
 
     async def _topcut_prize_reminder_targets(
         self,
@@ -1933,22 +1929,38 @@ class SubscriptionsCog(commands.Cog):
         if not qualified:
             return ([], ["no qualified candidates"], 0)
 
-        name_to_id, id_to_member = await self._build_member_index(guild)
+        index = await self._build_member_index(guild)
 
         checked: list[dict] = []
         misses: list[str] = []
+
+        conf_counts: dict[str, int] = {}
 
         eligible_count = 0
         cutoff_pts: Optional[int] = None
         margin = int(getattr(cfg, "topcut_close_pts", 250) or 250)
 
         for rank, r in qualified:
-            did = self._discord_id_for_row(r, name_to_id)
-            if not did:
-                misses.append(r.discord or r.name or "unknown")
+            res = resolve_row_discord_id(r, index)
+            conf_counts[res.confidence] = conf_counts.get(res.confidence, 0) + 1
+
+            if not res.discord_id:
+                misses.append(
+                    f"{r.discord or r.name or 'unknown'} ({res.confidence}{(' ' + res.matched_key) if res.matched_key else ''})"
+                )
                 continue
 
-            member = id_to_member.get(int(did)) or guild.get_member(int(did))
+            did = int(res.discord_id)
+
+            # Only log the non-ID cases to avoid noise (this can scan more than 16 rows)
+            if res.confidence != "discord_id":
+                await self.log.info(
+                    "[subs/identity] topcut-prize "
+                    f"mk={mk} row={getattr(r, 'name', '')!r} discord={getattr(r, 'discord', '')!r} "
+                    f"-> discord_id={did} conf={res.confidence} key={res.matched_key!r}"
+                )
+
+            member = index.id_to_member.get(int(did)) or guild.get_member(int(did))
             if member is None:
                 try:
                     member = await guild.fetch_member(int(did))
@@ -1976,6 +1988,10 @@ class SubscriptionsCog(commands.Cog):
 
             if cutoff_pts is not None and pts_int < (cutoff_pts - margin):
                 break
+
+        if conf_counts:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(conf_counts.items()))
+            await self.log.info(f"[subs/identity] topcut-prize mk={mk} mapping_counts: {parts}")
 
         if cutoff_pts is None:
             cutoff_pts = int(checked[min(15, len(checked)-1)]["pts"]) if checked else 0
@@ -2051,10 +2067,10 @@ class SubscriptionsCog(commands.Cog):
         targets, misses, cutoff_pts = await self._topcut_prize_reminder_targets(guild, mk=mk)
 
         if misses:
-            await self._log(f"[subs] Topcut-prize mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
+            await self.log.info(f"[subs] Topcut-prize mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
 
         if not targets:
-            await self._log(f"[subs] Topcut-prize reminder ({mk} {kind}): 0 targets")
+            await self.log.info(f"[subs] Topcut-prize reminder ({mk} {kind}): 0 targets")
             print(f"[subs] Topcut-prize reminder ({mk} {kind}): 0 targets")
             await self._dm_mods_summary(
                 guild,
@@ -2094,7 +2110,7 @@ class SubscriptionsCog(commands.Cog):
                     await asyncio.sleep(cfg.dm_sleep_seconds)
 
         await asyncio.gather(*[_send_one(e) for e in targets])
-        await self._log(f"[subs] ✅ Topcut-prize reminder ({mk} {kind}) sent {sent}/{len(targets)}")
+        await self.log.ok(f"[subs] Topcut-prize reminder ({mk} {kind}) sent {sent}/{len(targets)}")
         await self._dm_mods_summary(
             guild,
             summary=f"[ECL] Topcut-prize reminder ({mk} {kind}) — sent {sent}/{len(targets)} DMs.",
@@ -2272,7 +2288,7 @@ class SubscriptionsCog(commands.Cog):
             if not ok:
                 to_dm_all.append(m)
 
-        # ✅ Opt-in gate: only DM members who opted in (if DM opt-in role is configured)
+        # Opt-in gate: only DM members who opted in (if DM opt-in role is configured)
         to_dm = [m for m in to_dm_all if self._dm_opted_in(m)]
         skipped_optout = len(to_dm_all) - len(to_dm)
 
@@ -2305,7 +2321,7 @@ class SubscriptionsCog(commands.Cog):
 
         await asyncio.gather(*[_send(m) for m in to_dm])
 
-        await self._log(f"[subs] ✅ Reminder '{kind}' for {target_month}: sent {sent}/{len(to_dm)}")
+        await self.log.ok(f"[subs] Reminder '{kind}' for {target_month}: sent {sent}/{len(to_dm)}")
 
         await self._dm_mods_summary(
             guild,
@@ -2323,10 +2339,10 @@ class SubscriptionsCog(commands.Cog):
         top16_ids, missing = await self._eligible_top16_discord_ids_for_month(guild, cut_month)
 
         if missing and missing != ["no qualified top16"]:
-            await self._log(f"[subs] Top16 mapping misses ({cut_month}): " + ", ".join(missing[:20]))
+            await self.log.info(f"[subs] Top16 mapping misses ({cut_month}): " + ", ".join(missing[:20]))
 
         if not top16_ids:
-            await self._log(f"[subs] Top16 cut ({cut_month}) produced 0 Discord IDs. (Nothing applied)")
+            await self.log.info(f"[subs] Top16 cut ({cut_month}) produced 0 Discord IDs. (Nothing applied)")
             return
 
         applied = 0
@@ -2349,7 +2365,7 @@ class SubscriptionsCog(commands.Cog):
             await self._grant_top16(uid, reason=f"Top16 qualifier ({cut_month})")
             applied += 1
 
-        await self._log(f"[subs] ✅ Applied Top16 cut: {applied} users -> free entry {target_month} + Top16 role")
+        await self.log.ok(f"[subs] Applied Top16 cut: {applied} users -> free entry {target_month} + Top16 role")
 
     async def _run_cleanup_job(self, guild: discord.Guild, target_month: str):
         job_id = f"cleanup:{guild.id}:{target_month}"
@@ -2380,7 +2396,7 @@ class SubscriptionsCog(commands.Cog):
             if not ok:
                 to_remove.append(m)
 
-        await self._log(f"[subs] Cleanup for {target_month}: removing ECL from {len(to_remove)} users")
+        await self.log.info(f"[subs] Cleanup for {target_month}: removing ECL from {len(to_remove)} users")
 
         for m in to_remove:
             with contextlib.suppress(Exception):
@@ -2463,26 +2479,11 @@ class SubscriptionsCog(commands.Cog):
                     await asyncio.sleep(cfg.dm_sleep_seconds)
 
         await asyncio.gather(*[_send_one(uid, rnames) for uid, rnames in user_roles.items()])
-        await self._log(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)}")
-
+        await self.log.info(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)}")
 
 
     async def _log(self, text: str):
-        print(text)
-        ch_id = self.cfg.log_channel_id
-        if not ch_id:
-            return
-        guild = self.bot.get_guild(self.cfg.guild_id)
-        if not guild:
-            return
-        ch = guild.get_channel(ch_id)
-        if not ch:
-            try:
-                ch = await guild.fetch_channel(ch_id)
-            except Exception:
-                return
-        with contextlib.suppress(Exception):
-            await ch.send(text)
+        await self.log.info(text)
 
 
 def setup(bot: commands.Bot):

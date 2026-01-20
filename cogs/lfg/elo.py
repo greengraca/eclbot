@@ -11,7 +11,6 @@ Centralizes:
 Keep these helpers mostly pure so cogs stay thin.
 """
 
-import re
 import math
 from typing import Dict, List, Optional, Tuple
 
@@ -20,6 +19,11 @@ import discord
 from topdeck_fetch import (
     get_league_rows_cached,
     normalize_topdeck_discord,
+)
+
+from utils.topdeck_identity import (
+    extract_discord_id,
+    member_handle_candidates,
 )
 
 from .models import LFGLobby, now_utc
@@ -239,42 +243,7 @@ def effective_elo_floor(
 
     return base_floor
 
-def _extract_discord_id(text: str) -> Optional[int]:
-    if not text:
-        return None
-    t = text.strip()
-    m = re.search(r"<@!?(\d{15,25})>", t)
-    if m:
-        return int(m.group(1))
-    m2 = re.search(r"\b(\d{15,25})\b", t)
-    if m2:
-        return int(m2.group(1))
-    return None
-
-
-def member_handle_candidates(member: discord.Member) -> List[str]:
-    """Return normalized handle candidates for TopDeck matching (stable order)."""
-    cands: List[str] = []
-
-    ordered = [
-        getattr(member, "display_name", None),
-        getattr(member, "global_name", None),
-        getattr(member, "name", None),
-    ]
-
-    # add name#discriminator when it exists (older accounts / bots)
-    discrim = getattr(member, "discriminator", None)
-    if discrim and discrim != "0" and getattr(member, "name", None):
-        ordered.append(f"{member.name}#{discrim}")
-
-    for raw in ordered:
-        if not raw:
-            continue
-        h = normalize_topdeck_discord(str(raw))
-        if h and h not in cands:
-            cands.append(h)
-
-    return cands
+ 
 
 
 def resolve_points_games_from_map(
@@ -319,7 +288,7 @@ async def get_member_points_games(
     # 1) Strong match: Discord ID
     target_id = int(member.id)
     for r in rows:
-        did = _extract_discord_id(getattr(r, "discord", "") or "")
+        did = extract_discord_id(getattr(r, "discord", "") or "")
         if did == target_id:
             return float(getattr(r, "pts", 0) or 0), int(getattr(r, "games", 0) or 0)
 

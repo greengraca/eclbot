@@ -56,6 +56,10 @@ topdeck_pods = db["topdeck_pods"]
 topdeck_month_dump_runs = db["topdeck_month_dump_runs"]
 topdeck_month_dump_chunks = db["topdeck_month_dump_chunks"]
 
+# Persistent state for timers and lobbies (survive restarts)
+persistent_timers = db["persistent_timers"]
+persistent_lobbies = db["persistent_lobbies"]
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
@@ -182,4 +186,51 @@ async def ensure_indexes() -> None:
     # MongoDB already has a unique _id index on every collection.
     # Do NOT try to create a "unique" index on _id; Atlas will error.
     # We keep subs_jobs using _id as the job id without creating extra indexes.
+
+    # ---- Persistent timers (survive restarts) ----
+    await persistent_timers.create_indexes(
+        [
+            IndexModel(
+                [("timer_id", ASCENDING)],
+                unique=True,
+                name="uniq_timer_id",
+            ),
+            IndexModel(
+                [("guild_id", ASCENDING), ("status", ASCENDING)],
+                name="by_guild_status",
+            ),
+            IndexModel(
+                [("voice_channel_id", ASCENDING), ("status", ASCENDING)],
+                name="by_vc_status",
+            ),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="by_expires_at",
+            ),
+        ]
+    )
+
+    # ---- Persistent lobbies (survive restarts) ----
+    await persistent_lobbies.create_indexes(
+        [
+            IndexModel(
+                [("guild_id", ASCENDING), ("lobby_id", ASCENDING)],
+                unique=True,
+                name="uniq_guild_lobby",
+            ),
+            IndexModel(
+                [("guild_id", ASCENDING)],
+                name="by_guild",
+            ),
+            IndexModel(
+                [("message_id", ASCENDING)],
+                name="by_message",
+            ),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="by_expires_at",
+            ),
+        ]
+    )
+
     return

@@ -19,6 +19,13 @@ from topdeck_fetch import (
 )
 
 from utils.interactions import safe_ctx_defer, safe_ctx_respond, safe_ctx_followup
+from utils.persistence import (
+    save_timer as db_save_timer,
+    delete_timer as db_delete_timer,
+    get_all_active_timers as db_get_all_active_timers,
+    cleanup_expired_timers as db_cleanup_expired_timers,
+)
+from utils.logger import format_console
 
 
 # ---------------- env / config ----------------
@@ -303,10 +310,13 @@ class ECLTimerCog(commands.Cog):
     - If VC drops below 2 non-bot members, timer auto-stops (with a mod-testing exception).
     - Bot only plays audio in 1 VC at a time (per-guild voice lock).
     - If room already has a timer, user gets buttons to keep/replace.
+    
+    Persists timer state to MongoDB for Heroku restart survival.
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._rehydrated = False
 
         # timer_id -> metadata
         self.active_timers: Dict[str, Dict] = {}
@@ -333,6 +343,370 @@ class ECLTimerCog(commands.Cog):
             f"EXTRA_TURNS_MINUTES={EXTRA_TURNS_MINUTES}, "
             f"OFFSET_MINUTES={OFFSET_MINUTES}"
         )
+
+    # ---------- Persistence helpers ----------
+
+    async def _save_timer_to_db(
+        self,
+        timer_id: str,
+        guild_id: int,
+        channel_id: int,
+        voice_channel_id: int,
+        message_id: Optional[int],
+        status: str,  # "active" | "paused"
+        start_time_utc: Optional[datetime],
+        durations: Dict[str, float],
+        remaining: Optional[Dict[str, float]],
+        ignore_autostop: bool,
+        messages: Dict[str, str],
+        audio: Dict[str, str],
+    ) -> None:
+        """Persist timer state to MongoDB."""
+        try:
+            # Calculate when the timer fully expires
+            if status == "active" and start_time_utc:
+                total_duration = durations.get("main", 0) + durations.get("extra", 0)
+                expires_at = start_time_utc + timedelta(seconds=total_duration + 60)  # +1 min buffer
+            elif status == "paused" and remaining:
+                total_remaining = remaining.get("extra", 0)  # extra is total remaining
+                expires_at = now_utc() + timedelta(seconds=total_remaining + 3600)  # +1 hour for paused
+            else:
+                expires_at = now_utc() + timedelta(hours=2)
+
+            await db_save_timer(
+                timer_id=timer_id,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                voice_channel_id=voice_channel_id,
+                message_id=message_id,
+                status=status,
+                start_time_utc=start_time_utc,
+                durations=durations,
+                remaining=remaining,
+                ignore_autostop=ignore_autostop,
+                messages=messages,
+                audio=audio,
+                expires_at=expires_at,
+            )
+        except Exception as e:
+            print(format_console(f"[timer] Failed to persist timer {timer_id}: {type(e).__name__}: {e}", level="error"))
+
+    async def _delete_timer_from_db(self, timer_id: str) -> None:
+        """Remove timer from DB."""
+        try:
+            await db_delete_timer(timer_id)
+        except Exception as e:
+            print(format_console(f"[timer] Failed to delete timer from DB: {type(e).__name__}: {e}", level="error"))
+
+    # ---------- Rehydration on startup ----------
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Rehydrate timers from MongoDB after bot restart."""
+        if self._rehydrated:
+            return
+        self._rehydrated = True
+
+        try:
+            # Clean up expired timers first
+            cleaned = await db_cleanup_expired_timers()
+            if cleaned:
+                print(format_console(f"[timer] Cleaned up {cleaned} expired timers from DB"))
+
+            # Load active/paused timers
+            docs = await db_get_all_active_timers()
+            if not docs:
+                print(format_console("[timer] No active timers to rehydrate"))
+                return
+
+            print(format_console(f"[timer] Rehydrating {len(docs)} timers from DB..."))
+            rehydrated_count = 0
+
+            for doc in docs:
+                try:
+                    rehydrated = await self._rehydrate_timer(doc)
+                    if rehydrated:
+                        rehydrated_count += 1
+                except Exception as e:
+                    timer_id = doc.get("timer_id", "?")
+                    print(format_console(f"[timer] Failed to rehydrate timer {timer_id}: {type(e).__name__}: {e}", level="error"))
+
+            print(format_console(f"[timer] Successfully rehydrated {rehydrated_count}/{len(docs)} timers", level="ok"))
+
+        except Exception as e:
+            print(format_console(f"[timer] Error during timer rehydration: {type(e).__name__}: {e}", level="error"))
+
+    async def _rehydrate_timer(self, doc: Dict) -> bool:
+        """Reconstruct a single timer from a DB document. Returns True if successful."""
+        timer_id = doc.get("timer_id")
+        if not timer_id:
+            return False
+
+        guild_id = int(doc.get("guild_id", 0))
+        channel_id = int(doc.get("channel_id", 0))
+        voice_channel_id = int(doc.get("voice_channel_id", 0))
+        message_id = doc.get("message_id")
+        status = doc.get("status", "active")
+
+        if not guild_id or not channel_id or not voice_channel_id:
+            await self._delete_timer_from_db(timer_id)
+            return False
+
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            print(format_console(f"[timer] Rehydrate: guild {guild_id} not found, deleting timer", level="warn"))
+            await self._delete_timer_from_db(timer_id)
+            return False
+
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.abc.Messageable)):
+            print(format_console(f"[timer] Rehydrate: channel {channel_id} not found, deleting timer", level="warn"))
+            await self._delete_timer_from_db(timer_id)
+            return False
+
+        voice_channel = guild.get_channel(voice_channel_id)
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            print(format_console(f"[timer] Rehydrate: voice channel {voice_channel_id} not found, deleting timer", level="warn"))
+            await self._delete_timer_from_db(timer_id)
+            return False
+
+        # Extract timer data
+        durations = {
+            "main": float(doc.get("durations_main", 0)),
+            "easter_egg": float(doc.get("durations_easter_egg", 0)),
+            "extra": float(doc.get("durations_extra", 0)),
+        }
+        messages = {
+            "turns": str(doc.get("msg_turns", "")),
+            "final": str(doc.get("msg_final", "")),
+        }
+        audio = {
+            "turns": str(doc.get("audio_turns", "")),
+            "final": str(doc.get("audio_final", "")),
+            "easter_egg": str(doc.get("audio_easter_egg", "")),
+        }
+        ignore_autostop = bool(doc.get("ignore_autostop", False))
+
+        # Update voice_channel_timers seq counter
+        vc_id = voice_channel_id
+        parts = timer_id.split("_")
+        if len(parts) == 2:
+            try:
+                seq = int(parts[1])
+                current_seq = self.voice_channel_timers.get(vc_id, 0)
+                if seq > current_seq:
+                    self.voice_channel_timers[vc_id] = seq
+            except ValueError:
+                pass
+
+        if status == "paused":
+            # Rehydrate as paused
+            remaining = {
+                "main": float(doc.get("remaining_main") or 0),
+                "easter_egg": float(doc.get("remaining_easter_egg") or 0),
+                "extra": float(doc.get("remaining_extra") or 0),
+            }
+            self.paused_timers[timer_id] = {
+                "remaining": remaining,
+                "messages": messages,
+                "audio": audio,
+                "voice_channel_id": voice_channel_id,
+                "ignore_autostop": ignore_autostop,
+                "pause_message": None,  # Can't restore Discord message objects
+                "ctx": None,  # Can't restore ctx
+            }
+            if message_id:
+                self.timer_messages[timer_id] = (channel_id, int(message_id))
+            print(format_console(f"[timer] Rehydrated paused timer {timer_id}"))
+            return True
+
+        # Rehydrate as active timer
+        start_time_utc = doc.get("start_time_utc")
+        if not isinstance(start_time_utc, datetime):
+            print(format_console(f"[timer] Rehydrate: invalid start_time for {timer_id}, deleting", level="warn"))
+            await self._delete_timer_from_db(timer_id)
+            return False
+
+        # Motor/PyMongo often returns UTC datetimes as offset-naive.
+        # Normalize to tz-aware UTC so math vs now_utc() never crashes.
+        if start_time_utc.tzinfo is None:
+            start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+        else:
+            start_time_utc = start_time_utc.astimezone(timezone.utc)
+
+        # Calculate remaining time
+        elapsed = (now_utc() - start_time_utc).total_seconds()
+        main_remaining = max(0, durations["main"] - elapsed)
+        total_remaining = max(0, durations["main"] + durations["extra"] - elapsed)
+        easter_egg_remaining = max(0, durations["easter_egg"] - elapsed)
+
+        # If timer has fully expired, clean up
+        if total_remaining <= 0:
+            print(format_console(f"[timer] Rehydrate: timer {timer_id} has expired, cleaning up", level="warn"))
+            await self._delete_timer_from_db(timer_id)
+            return False
+
+        # Store in active_timers
+        self.active_timers[timer_id] = {
+            "start_time": start_time_utc,
+            "durations": durations,
+            "messages": messages,
+            "audio": audio,
+            "voice_channel_id": voice_channel_id,
+            "ignore_autostop": ignore_autostop,
+        }
+        if message_id:
+            self.timer_messages[timer_id] = (channel_id, int(message_id))
+
+        # Initialize task list
+        self.timer_tasks[timer_id] = []
+
+        # Schedule remaining events
+        # We need to calculate what events are still pending
+        main_seconds = durations["main"]
+        extra_seconds = durations["extra"]
+        easter_egg_delay = durations["easter_egg"]
+
+        # Event 1: Easter egg (10 min warning)
+        if easter_egg_remaining > 0:
+            self.timer_tasks[timer_id].append(asyncio.create_task(
+                self._rehydrated_play_voice(
+                    guild,
+                    audio["easter_egg"],
+                    easter_egg_remaining,
+                    voice_channel_id,
+                    timer_id,
+                )
+            ))
+
+        # Event 2: Main time end (turns message + audio)
+        if main_remaining > 0:
+            self.timer_tasks[timer_id].append(asyncio.create_task(
+                self._rehydrated_timer_end(
+                    guild,
+                    channel,
+                    main_remaining,
+                    messages["turns"],
+                    audio["turns"],
+                    timer_id,
+                    voice_channel_id,
+                )
+            ))
+        elif main_remaining <= 0 and total_remaining > 0:
+            # Main time passed but extra time remains - don't re-send turns message
+            pass
+
+        # Event 3: Final (extra time end)
+        if total_remaining > 0:
+            self.timer_tasks[timer_id].append(asyncio.create_task(
+                self._rehydrated_final_timer_end(
+                    guild,
+                    channel,
+                    total_remaining,
+                    messages["final"],
+                    audio["final"],
+                    timer_id,
+                    voice_channel_id,
+                )
+            ))
+
+        print(format_console(f"[timer] Rehydrated active timer {timer_id} with {len(self.timer_tasks[timer_id])} remaining events"))
+        return True
+
+    async def _rehydrated_play_voice(
+        self,
+        guild: discord.Guild,
+        audio_path: str,
+        delay_seconds: float,
+        voice_channel_id: int,
+        timer_id: str,
+    ) -> None:
+        """Play voice file after delay (rehydrated timer)."""
+        await asyncio.sleep(max(0, delay_seconds))
+        if timer_id not in self.active_timers:
+            return
+        await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
+
+    async def _rehydrated_timer_end(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.Messageable,
+        delay_seconds: float,
+        message: str,
+        audio_path: str,
+        timer_id: str,
+        voice_channel_id: int,
+    ) -> None:
+        """Handle main timer end (rehydrated timer)."""
+        await asyncio.sleep(max(0, delay_seconds))
+        if timer_id not in self.active_timers:
+            return
+
+        # Edit or send message
+        if timer_id in self.timer_messages:
+            ch_id, m_id = self.timer_messages[timer_id]
+            ch = self.bot.get_channel(ch_id)
+            if ch:
+                try:
+                    msg = await ch.fetch_message(m_id)
+                    await msg.edit(content=message)
+                except Exception as e:
+                    print(format_console(f"[timer] Rehydrated: failed to edit message: {e}", level="warn"))
+        else:
+            try:
+                msg = await channel.send(message)
+                self.timer_messages[timer_id] = (channel.id, msg.id)
+            except Exception as e:
+                print(format_console(f"[timer] Rehydrated: failed to send message: {e}", level="warn"))
+
+        # Play audio
+        await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
+
+    async def _rehydrated_final_timer_end(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.Messageable,
+        delay_seconds: float,
+        message: str,
+        audio_path: str,
+        timer_id: str,
+        voice_channel_id: int,
+    ) -> None:
+        """Handle final timer end (rehydrated timer)."""
+        await asyncio.sleep(max(0, delay_seconds))
+        if timer_id not in self.active_timers:
+            return
+
+        # Edit or send message
+        msg_obj = None
+        if timer_id in self.timer_messages:
+            ch_id, m_id = self.timer_messages[timer_id]
+            ch = self.bot.get_channel(ch_id)
+            if ch:
+                try:
+                    msg_obj = await ch.fetch_message(m_id)
+                    await msg_obj.edit(content=message)
+                except Exception:
+                    pass
+        
+        if msg_obj is None:
+            try:
+                msg_obj = await channel.send(message)
+            except Exception:
+                pass
+
+        # Play audio
+        await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
+
+        # Delete message after 1 minute
+        if msg_obj:
+            await asyncio.sleep(60)
+            with contextlib.suppress(Exception):
+                await msg_obj.delete()
+
+        # Final cleanup
+        self._cleanup_timer_structs(timer_id)
+        await self._delete_timer_from_db(timer_id)
 
     # ---------- mod helpers ----------
 
@@ -847,6 +1221,8 @@ class ECLTimerCog(commands.Cog):
         if final_cleanup and timer_id:
             print(f"[timer_end] Final stage complete, cleaning up timer_id={timer_id}")
             self._cleanup_timer_structs(timer_id)
+            # Delete from DB
+            await self._delete_timer_from_db(timer_id)
 
     async def play_voice_file(
         self,
@@ -922,6 +1298,10 @@ class ECLTimerCog(commands.Cog):
                     print(f"[set_timer_stopped] Failed to edit/delete message: {e}")
 
         self._cleanup_timer_structs(timer_id)
+        
+        # Delete from DB
+        await self._delete_timer_from_db(timer_id)
+        
         print(f"[set_timer_stopped] Cleaned up timer_id={timer_id}, reason={reason}")
 
     # ---------- core timer start ----------
@@ -953,16 +1333,16 @@ class ECLTimerCog(commands.Cog):
         # Always create fresh list for this timer_id (prevents KeyError race)
         self.timer_tasks[timer_id] = []
 
-        print(f"[timer] Using timer_id={timer_id}")
+        print(format_console(f"[timer] Using timer_id={timer_id}"))
 
         main_seconds = max(0.0, main_minutes * 60.0)
         to_end_delay_sec = max(0.0, (main_minutes - offset) * 60.0)
         extra_seconds = max(0.0, extra_minutes * 60.0)
 
-        print(
+        print(format_console(
             f"[timer] Calculated to_end_delay_sec={to_end_delay_sec} "
             f"({(main_minutes - offset):.2f} minutes from start)"
-        )
+        ))
 
         end_time_main = now_utc() + timedelta(minutes=main_minutes)
         end_ts_main = ts(end_time_main)
@@ -1048,6 +1428,22 @@ class ECLTimerCog(commands.Cog):
             f"[timer] Scheduled tasks for timer_id={timer_id}: "
             f"{len(self.timer_tasks[timer_id])} tasks, "
             f"delay_sec={to_end_delay_sec}"
+        )
+
+        # Persist timer to DB
+        await self._save_timer_to_db(
+            timer_id=timer_id,
+            guild_id=guild.id,
+            channel_id=ctx.channel.id,
+            voice_channel_id=voice_channel.id,
+            message_id=sent.id,
+            status="active",
+            start_time_utc=self.active_timers[timer_id]["start_time"],
+            durations=self.active_timers[timer_id]["durations"],
+            remaining=None,
+            ignore_autostop=bool(ignore_autostop),
+            messages=self.active_timers[timer_id]["messages"],
+            audio=self.active_timers[timer_id]["audio"],
         )
 
         # intro audio
@@ -1318,6 +1714,23 @@ class ECLTimerCog(commands.Cog):
             "ignore_autostop": bool(timer_data.get("ignore_autostop", False)),
         }
 
+        # Persist paused state to DB
+        ch_id, m_id = self.timer_messages.get(timer_id, (ctx.channel.id, pause_msg.id))
+        await self._save_timer_to_db(
+            timer_id=timer_id,
+            guild_id=ctx.guild.id,
+            channel_id=ch_id,
+            voice_channel_id=timer_data.get("voice_channel_id", 0),
+            message_id=pause_msg.id,
+            status="paused",
+            start_time_utc=None,
+            durations=timer_data.get("durations", {"main": 0, "easter_egg": 0, "extra": 0}),
+            remaining=remaining,
+            ignore_autostop=bool(timer_data.get("ignore_autostop", False)),
+            messages=timer_data["messages"],
+            audio=timer_data["audio"],
+        )
+
 
     @commands.slash_command(
         name="resumetimer",
@@ -1430,6 +1843,38 @@ class ECLTimerCog(commands.Cog):
             f"▶️ Timer for **{voice_channel.name}** has been resumed and will end <t:{ts(end_time)}:R>."
         )
         self.timer_messages[timer_id] = (ctx.channel.id, msg.id)
+
+        # Persist resumed timer to DB
+        # IMPORTANT: Store the ORIGINAL durations concept (main, extra as separate)
+        # not the confusingly-named paused["remaining"] where "extra" is total remaining.
+        # For rehydration, we need to store the actual remaining times clearly.
+        #
+        # After resume, the new "durations" should represent the time windows from now:
+        # - main_duration = remaining main time
+        # - extra_duration = remaining extra time (total_remaining - main_remaining)
+        #
+        main_remaining_sec = paused["remaining"]["main"]
+        total_remaining_sec = paused["remaining"]["extra"]  # this is actually total, not extra
+        extra_only_sec = max(0, total_remaining_sec - main_remaining_sec)
+        
+        await self._save_timer_to_db(
+            timer_id=timer_id,
+            guild_id=ctx.guild.id,
+            channel_id=ctx.channel.id,
+            voice_channel_id=paused.get("voice_channel_id", 0),
+            message_id=msg.id,
+            status="active",
+            start_time_utc=self.active_timers[timer_id]["start_time"],
+            durations={
+                "main": main_remaining_sec,
+                "extra": extra_only_sec,  # store JUST extra, not total
+                "easter_egg": paused["remaining"]["easter_egg"],
+            },
+            remaining=None,
+            ignore_autostop=bool(paused.get("ignore_autostop", False)),
+            messages=paused["messages"],
+            audio=paused["audio"],
+        )
 
     @commands.slash_command(
         name="checktimer",

@@ -2,7 +2,10 @@ import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from colorama import just_fix_windows_console
 
+
+just_fix_windows_console()
 load_dotenv()
 
 # Mongo bootstrap (Motor)
@@ -35,6 +38,7 @@ INITIAL_EXTENSIONS = [
     "cogs.lfg_cog",
     "cogs.join_league_cog",
     "cogs.topdeck_month_dump",
+    "cogs.debug_cog",
 ]
 
 _MONGO_BOOTSTRAPPED = False
