@@ -96,7 +96,7 @@ async def on_ready():
             await invite_cog.build_invite_cache(guild)
 
     log_ok(f"[boot] Logged in as {bot.user} ({bot.user.id})")
-    log_sync(f"[boot] voice_states intent on? {bot.intents.voice_states}")
+    # log_sync(f"[boot] voice_states intent on? {bot.intents.voice_states}")
 
 
 if __name__ == "__main__":

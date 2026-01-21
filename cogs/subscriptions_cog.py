@@ -12,9 +12,8 @@ What it does:
 
 import asyncio
 import contextlib
-import json
-import re
 import traceback
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Set, Tuple
 
@@ -50,82 +49,22 @@ from utils.dates import (
     parse_month_from_text,
 )
 
+# Import from subscriptions submodule
+from .subscriptions import (
+    compute_one_time_window as compute_kofi_one_time_window,
+    extract_discord_user_id,
+    extract_json_from_message_content,
+    SubsLinksView,
+    build_reminder_embed,
+    build_flip_mods_embed,
+    build_top16_online_reminder_embed,
+    build_topcut_prize_reminder_embed,
+    MonthFlipHandler,
+)
+
 
 GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 
-
-# -------------------- Ko-fi specific helpers --------------------
-
-def compute_kofi_one_time_window(when_lisbon: datetime, days: int) -> tuple[datetime, datetime]:
-    """Return (starts_at_utc, expires_at_utc) for a Ko-fi one-time pass."""
-    if when_lisbon.tzinfo is None:
-        when_lisbon = when_lisbon.replace(tzinfo=LISBON_TZ)
-    starts = when_lisbon.astimezone(timezone.utc)
-    expires = starts + timedelta(days=max(1, int(days or 30)))
-    return starts, expires
-
-
-def extract_discord_user_id(payload: Dict[str, Any]) -> Optional[int]:
-    """Best-effort mapping from Ko-fi payload -> Discord user id."""
-    duid = str(payload.get("discord_userid") or payload.get("discord_user_id") or "").strip()
-    if duid.isdigit():
-        return int(duid)
-
-    msg = str(payload.get("message") or "")
-    m = re.search(r"<@!?(\d{15,25})>", msg)
-    if m:
-        return int(m.group(1))
-    m2 = re.search(r"\b(\d{15,25})\b", msg)
-    if m2:
-        return int(m2.group(1))
-    return None
-
-
-def extract_json_from_message_content(content: str) -> Optional[Dict[str, Any]]:
-    """Supports ```json ...``` or raw JSON."""
-    if not content:
-        return None
-    m = re.search(r"```json\s*([\s\S]+?)\s*```", content)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            return None
-    content = content.strip()
-    if content.startswith("{") and content.endswith("}"):
-        try:
-            return json.loads(content)
-        except Exception:
-            return None
-    return None
-
-
-# -------------------- views --------------------
-
-class SubsLinksView(discord.ui.View):
-    def __init__(self, kofi_url: str, patreon_url: str):
-        super().__init__(timeout=None)
-        self.kofi_url = (kofi_url or "").strip()
-        self.patreon_url = (patreon_url or "").strip()
-
-
-    @staticmethod
-    def _ok(url: str) -> bool:
-        return url.startswith("http://") or url.startswith("https://")
-
-    @discord.ui.button(label="💚 Subscribe on Ko-fi", style=discord.ButtonStyle.primary)
-    async def kofi_primary(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if not self._ok(self.kofi_url):
-            await interaction.response.send_message("Ko-fi link not configured.", ephemeral=True)
-            return
-        await interaction.response.send_message(self.kofi_url, ephemeral=True)
-
-    @discord.ui.button(label="🔥 Join Patreon (ECL Grinder+)", style=discord.ButtonStyle.secondary)
-    async def patreon_secondary(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if not self._ok(self.patreon_url):
-            await interaction.response.send_message("Patreon link not configured.", ephemeral=True)
-            return
-        await interaction.response.send_message(self.patreon_url, ephemeral=True)
 
 
 # -------------------- cog --------------------
@@ -143,11 +82,12 @@ class SubscriptionsCog(commands.Cog):
         self._top16_reminder_lock = asyncio.Lock()
         self._access_audit_lock = asyncio.Lock()
         self._topdeck_dump_lock = asyncio.Lock()
-        self._month_close_lock = asyncio.Lock()
 
         # log throttles (avoid spamming every 5 mins)
         self._warned_missing_inprogress_checker = False
-        self._warned_revoke_delayed_for: set[str] = set()
+
+        # Month flip handler (manages month-end logic)
+        self.flip_handler = MonthFlipHandler(self)
 
 
     def cog_unload(self):
@@ -369,107 +309,30 @@ class SubscriptionsCog(commands.Cog):
 
 
     async def _build_reminder_embed(self, kind: str, target_month: str, registered_count: int) -> discord.Embed:
+        """Build subscription reminder embed."""
         cfg = self.cfg
-        nice_month = month_label(target_month)
-
-        if kind == "last":
-            title = f"🔥 Join {nice_month} — last day before the reset"
-            urgency = "Today is the **monthly reset** — lock in access for next league."
-        else:
-            title = f"🔥 Join {nice_month} — league starts soon"
-            urgency = "The **monthly reset** is in **3 days** — lock in access for next league."
-
-        desc = (
-            f"{urgency}\n\n"
-            "📌 **You can register any day of the league.**\n"
-            "This is just a reminder so you **don’t lose access** when the month flips — "
-            "and if you do lose it, you can **regain access anytime** by registering.\n\n"
-            f"Right now, you’re **not registered** for **{nice_month}** — "
-            f"and you’ll lose **ECL** access when the month flips.\n\n"
-            f"👥 **Already registered:** **{registered_count}** players\n"
+        return build_reminder_embed(
+            kind=kind,
+            target_month=target_month,
+            registered_count=registered_count,
+            embed_color=cfg.embed_color,
+            embed_thumbnail_url=cfg.embed_thumbnail_url,
         )
 
-        emb = discord.Embed(
-            title=title,
-            description=desc,
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
-        )
-
-        emb.add_field(
-            name="How to register",
-            value=(
-                "• **Ko-fi**: **monthly** subscription or pay for a **30-day pass**\n"
-                "• **Patreon**: **ECL Grinder** tier (or above)\n"
-            ),
-            inline=False,
-        )
-
-        emb.set_footer(text="ECL • If you're having any issues please open a ticket !")
-
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb.set_thumbnail(url=cfg.embed_thumbnail_url)
-
-        return emb
-    
     # -------------------- MOD reminder helpers --------------------
     
     def _build_flip_mods_embed(self, guild: discord.Guild, mk: str) -> discord.Embed:
+        """Build month-flip checklist embed for mods."""
         cfg = self.cfg
-
-        current_bracket = TOPDECK_BRACKET_ID or "(not set)"
-        next_bracket = NEXT_MONTH_TOPDECK_BRACKET_ID or "(not set)"
-
-
-        # Build free-entry role names (mentions render as names)
-        role_ids = sorted(int(x) for x in (cfg.free_entry_role_ids or set()) if int(x))
-        role_lines: list[str] = []
-        missing_count = 0
-        for rid in role_ids:
-            r = guild.get_role(rid)
-            if r:
-                role_lines.append(f"• {r.name}")
-            else:
-                missing_count += 1
-
-        roles_value = "\n".join(role_lines) if role_lines else "(none configured)"
-        # Keep within embed field limits
-        if len(roles_value) > 950:
-            roles_value = roles_value[:950] + "\n…"
-
-        if missing_count:
-            roles_value += f"\n\n⚠️ Missing roles in guild: {missing_count}"
-
-        emb = discord.Embed(
-            title=f"🧰 Month flip checklist — {month_label(mk)}",
-            description="Do these steps after the month flips:",
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
+        return build_flip_mods_embed(
+            guild=guild,
+            mk=mk,
+            current_bracket=TOPDECK_BRACKET_ID or "",
+            next_bracket=NEXT_MONTH_TOPDECK_BRACKET_ID or "",
+            free_entry_role_ids=cfg.free_entry_role_ids,
+            embed_color=cfg.embed_color,
+            embed_thumbnail_url=cfg.embed_thumbnail_url,
         )
-
-        emb.add_field(
-            name="1) TopDeck",
-            value=(
-                "Set the **new** bracket id, restart the worker, then run:\n"
-                "`/unlink` → `/link`"
-            ),
-            inline=False,
-        )
-        emb.add_field(name="Current TOPDECK_BRACKET_ID", value=f"`{current_bracket}`", inline=False)
-        emb.add_field(name="NEXT_MONTH_TOPDECK_BRACKET_ID", value=f"`{next_bracket}`", inline=False)
-
-        emb.add_field(
-            name="2) Free-entry roles",
-            value="Review/update free-entry roles for this month, then restart the worker.",
-            inline=False,
-        )
-        emb.add_field(name="Free-entry roles (names)", value=roles_value, inline=False)
-
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb.set_thumbnail(url=cfg.embed_thumbnail_url)
-
-        emb.set_footer(text="ECL • Mods month flip checklist")
-        return emb
-
-
 
     async def _dm_mods_embed(self, guild: discord.Guild, *, embed: discord.Embed) -> None:
         cfg = self.cfg
@@ -635,47 +498,19 @@ class SubscriptionsCog(commands.Cog):
         need_total: int,
         mention: str,       # e.g. member.mention
     ) -> discord.Embed:
+        """Build Top16 online games reminder embed."""
         cfg = self.cfg
-
-        kind = (kind or "").strip().lower()
-        if kind not in ("5d", "3d", "last"):
-            kind = "5d"
-
-        nice_month = month_label(mk)
-        missing = max(0, int(need_total) - int(online_games))
-
-        if kind == "last":
-            title = f"⏳ Last day — finish your online games for Top16"
-            urgency = "Today is the **last day** of the league."
-        elif kind == "3d":
-            title = f"⚠️ 3 days left — finish your online games for Top16"
-            urgency = "Only **3 days** left in the league."
-        else:
-            title = f"👀 5 days left — finish your online games for Top16"
-            urgency = "Only **5 days** left in the league."
-
-        desc = (
-            f"Hey {mention} 👋\n\n"
-            f"{urgency}\n\n"
-            f"You're currently **#{rank:02d}** on **TopDeck** for **{nice_month}**, "
-            f"but you’re **not qualified** for the Top16 cut yet because of the **online games requirement**.\n\n"
-            f"✅ Online games: **{online_games} / {need_total}**\n"
-            f"❗ You need **{missing}** more online game(s) to qualify.\n\n"
-            "If you want to keep your spot, try to finish the remaining online games before the league ends."
+        return build_top16_online_reminder_embed(
+            kind=kind,
+            mk=mk,
+            rank=rank,
+            name=name,
+            online_games=online_games,
+            need_total=need_total,
+            mention=mention,
+            embed_color=cfg.embed_color,
+            embed_thumbnail_url=cfg.embed_thumbnail_url,
         )
-
-        emb = discord.Embed(
-            title=title,
-            description=desc,
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
-        )
-
-        emb.set_footer(text="ECL • Top16 qualification reminder")
-
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb.set_thumbnail(url=cfg.embed_thumbnail_url)
-
-        return emb
     
     async def _run_topdeck_month_dump_flip_job(self, guild: discord.Guild, *, month_str: str) -> None:
         job_id = f"topdeckdumpmonth:auto:{guild.id}:{month_str}"
@@ -1247,163 +1082,28 @@ class SubscriptionsCog(commands.Cog):
 
         await ctx.followup.send("✅ Sent you all embed previews (one per DM).", ephemeral=True)
 
-    # -------------------- Scheduler --------------------
-    
+    # -------------------- Scheduler (month flip delegated to handler) --------------------
+
     def _month_close_pending_job_id(self, guild_id: int, cut_month: str) -> str:
-        return f"month-close-pending:{guild_id}:{cut_month}"
+        return self.flip_handler.month_close_pending_job_id(guild_id, cut_month)
 
     def _month_close_done_job_id(self, guild_id: int, cut_month: str) -> str:
-        return f"month-close:{guild_id}:{cut_month}"
+        return self.flip_handler.month_close_done_job_id(guild_id, cut_month)
 
     async def _in_progress_games_count(self) -> Optional[int]:
-        """
-        Returns:
-        - int >= 0 when we can determine the in-progress count
-        - None when unknown (fail-safe => do NOT run 7pm close logic)
-        """
-        if not TOPDECK_BRACKET_ID:
-            await self.log.warn("[subs] TOPDECK_BRACKET_ID not set; month-close will NOT run (fail-safe).")
-            return None
-
-        try:
-            pods = await get_in_progress_pods(
-                TOPDECK_BRACKET_ID,
-                firebase_id_token=FIREBASE_ID_TOKEN,
-            )
-            return len(pods)
-        except Exception as e:
-            await self._log(
-                f"[subs] ⚠️ in-progress check failed: {type(e).__name__}: {e} "
-                "(fail-safe, month-close paused)"
-            )
-            return None
+        return await self.flip_handler.in_progress_games_count()
 
     async def _ensure_month_close_pending(self, guild: discord.Guild, *, cut_month: str) -> None:
-        """Create the pending marker once the close window begins (idempotent)."""
-        pid = self._month_close_pending_job_id(guild.id, cut_month)
-        if await subs_jobs.find_one({"_id": pid}):
-            return
-        await subs_jobs.insert_one({"_id": pid, "ran_at": datetime.now(timezone.utc)})
+        await self.flip_handler.ensure_month_close_pending(guild, cut_month=cut_month)
 
     async def _run_month_close_logic(self, guild: discord.Guild, *, cut_month: str) -> None:
-        """
-        The 7pm close logic (may run later if games are still in progress).
-        """
-        target_month = add_months(cut_month, 1)
-
-        # 1) Apply Top16 cut => free entry next month + Top16 role
-        await self._apply_top16_cut_for_next_month(
-            guild,
-            cut_month=cut_month,
-            target_month=target_month,
-        )
-
-        # 2) Mods checklist for the NEXT month
-        await self._run_flip_mods_reminder_job(guild, mk=target_month)
-
-        # 3) Free-role info DMs for the NEXT month
-        await self._run_free_role_flip_info_job(guild, mk=target_month)
-
-        # 4) Dump the CLOSED month (cut_month) to Mongo
-        await self._run_topdeck_month_dump_flip_job(guild, month_str=cut_month)
+        await self.flip_handler.run_month_close_logic(guild, cut_month=cut_month)
 
     async def _maybe_run_month_close_job(self, guild: discord.Guild, *, cut_month: str) -> None:
-        """
-        If pending exists and not done, run when in-progress games == 0.
-        """
-        done_id = self._month_close_done_job_id(guild.id, cut_month)
-        if await subs_jobs.find_one({"_id": done_id}):
-            return
-
-        pending_id = self._month_close_pending_job_id(guild.id, cut_month)
-        pending = await subs_jobs.find_one({"_id": pending_id})
-        if not pending:
-            return  # not scheduled / not started
-
-        # gate on in-progress games
-        n = await self._in_progress_games_count()
-        if n is None:
-            return  # fail-safe: unknown => don't run
-        if n > 0:
-            await self.log.info(f"[subs] month-close pending ({cut_month}) blocked: {n} game(s) still in progress")
-            return
-
-        async with self._month_close_lock:
-            # re-check inside lock
-            if await subs_jobs.find_one({"_id": done_id}):
-                return
-
-            try:
-                await self.log.ok(f"[subs] month-close starting for {cut_month} (in-progress=0)")
-                await self._run_month_close_logic(guild, cut_month=cut_month)
-            except Exception as e:
-                await self.log.error(f"[subs] month-close FAILED for {cut_month}: {type(e).__name__}: {e}")
-                return
-
-            await subs_jobs.insert_one({"_id": done_id, "ran_at": datetime.now(timezone.utc)})
-            await self.log.ok(f"[subs] month-close done for {cut_month}")
+        await self.flip_handler.maybe_run_month_close_job(guild, cut_month=cut_month)
 
     async def _run_monthly_midnight_revoke_job(self, guild: discord.Guild, *, target_month: str) -> None:
-        """
-        Remove ECL for members not eligible for target_month (new month).
-        Idempotent per month.
-        """
-        cfg = self.cfg
-        job_id = f"monthly-revoke:{guild.id}:{target_month}"
-        if await subs_jobs.find_one({"_id": job_id}):
-            return
-
-        # If month-close for previous month is pending but not done, delay revoke to avoid
-        # wrongly removing Top16 winners before their free-entry is written.
-        prev_month = add_months(target_month, -1)
-        prev_pending = await subs_jobs.find_one({"_id": self._month_close_pending_job_id(guild.id, prev_month)})
-        prev_done = await subs_jobs.find_one({"_id": self._month_close_done_job_id(guild.id, prev_month)})
-        if prev_pending and not prev_done:
-            if target_month not in self._warned_revoke_delayed_for:
-                self._warned_revoke_delayed_for.add(target_month)
-                await self.log.info(f"[subs] monthly revoke delayed for {target_month}: month-close still pending for {prev_month}")
-            return
-
-        if not self._enforcement_active(datetime.now(LISBON_TZ)):
-            await self.log.info("[subs] monthly revoke skipped: enforcement not active yet")
-            return
-
-        if not cfg.ecl_role_id:
-            return
-        role = guild.get_role(cfg.ecl_role_id)
-        if not role:
-            return
-
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
-
-        flip_at = month_bounds(target_month)[0]  # start of target_month @ 00:00 Lisbon
-
-        members = list(role.members)
-        if len(members) < 50:
-            try:
-                members = [m async for m in guild.fetch_members(limit=None)]
-                members = [m for m in members if role in m.roles]
-            except Exception:
-                members = list(role.members)
-
-        removed = 0
-        checked = 0
-
-        for m in members:
-            if m.bot:
-                continue
-            checked += 1
-            ok, _ = await self._eligibility(m, target_month, at=flip_at)
-            if ok:
-                continue
-            did = await self._revoke_ecl_member(m, reason=f"Monthly reset: not eligible for {target_month}", dm=True)
-            if did:
-                removed += 1
-            if cfg.dm_sleep_seconds:
-                await asyncio.sleep(cfg.dm_sleep_seconds)
-
-        await self.log.info(f"[subs] monthly revoke {target_month}: checked={checked} removed={removed}")
-
+        await self.flip_handler.run_monthly_midnight_revoke_job(guild, target_month=target_month)
 
     @tasks.loop(minutes=5)
     async def _tick(self):
@@ -1423,9 +1123,9 @@ class SubscriptionsCog(commands.Cog):
             last_day = last_day_of_month(now)
             last_day_date = last_day.date()
 
-            log_sync(
-                f"[subs] debug now={now.isoformat()} mk={now_mk} close_at={league_close_at(now_mk).isoformat()}"
-            )
+            # log_sync(
+            #     f"[subs] debug now={now.isoformat()} mk={now_mk} close_at={league_close_at(now_mk).isoformat()}"
+            # )
 
             # regular "register for next month" reminders
             target_month = add_months(now_mk, 1)  # next month
@@ -1963,42 +1663,20 @@ class SubscriptionsCog(commands.Cog):
         cutoff_pts: int,
         mention: str,
     ) -> discord.Embed:
+        """Build Top16 prize eligibility reminder embed."""
         cfg = self.cfg
-        kind = (kind or "").strip().lower()
-        if kind not in ("5d", "1d"):
-            kind = "5d"
-
-        nice_month = month_label(mk)
         margin = int(getattr(cfg, "topcut_close_pts", 250) or 250)
-
-        if kind == "1d":
-            title = "⏳ 1 day left — prize eligibility reminder"
-            urgency = "Only **1 day** left in the league."
-        else:
-            title = "👀 5 days left — prize eligibility reminder"
-            urgency = "Only **5 days** left in the league."
-
-        desc = (
-            f"Hey {mention} 👋\n\n"
-            f"{urgency}\n\n"
-            f"You're currently **#{rank:02d}** on TopDeck for **{nice_month}** with **{pts}** points.\n"
-            f"You're within **{margin}** points of the current eligible Top16 cutoff (~**{cutoff_pts}** pts).\n\n"
-            "**Important:** only players who are **registered / subscribed at the end of the month** are eligible "
-            "for **Top16 / prizes**.\n\n"
-            "If you want to stay eligible, make sure your subscription / registration is active before the league ends."
+        return build_topcut_prize_reminder_embed(
+            kind=kind,
+            mk=mk,
+            rank=rank,
+            pts=pts,
+            cutoff_pts=cutoff_pts,
+            mention=mention,
+            margin=margin,
+            embed_color=cfg.embed_color,
+            embed_thumbnail_url=cfg.embed_thumbnail_url,
         )
-
-        emb = discord.Embed(
-            title=title,
-            description=desc,
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
-        )
-        emb.set_footer(text="ECL • Prize eligibility reminder")
-
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb.set_thumbnail(url=cfg.embed_thumbnail_url)
-
-        return emb
 
     async def _run_topcut_prize_reminder_job(self, guild: discord.Guild, *, mk: str, kind: str) -> None:
         job_id = f"topcut-prize-remind:{guild.id}:{mk}:{kind}"
@@ -2277,153 +1955,22 @@ class SubscriptionsCog(commands.Cog):
 
 
     async def _apply_top16_cut_for_next_month(self, guild: discord.Guild, *, cut_month: str, target_month: str):
-        cfg = self.cfg
-
-        top16_ids, missing = await self._eligible_top16_discord_ids_for_month(guild, cut_month)
-
-        if missing and missing != ["no qualified top16"]:
-            await self.log.info(f"[subs] Top16 mapping misses ({cut_month}): " + ", ".join(missing[:20]))
-
-        if not top16_ids:
-            await self.log.info(f"[subs] Top16 cut ({cut_month}) produced 0 Discord IDs. (Nothing applied)")
-            return
-
-        applied = 0
-        for uid in top16_ids:
-            await subs_free_entries.update_one(
-                {"guild_id": cfg.guild_id, "user_id": int(uid), "month": target_month},
-                {
-                    "$setOnInsert": {
-                        "guild_id": cfg.guild_id,
-                        "user_id": int(uid),
-                        "month": target_month,
-                        "created_at": datetime.now(timezone.utc),
-                    },
-                    "$set": {"reason": f"Top16 ({cut_month})", "updated_at": datetime.now(timezone.utc)},
-                },
-                upsert=True,
-            )
-
-            await self._grant_ecl(uid, reason=f"Top16 free entry ({target_month})")
-            await self._grant_top16(uid, reason=f"Top16 qualifier ({cut_month})")
-            applied += 1
-
-        await self.log.ok(f"[subs] Applied Top16 cut: {applied} users -> free entry {target_month} + Top16 role")
+        """Apply Top16 cut - delegated to flip handler."""
+        await self.flip_handler.apply_top16_cut_for_next_month(guild, cut_month=cut_month, target_month=target_month)
 
     async def _run_cleanup_job(self, guild: discord.Guild, target_month: str):
-        job_id = f"cleanup:{guild.id}:{target_month}"
-        if await subs_jobs.find_one({"_id": job_id}):
-            return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+        """Cleanup job - delegated to flip handler."""
+        await self.flip_handler.run_cleanup_job(guild, target_month)
 
-        cfg = self.cfg
-        role = guild.get_role(cfg.ecl_role_id) if cfg.ecl_role_id else None
-        if not role:
-            return
-
-        cut_month = add_months(target_month, -1)  # month that just ended
-        await self._apply_top16_cut_for_next_month(guild, cut_month=cut_month, target_month=target_month)
-
-        members = list(role.members)
-        if len(members) < 50:
-            members = [m async for m in guild.fetch_members(limit=None)]
-            members = [m for m in members if role in m.roles]
-
-        flip_at = month_bounds(target_month)[0]
-
-        to_remove: list[discord.Member] = []
-        for m in members:
-            if m.bot:
-                continue
-            ok, _ = await self._eligibility(m, target_month, at=flip_at)
-            if not ok:
-                to_remove.append(m)
-
-        await self.log.info(f"[subs] Cleanup for {target_month}: removing ECL from {len(to_remove)} users")
-
-        for m in to_remove:
-            with contextlib.suppress(Exception):
-                await m.remove_roles(role, reason=f"Not subscribed/free for {target_month}")
-
-    # -------------------- Flip reminders --------------------
-     
+    # -------------------- Flip reminders (delegated to handler) --------------------
 
     async def _run_flip_mods_reminder_job(self, guild: discord.Guild, *, mk: str) -> None:
-        job_id = f"flip-mods:{guild.id}:{mk}"
-        if await subs_jobs.find_one({"_id": job_id}):
-            return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
-
-        emb = self._build_flip_mods_embed(guild, mk)
-        await self._dm_mods_embed(guild, embed=emb)
-
+        """DM mods the month-flip checklist - delegated to flip handler."""
+        await self.flip_handler.run_flip_mods_reminder_job(guild, mk=mk)
 
     async def _run_free_role_flip_info_job(self, guild: discord.Guild, *, mk: str) -> None:
-        """Once-per-month DM to players who have free-entry via specific roles."""
-        cfg = self.cfg
-        role_ids = set(int(x) for x in (cfg.free_entry_role_ids or set()) if int(x))
-        if not role_ids:
-            return
-
-        job_id = f"flip-free-role-info:{guild.id}:{mk}"
-        if await subs_jobs.find_one({"_id": job_id}):
-            return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
-
-        # Build per-user list of role names that grant free entry
-        user_roles: dict[int, list[str]] = {}
-        for rid in role_ids:
-            role = guild.get_role(rid)
-            if not role:
-                continue
-            for m in getattr(role, "members", []) or []:
-                if m.bot:
-                    continue
-                user_roles.setdefault(int(m.id), []).append(role.name)
-
-        if not user_roles:
-            return
-
-        nice_month = month_label(mk)
-        sem = asyncio.Semaphore(cfg.dm_concurrency)
-        sent = 0
-
-        async def _send_one(uid: int, role_names: list[str]):
-            nonlocal sent
-            async with sem:
-                try:
-                    member = guild.get_member(uid) or await guild.fetch_member(uid)
-                except Exception:
-                    return
-                if not member or member.bot:
-                    return
-
-                # ensure access role is present
-                await self._grant_ecl(uid, reason=f"Free entry role(s) ({nice_month})")
-
-                roles_txt = ", ".join(sorted(set(role_names)))
-                emb = discord.Embed(
-                    title=f"✅ Free entry — {nice_month}",
-                    description=(
-                        f"You have **free entry** for **{nice_month}** because you have: **{roles_txt}**.\n\n"
-                        "If you lose that role, your free entry goes away."
-                    ),
-                    color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
-                )
-                emb.set_footer(text="ECL • Free entry notice")
-
-                try:
-                    await member.send(embed=emb)
-                    sent += 1
-                except Exception:
-                    return
-
-                if cfg.dm_sleep_seconds:
-                    await asyncio.sleep(cfg.dm_sleep_seconds)
-
-        await asyncio.gather(*[_send_one(uid, rnames) for uid, rnames in user_roles.items()])
-        await self.log.info(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)}")
-
+        """DM free-role users - delegated to flip handler."""
+        await self.flip_handler.run_free_role_flip_info_job(guild, mk=mk)
 
     async def _log(self, text: str):
         await self.log.info(text)
