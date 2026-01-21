@@ -98,11 +98,11 @@ class DebugCog(commands.Cog):
             str,
             "Which debug action to run.",
             required=True,
-            choices=["top16onflip", "subs_dms_preview", "timers", "lobbies"],
+            choices=["month_flip", "top16onflip", "subs_dms_preview", "timers", "lobbies"],
         ),
         month: Optional[str] = Option(
             str,
-            "For top16onflip: cut month YYYY-MM (defaults to current month).",
+            "For month_flip/top16onflip: cut month YYYY-MM (defaults to current month).",
             required=False,
         ),
     ):
@@ -115,6 +115,11 @@ class DebugCog(commands.Cog):
             return
 
         action = (action or "").strip().lower()
+
+        # --- Full month flip dry-run preview ---
+        if action == "month_flip":
+            await self._debug_month_flip(ctx, month)
+            return
 
         # Delegate to existing command (keeps behavior identical)
         if action == "subs_dms_preview":
@@ -254,6 +259,244 @@ class DebugCog(commands.Cog):
         emb.set_footer(text="ECL Debug • top16onflip")
 
         await ctx.followup.send(embed=emb, ephemeral=True)
+
+    async def _debug_month_flip(self, ctx: discord.ApplicationContext, month: Optional[str]) -> None:
+        """Comprehensive dry-run preview of everything that happens on month flip."""
+        subs = self._subs_cog()
+        if subs is None:
+            await ctx.respond("SubscriptionsCog is not loaded.", ephemeral=True)
+            return
+
+        mk = (month or "").strip()
+        now = datetime.now(LISBON_TZ)
+        if not mk:
+            mk = month_key(now)
+        if not looks_like_month(mk):
+            await ctx.respond("Month must be **YYYY-MM** (e.g., 2026-01).", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        guild = ctx.guild
+        cfg = subs.cfg if hasattr(subs, "cfg") else self.cfg
+        target_mk = add_months(mk, 1)
+        close_at = league_close_at(mk)
+        flip_at = month_bounds(target_mk)[0]
+
+        embeds: List[discord.Embed] = []
+
+        # ==================== EMBED 1: Overview & Status ====================
+        emb1 = discord.Embed(
+            title=f"🔄 Month Flip Preview — {month_label(mk)}",
+            description=(
+                "**Dry-run only** — no roles changed, no DB writes.\n\n"
+                f"**Cut month:** {month_label(mk)}\n"
+                f"**Target month:** {month_label(target_mk)}\n"
+                f"**Close time:** {close_at.strftime('%Y-%m-%d %H:%M')} Lisbon\n"
+                f"**Flip time:** {flip_at.strftime('%Y-%m-%d %H:%M')} Lisbon"
+            ),
+            color=0x3498DB,
+        )
+
+        # Check in-progress games
+        try:
+            if hasattr(subs, 'flip_handler'):
+                in_progress = await subs.flip_handler.in_progress_games_count()
+            else:
+                in_progress = await subs._in_progress_games_count()
+            
+            if in_progress is None:
+                games_status = "❓ Unknown (TopDeck check failed)"
+            elif in_progress > 0:
+                games_status = f"⏳ **{in_progress}** game(s) in progress — close would be BLOCKED"
+            else:
+                games_status = "✅ No games in progress — close would proceed"
+        except Exception as e:
+            games_status = f"❌ Error: {type(e).__name__}"
+
+        emb1.add_field(name="In-Progress Games", value=games_status, inline=False)
+
+        # Check job status
+        from db import subs_jobs
+        pending_id = subs._month_close_pending_job_id(guild.id, mk)
+        done_id = subs._month_close_done_job_id(guild.id, mk)
+        pending_doc = await subs_jobs.find_one({"_id": pending_id})
+        done_doc = await subs_jobs.find_one({"_id": done_id})
+
+        if done_doc:
+            job_status = f"✅ Already completed at {done_doc.get('ran_at', '?')}"
+        elif pending_doc:
+            job_status = f"⏳ Pending since {pending_doc.get('ran_at', '?')}"
+        else:
+            job_status = "🔜 Not started yet"
+
+        emb1.add_field(name="Job Status", value=job_status, inline=False)
+        emb1.set_footer(text="ECL Debug • month_flip (1/4)")
+        embeds.append(emb1)
+
+        # ==================== EMBED 2: Top16 Recipients ====================
+        emb2 = discord.Embed(
+            title="🏆 Step 1: Top16 Cut",
+            description="Who would receive **Top16 role** + **free entry** for next month:",
+            color=0xF1C40F,
+        )
+
+        try:
+            if hasattr(subs, "_eligible_top16_entries_for_month"):
+                entries, missing = await subs._eligible_top16_entries_for_month(guild, mk)
+            else:
+                eligible_ids, missing = await subs._eligible_top16_discord_ids_for_month(guild, mk)
+                entries = [{"discord_id": int(d)} for d in (eligible_ids or [])]
+
+            if entries:
+                lines = []
+                for i, e in enumerate(entries[:16], start=1):
+                    did = int(e.get("discord_id") or 0)
+                    mbr = guild.get_member(did)
+                    if mbr:
+                        pts = int(e.get("pts") or 0)
+                        lines.append(f"**{i:02d}.** {mbr.mention} ({pts} pts)")
+                    else:
+                        lines.append(f"**{i:02d}.** User {did} (not in server)")
+                
+                chunks = _chunk_lines_for_embed(lines, limit=1024)
+                for idx, chunk in enumerate(chunks):
+                    emb2.add_field(
+                        name="Recipients" if idx == 0 else "​",
+                        value=chunk,
+                        inline=False,
+                    )
+            else:
+                emb2.add_field(name="Recipients", value="(none qualified)", inline=False)
+
+            if missing and missing != ["no qualified top16"]:
+                preview = ", ".join(missing[:5])
+                if len(missing) > 5:
+                    preview += f" (+{len(missing) - 5} more)"
+                emb2.add_field(name=f"Mapping misses ({len(missing)})", value=preview[:1024], inline=False)
+
+        except Exception as e:
+            emb2.add_field(name="Error", value=f"{type(e).__name__}: {e}", inline=False)
+
+        emb2.set_footer(text="ECL Debug • month_flip (2/4)")
+        embeds.append(emb2)
+
+        # ==================== EMBED 3: Flip Notifications ====================
+        emb3 = discord.Embed(
+            title="📬 Step 2-3: Flip Notifications",
+            description="Who would receive DMs after the flip:",
+            color=0x9B59B6,
+        )
+
+        # Mods who would get checklist
+        mod_role_id = int(getattr(cfg, "ecl_mod_role_id", 0) or 0)
+        mod_role = guild.get_role(mod_role_id) if mod_role_id else None
+        if mod_role:
+            mod_members = [m for m in (mod_role.members or []) if not m.bot]
+            mod_names = ", ".join(m.display_name for m in mod_members[:10])
+            if len(mod_members) > 10:
+                mod_names += f" (+{len(mod_members) - 10} more)"
+            emb3.add_field(
+                name=f"Mods Checklist DM ({len(mod_members)})",
+                value=mod_names or "(none)",
+                inline=False,
+            )
+        else:
+            emb3.add_field(name="Mods Checklist DM", value="(mod role not configured)", inline=False)
+
+        # Free-role users who would get DMs
+        free_role_ids = set(int(x) for x in (getattr(cfg, "free_entry_role_ids", set()) or set()) if int(x))
+        free_role_users: dict[int, list[str]] = {}
+        for rid in free_role_ids:
+            role = guild.get_role(rid)
+            if not role:
+                continue
+            for m in getattr(role, "members", []) or []:
+                if m.bot:
+                    continue
+                free_role_users.setdefault(m.id, []).append(role.name)
+
+        if free_role_users:
+            sample = []
+            for uid, roles in list(free_role_users.items())[:5]:
+                mbr = guild.get_member(uid)
+                name = mbr.display_name if mbr else f"User {uid}"
+                sample.append(f"{name} ({', '.join(roles)})")
+            preview = "\n".join(f"• {s}" for s in sample)
+            if len(free_role_users) > 5:
+                preview += f"\n… (+{len(free_role_users) - 5} more)"
+            emb3.add_field(
+                name=f"Free-Role Info DM ({len(free_role_users)})",
+                value=preview,
+                inline=False,
+            )
+        else:
+            emb3.add_field(name="Free-Role Info DM", value="(none — no free-entry roles configured or no members)", inline=False)
+
+        emb3.set_footer(text="ECL Debug • month_flip (3/4)")
+        embeds.append(emb3)
+
+        # ==================== EMBED 4: Midnight Revoke ====================
+        emb4 = discord.Embed(
+            title="🌙 Midnight Revoke Preview",
+            description=f"Who would **lose ECL role** when {month_label(target_mk)} starts:",
+            color=0xE74C3C,
+        )
+
+        ecl_role_id = int(getattr(cfg, "ecl_role_id", 0) or 0)
+        ecl_role = guild.get_role(ecl_role_id) if ecl_role_id else None
+
+        if ecl_role:
+            members_with_ecl = list(ecl_role.members)
+            would_lose: List[discord.Member] = []
+            would_keep: int = 0
+
+            # Check eligibility for each (sample up to 100 to avoid timeout)
+            check_limit = min(len(members_with_ecl), 100)
+            for m in members_with_ecl[:check_limit]:
+                if m.bot:
+                    continue
+                try:
+                    ok, reason = await subs._eligibility(m, target_mk, at=flip_at)
+                    if not ok:
+                        would_lose.append(m)
+                    else:
+                        would_keep += 1
+                except Exception:
+                    pass
+
+            if would_lose:
+                lines = [f"• {m.mention}" for m in would_lose[:15]]
+                if len(would_lose) > 15:
+                    lines.append(f"… (+{len(would_lose) - 15} more)")
+                emb4.add_field(
+                    name=f"Would LOSE ECL ({len(would_lose)})",
+                    value="\n".join(lines),
+                    inline=False,
+                )
+            else:
+                emb4.add_field(name="Would LOSE ECL", value="(none in sample)", inline=False)
+
+            emb4.add_field(
+                name="Summary",
+                value=f"Checked: {check_limit}/{len(members_with_ecl)} • Keep: {would_keep} • Lose: {len(would_lose)}",
+                inline=False,
+            )
+
+            if len(members_with_ecl) > check_limit:
+                emb4.add_field(
+                    name="⚠️ Note",
+                    value=f"Only checked first {check_limit} members. Full check happens at actual midnight.",
+                    inline=False,
+                )
+        else:
+            emb4.add_field(name="ECL Role", value="(not configured)", inline=False)
+
+        emb4.set_footer(text="ECL Debug • month_flip (4/4)")
+        embeds.append(emb4)
+
+        # Send all embeds
+        await ctx.followup.send(embeds=embeds, ephemeral=True)
 
     async def _debug_timers(self, ctx: discord.ApplicationContext) -> None:
         """Show persisted timers for this guild (from DB + in-memory)."""
