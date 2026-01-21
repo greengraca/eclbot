@@ -304,15 +304,15 @@ class TopdeckLeagueCog(commands.Cog):
         # points priority, games as tie-breaker
         active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
 
-        print(f"[topdeck/top16] Active players with >=10 total games: {len(active_by_games)}.")
+        log_sync(f"[topdeck] Active players with >=10 total games: {len(active_by_games)}.")
 
         # Raw top16 (before online filter) for debug
         top16_by_raw = active_by_games[:16]
-        print("[topdeck/top16] Raw Top 16 (before online filter):")
+        log_sync("[topdeck] Raw Top 16 (before online filter):")
         for i, r in enumerate(top16_by_raw, start=1):
             uid = (r.uid or "").strip()
             og = online_counts.get(uid, 0)
-            print(
+            log_sync(
                 f"  seed #{i:02} | name={r.name!r}, uid={uid!r}, "
                 f"pts={r.pts:.1f}, total_games={r.games}, online_games={og}"
             )
@@ -326,12 +326,12 @@ class TopdeckLeagueCog(commands.Cog):
             if online_counts.get(uid, 0) >= 10:
                 qualified_candidates.append(r)
 
-        print(f"[topdeck/top16] Players with >=10 online games: {len(qualified_candidates)}.")
+        log_sync(f"[topdeck] Players with >=10 online games: {len(qualified_candidates)}.")
 
         qualified_top16: List[PlayerRow] = qualified_candidates[:16]
 
         if len(qualified_top16) < 16:
-            print("[topdeck/top16] WARNING: fewer than 16 players meet the 10 online games requirement overall.")
+            log_warn("[topdeck] WARNING: fewer than 16 players meet the 10 online games requirement overall.")
 
         # ---- Step 3: personal info ----
         member = ctx.author

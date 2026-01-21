@@ -25,7 +25,7 @@ from utils.persistence import (
     get_all_active_timers as db_get_all_active_timers,
     cleanup_expired_timers as db_cleanup_expired_timers,
 )
-from utils.logger import format_console
+from utils.logger import log_sync, log_ok, log_warn, log_error, log_debug
 
 
 # ---------------- env / config ----------------
@@ -60,10 +60,10 @@ FINAL_DRAW_AUDIO: str = os.getenv("FINAL_DRAW_AUDIO", "./timer/ggboyz.mp3")
 
 try:
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
-    print(f"[voice] Using ffmpeg from imageio-ffmpeg: {FFMPEG_EXE}")
+    log_sync(f"[voice] Using ffmpeg from imageio-ffmpeg: {FFMPEG_EXE}")
 except Exception as e:
     FFMPEG_EXE = "ffmpeg"
-    print(f"[voice] Failed to get imageio-ffmpeg binary, falling back to 'ffmpeg': {e}")
+    log_warn(f"[voice] Failed to get imageio-ffmpeg binary, falling back to 'ffmpeg': {e}")
 
 # --- TopDeck / online-games (Mongo) config (shared with other cogs) ---
 
@@ -128,12 +128,12 @@ def _same_channel(
 
 def _voice_prereqs_ok() -> bool:
     if not discord.opus.is_loaded():
-        print("[voice] Opus is not loaded")
+        log_warn("[voice] Opus is not loaded")
         return False
     try:
         import nacl  # noqa: F401
     except Exception:
-        print("[voice] PyNaCl is not installed; voice cannot work")
+        log_warn("[voice] PyNaCl is not installed; voice cannot work")
         return False
     return True
 
@@ -337,8 +337,8 @@ class ECLTimerCog(commands.Cog):
         # lock for writing/updating the TopDeck online JSON
         self._online_json_lock: asyncio.Lock = asyncio.Lock()
 
-        print(
-            "[ECLTimerCog init] "
+        log_sync(
+            "[timer] init "
             f"TIMER_MINUTES={TIMER_MINUTES}, "
             f"EXTRA_TURNS_MINUTES={EXTRA_TURNS_MINUTES}, "
             f"OFFSET_MINUTES={OFFSET_MINUTES}"
@@ -389,14 +389,14 @@ class ECLTimerCog(commands.Cog):
                 expires_at=expires_at,
             )
         except Exception as e:
-            print(format_console(f"[timer] Failed to persist timer {timer_id}: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[timer] Failed to persist timer {timer_id}: {type(e).__name__}: {e}")
 
     async def _delete_timer_from_db(self, timer_id: str) -> None:
         """Remove timer from DB."""
         try:
             await db_delete_timer(timer_id)
         except Exception as e:
-            print(format_console(f"[timer] Failed to delete timer from DB: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[timer] Failed to delete timer from DB: {type(e).__name__}: {e}")
 
     # ---------- Rehydration on startup ----------
 
@@ -411,15 +411,15 @@ class ECLTimerCog(commands.Cog):
             # Clean up expired timers first
             cleaned = await db_cleanup_expired_timers()
             if cleaned:
-                print(format_console(f"[timer] Cleaned up {cleaned} expired timers from DB"))
+                log_sync(f"[timer] Cleaned up {cleaned} expired timers from DB")
 
             # Load active/paused timers
             docs = await db_get_all_active_timers()
             if not docs:
-                print(format_console("[timer] No active timers to rehydrate"))
+                log_sync("[timer] No active timers to rehydrate")
                 return
 
-            print(format_console(f"[timer] Rehydrating {len(docs)} timers from DB..."))
+            log_sync(f"[timer] Rehydrating {len(docs)} timers from DB...")
             rehydrated_count = 0
 
             for doc in docs:
@@ -429,12 +429,12 @@ class ECLTimerCog(commands.Cog):
                         rehydrated_count += 1
                 except Exception as e:
                     timer_id = doc.get("timer_id", "?")
-                    print(format_console(f"[timer] Failed to rehydrate timer {timer_id}: {type(e).__name__}: {e}", level="error"))
+                    log_error(f"[timer] Failed to rehydrate timer {timer_id}: {type(e).__name__}: {e}")
 
-            print(format_console(f"[timer] Successfully rehydrated {rehydrated_count}/{len(docs)} timers", level="ok"))
+            log_ok(f"[timer] Successfully rehydrated {rehydrated_count}/{len(docs)} timers")
 
         except Exception as e:
-            print(format_console(f"[timer] Error during timer rehydration: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[timer] Error during timer rehydration: {type(e).__name__}: {e}")
 
     async def _rehydrate_timer(self, doc: Dict) -> bool:
         """Reconstruct a single timer from a DB document. Returns True if successful."""
@@ -454,19 +454,19 @@ class ECLTimerCog(commands.Cog):
 
         guild = self.bot.get_guild(guild_id)
         if not guild:
-            print(format_console(f"[timer] Rehydrate: guild {guild_id} not found, deleting timer", level="warn"))
+            log_sync(f"[timer] Rehydrate: guild {guild_id} not found, deleting timer", level="warn")
             await self._delete_timer_from_db(timer_id)
             return False
 
         channel = guild.get_channel(channel_id)
         if not isinstance(channel, (discord.TextChannel, discord.abc.Messageable)):
-            print(format_console(f"[timer] Rehydrate: channel {channel_id} not found, deleting timer", level="warn"))
+            log_sync(f"[timer] Rehydrate: channel {channel_id} not found, deleting timer", level="warn")
             await self._delete_timer_from_db(timer_id)
             return False
 
         voice_channel = guild.get_channel(voice_channel_id)
         if not isinstance(voice_channel, discord.VoiceChannel):
-            print(format_console(f"[timer] Rehydrate: voice channel {voice_channel_id} not found, deleting timer", level="warn"))
+            log_sync(f"[timer] Rehydrate: voice channel {voice_channel_id} not found, deleting timer", level="warn")
             await self._delete_timer_from_db(timer_id)
             return False
 
@@ -517,13 +517,13 @@ class ECLTimerCog(commands.Cog):
             }
             if message_id:
                 self.timer_messages[timer_id] = (channel_id, int(message_id))
-            print(format_console(f"[timer] Rehydrated paused timer {timer_id}"))
+            log_sync(f"[timer] Rehydrated paused timer {timer_id}")
             return True
 
         # Rehydrate as active timer
         start_time_utc = doc.get("start_time_utc")
         if not isinstance(start_time_utc, datetime):
-            print(format_console(f"[timer] Rehydrate: invalid start_time for {timer_id}, deleting", level="warn"))
+            log_sync(f"[timer] Rehydrate: invalid start_time for {timer_id}, deleting", level="warn")
             await self._delete_timer_from_db(timer_id)
             return False
 
@@ -542,7 +542,7 @@ class ECLTimerCog(commands.Cog):
 
         # If timer has fully expired, clean up
         if total_remaining <= 0:
-            print(format_console(f"[timer] Rehydrate: timer {timer_id} has expired, cleaning up", level="warn"))
+            log_sync(f"[timer] Rehydrate: timer {timer_id} has expired, cleaning up", level="warn")
             await self._delete_timer_from_db(timer_id)
             return False
 
@@ -610,7 +610,7 @@ class ECLTimerCog(commands.Cog):
                 )
             ))
 
-        print(format_console(f"[timer] Rehydrated active timer {timer_id} with {len(self.timer_tasks[timer_id])} remaining events"))
+        log_sync(f"[timer] Rehydrated active timer {timer_id} with {len(self.timer_tasks[timer_id])} remaining events")
         return True
 
     async def _rehydrated_play_voice(
@@ -651,13 +651,13 @@ class ECLTimerCog(commands.Cog):
                     msg = await ch.fetch_message(m_id)
                     await msg.edit(content=message)
                 except Exception as e:
-                    print(format_console(f"[timer] Rehydrated: failed to edit message: {e}", level="warn"))
+                    log_warn(f"[timer] Rehydrated: failed to edit message: {e}")
         else:
             try:
                 msg = await channel.send(message)
                 self.timer_messages[timer_id] = (channel.id, msg.id)
             except Exception as e:
-                print(format_console(f"[timer] Rehydrated: failed to send message: {e}", level="warn"))
+                log_warn(f"[timer] Rehydrated: failed to send message: {e}")
 
         # Play audio
         await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
@@ -756,7 +756,7 @@ class ECLTimerCog(commands.Cog):
         vc = guild.voice_client
         if vc and vc.is_connected():
             if not _same_channel(vc, target_ch):
-                print(
+                log_sync(
                     f"[voice] Moving VC in guild {guild.id} "
                     f"from {getattr(vc.channel, 'id', None)} to {target_ch.id}"
                 )
@@ -764,7 +764,7 @@ class ECLTimerCog(commands.Cog):
                     await vc.move_to(target_ch)
             return guild.voice_client
 
-        print(
+        log_sync(
             f"[voice] Connecting new VC in guild {guild.id} "
             f"to channel {target_ch.id}"
         )
@@ -783,23 +783,23 @@ class ECLTimerCog(commands.Cog):
             return False
 
         if not _voice_prereqs_ok():
-            print("[voice] Prereqs not OK; skipping playback")
+            log_warn("[voice] Prereqs not OK; skipping playback")
             return False
 
         if not os.path.exists(source_path):
-            print(f"[voice] File not found: {source_path}")
+            log_warn(f"[voice] File not found: {source_path}")
             return False
 
         async with self._vlock(guild.id):
             ch = guild.get_channel(channel_id) if channel_id else None
             if not isinstance(ch, discord.VoiceChannel):
-                print(
+                log_warn(
                     f"[voice] Target channel is not a VoiceChannel "
                     f"(guild={guild.id}, channel_id={channel_id})"
                 )
                 return False
 
-            print(
+            log_sync(
                 f"[voice] _play called: guild={guild.id}, "
                 f"source_path={source_path}, channel_id={ch.id}, leave_after={leave_after}"
             )
@@ -807,17 +807,17 @@ class ECLTimerCog(commands.Cog):
             async def connect_and_play() -> bool:
                 vc = await self._ensure_connected(guild, ch)
                 if not vc:
-                    print("[voice] Failed to obtain VoiceClient")
+                    log_warn("[voice] Failed to obtain VoiceClient")
                     return False
 
-                print(
+                log_sync(
                     f"[voice] Starting playback in guild {guild.id}, "
                     f"channel {ch.id}, file={source_path}"
                 )
                 try:
                     task = vc.play(_ffmpeg_src(source_path), wait_finish=True)
                 except Exception as e:
-                    print(f"[voice] vc.play() raised: {e}")
+                    log_error(f"[voice] vc.play() raised: {e}")
                     return False
 
                 if task is not None:
@@ -826,10 +826,10 @@ class ECLTimerCog(commands.Cog):
                         if err:
                             raise err
                     except Exception as e:
-                        print(f"[voice] Playback error: {e}")
+                        log_error(f"[voice] Playback error: {e}")
                         return False
 
-                print(
+                log_sync(
                     f"[voice] Finished playback in guild {guild.id}, channel {ch.id}"
                 )
                 return True
@@ -837,13 +837,13 @@ class ECLTimerCog(commands.Cog):
             try:
                 ok = await connect_and_play()
             except asyncio.TimeoutError:
-                print(
+                log_warn(
                     f"[voice] Timeout while connecting/playing in "
                     f"guild={guild.id}, channel_id={channel_id}"
                 )
                 ok = False
             except discord.errors.ConnectionClosed:
-                print(
+                log_warn(
                     "[voice] ConnectionClosed during playback; "
                     "hard-resetting and retrying once"
                 )
@@ -851,19 +851,19 @@ class ECLTimerCog(commands.Cog):
                 try:
                     ok = await connect_and_play()
                 except asyncio.TimeoutError:
-                    print(
+                    log_warn(
                         f"[voice] Timeout again after hard reset in "
                         f"guild={guild.id}, channel_id={channel_id}"
                     )
                     ok = False
 
             if leave_after:
-                print(f"[voice] Disconnecting from guild {guild.id} voice")
+                log_sync(f"[voice] Disconnecting from guild {guild.id} voice")
                 with contextlib.suppress(Exception):
                     if guild.voice_client and guild.voice_client.is_connected():
                         await guild.voice_client.disconnect(force=True)
 
-            print(f"[voice] _play returning {ok}")
+            log_debug(f"[voice] _play returning {ok}")
             return ok
 
     # ---------- channel/timer helpers ----------
@@ -926,7 +926,7 @@ class ECLTimerCog(commands.Cog):
         try:
             pod = await self._match_vc_to_in_progress_pod(vc, _non_bot_members(vc))
         except Exception as e:
-            print(f"[timer/topdeck] pod check failed: {type(e).__name__}: {e}")
+            log_warn(f"[timer/topdeck] pod check failed: {type(e).__name__}: {e}")
             return None
 
         if not pod:
@@ -959,24 +959,24 @@ class ECLTimerCog(commands.Cog):
             handles |= _norm_member_handles(m)
 
         handles_sorted = sorted(handles)
-        print(
+        log_sync(
             f"[timer/topdeck] VC {voice_channel.name} -> "
             f"vc_handles={handles_sorted}"
         )
 
         if not handles:
-            print(
+            log_sync(
                 f"[timer/topdeck] VC {voice_channel.name} has no usable handles; "
                 "skipping TopDeck match."
             )
             return None
 
         if not TOPDECK_BRACKET_ID:
-            print("[timer/topdeck] TOPDECK_BRACKET_ID not set; skipping lookup.")
+            log_sync("[timer/topdeck] TOPDECK_BRACKET_ID not set; skipping lookup.")
             return None
 
         pods = await get_in_progress_pods(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
-        print(
+        log_sync(
             f"[timer/topdeck] get_in_progress_pods returned {len(pods)} pods "
             f"for bracket={TOPDECK_BRACKET_ID!r}."
         )
@@ -992,7 +992,7 @@ class ECLTimerCog(commands.Cog):
             pod_eids = list(getattr(pod, "entrant_ids", []) or [])
 
             pod_handles_set = {h for h in pod_norm if h}
-            print(
+            log_debug(
                 "[timer/topdeck] Pod "
                 f"S{pod.season}:T{pod.table} | "
                 f"norm_handles={sorted(pod_handles_set)} | "
@@ -1020,7 +1020,7 @@ class ECLTimerCog(commands.Cog):
             coverage = inter_count / pod_size if pod_size else 0.0
             start_ts = float(getattr(pod, "start", 0.0) or 0.0)
 
-            print(
+            log_debug(
                 "[timer/topdeck]   candidate "
                 f"S{pod.season}:T{pod.table} | "
                 f"pod_handles={sorted(pod_handles)} | "
@@ -1044,13 +1044,13 @@ class ECLTimerCog(commands.Cog):
         if best:
             pod_norm = list(getattr(best, "entrant_discords_norm", []) or [])
             pod_handles = {h for h in pod_norm if h}
-            print(
+            log_ok(
                 f"[timer/topdeck] VC {voice_channel.name} matched TopDeck pod "
                 f"S{best.season}:T{best.table} with pod_handles="
                 f"{sorted(pod_handles)}."
             )
         else:
-            print(
+            log_sync(
                 f"[timer/topdeck] No in-progress TopDeck pod matched VC "
                 f"{voice_channel.name}; vc_handles={handles_sorted}, pods={len(pods)}."
             )
@@ -1109,7 +1109,7 @@ class ECLTimerCog(commands.Cog):
             )
             await upsert_record(TOPDECK_BRACKET_ID, year, month, rec)
 
-        print(
+        log_ok(
             f"[timer/topdeck] Marked TopDeck match S{season}:T{tid} as online "
             f"(already_online={already_online}). Players in match: {topdeck_uids}."
         )
@@ -1133,7 +1133,7 @@ class ECLTimerCog(commands.Cog):
                 non_bot_members,
             )
         except Exception as e:
-            print(
+            log_warn(
                 "[timer/topdeck] Error while matching VC to TopDeck pods: "
                 f"{type(e).__name__}: {e}"
             )
@@ -1148,7 +1148,7 @@ class ECLTimerCog(commands.Cog):
                     "and that your Discord name on TopDeck matches your name here."
                 )
             except Exception as e:
-                print(
+                log_warn(
                     "[timer/topdeck] Failed to send 'no TopDeck match' warning: "
                     f"{type(e).__name__}: {e}"
                 )
@@ -1171,7 +1171,7 @@ class ECLTimerCog(commands.Cog):
         final_cleanup: bool = False,
     ):
         delay_sec = max(0.0, minutes) * 60
-        print(
+        log_sync(
             f"[timer_end] Scheduled fire: timer_id={timer_id}, minutes={minutes}, "
             f"delay_sec={delay_sec}, voice_file_path={voice_file_path}, edit={edit}, "
             f"final_cleanup={final_cleanup}"
@@ -1188,14 +1188,14 @@ class ECLTimerCog(commands.Cog):
                 msg_obj = await ch.fetch_message(m_id)
                 await msg_obj.edit(content=message)
             except Exception as e:
-                print(f"[timer_end] Failed to edit message: {e}")
+                log_warn(f"[timer_end] Failed to edit message: {e}")
         else:
             try:
                 msg_obj = await channel.send(message)
                 if timer_id:
                     self.timer_messages[timer_id] = (channel.id, msg_obj.id)
             except Exception as e:
-                print(f"[timer_end] Failed to send message: {e}")
+                log_warn(f"[timer_end] Failed to send message: {e}")
 
         vcid: Optional[int] = None
         if timer_id and timer_id in self.active_timers:
@@ -1219,7 +1219,7 @@ class ECLTimerCog(commands.Cog):
                 await msg_obj.delete()
 
         if final_cleanup and timer_id:
-            print(f"[timer_end] Final stage complete, cleaning up timer_id={timer_id}")
+            log_sync(f"[timer_end] Final stage complete, cleaning up timer_id={timer_id}")
             self._cleanup_timer_structs(timer_id)
             # Delete from DB
             await self._delete_timer_from_db(timer_id)
@@ -1233,7 +1233,7 @@ class ECLTimerCog(commands.Cog):
         timer_id: Optional[str] = None,
     ):
         delay = max(0.0, delay_seconds)
-        print(
+        log_sync(
             f"[play_voice_file] Scheduled: timer_id={timer_id}, "
             f"delay_seconds={delay}, path={voice_file_path}"
         )
@@ -1295,14 +1295,14 @@ class ECLTimerCog(commands.Cog):
 
                     asyncio.create_task(_del(msg))
                 except Exception as e:
-                    print(f"[set_timer_stopped] Failed to edit/delete message: {e}")
+                    log_warn(f"[set_timer_stopped] Failed to edit/delete message: {e}")
 
         self._cleanup_timer_structs(timer_id)
         
         # Delete from DB
         await self._delete_timer_from_db(timer_id)
         
-        print(f"[set_timer_stopped] Cleaned up timer_id={timer_id}, reason={reason}")
+        log_sync(f"[set_timer_stopped] Cleaned up timer_id={timer_id}, reason={reason}")
 
     # ---------- core timer start ----------
 
@@ -1333,16 +1333,16 @@ class ECLTimerCog(commands.Cog):
         # Always create fresh list for this timer_id (prevents KeyError race)
         self.timer_tasks[timer_id] = []
 
-        print(format_console(f"[timer] Using timer_id={timer_id}"))
+        log_sync(f"[timer] Using timer_id={timer_id}")
 
         main_seconds = max(0.0, main_minutes * 60.0)
         to_end_delay_sec = max(0.0, (main_minutes - offset) * 60.0)
         extra_seconds = max(0.0, extra_minutes * 60.0)
 
-        print(format_console(
+        log_sync(
             f"[timer] Calculated to_end_delay_sec={to_end_delay_sec} "
             f"({(main_minutes - offset):.2f} minutes from start)"
-        ))
+        )
 
         end_time_main = now_utc() + timedelta(minutes=main_minutes)
         end_ts_main = ts(end_time_main)
@@ -1424,7 +1424,7 @@ class ECLTimerCog(commands.Cog):
             )
         )
 
-        print(
+        log_sync(
             f"[timer] Scheduled tasks for timer_id={timer_id}: "
             f"{len(self.timer_tasks[timer_id])} tasks, "
             f"delay_sec={to_end_delay_sec}"
@@ -1557,7 +1557,7 @@ class ECLTimerCog(commands.Cog):
         try:
             await self._tag_online_game_for_timer(ctx, voice_channel, non_bot)
         except Exception as e:
-            print(
+            log_warn(
                 "[timer/topdeck] Unexpected error in _tag_online_game_for_timer: "
                 f"{type(e).__name__}: {e}"
             )
@@ -1694,7 +1694,7 @@ class ECLTimerCog(commands.Cog):
                     orig = await ch.fetch_message(m_id)
                     await orig.delete()
         except Exception as e:
-            print(f"[pausetimer] Error deleting original timer message: {e}")
+            log_warn(f"[pausetimer] Error deleting original timer message: {e}")
 
         remaining_minutes = int(remaining["main"] // 60)
 
@@ -2031,13 +2031,13 @@ class ECLTimerCog(commands.Cog):
             if data.get("ignore_autostop"):
                 if len(non_bot) >= 3:
                     data["ignore_autostop"] = False
-                    print(f"[auto-stop] Re-enabled for {timer_id} (table reached 3+ players).")
+                    log_sync(f"[auto-stop] Re-enabled for {timer_id} (table reached 3+ players).")
                 elif len(non_bot) < 2:
-                    print(f"[auto-stop] Skipped for {timer_id} (mod testing mode).")
+                    log_sync(f"[auto-stop] Skipped for {timer_id} (mod testing mode).")
                     continue
 
             if len(non_bot) < 2:
-                print(
+                log_sync(
                     f"[auto-stop] Channel {ch.name} ({ch.id}) dropped to "
                     f"{len(non_bot)} non-bot members; stopping timer {timer_id}"
                 )
