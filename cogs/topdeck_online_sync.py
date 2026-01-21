@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 
 from utils.logger import log_sync, log_warn, log_debug
+from utils.mod_check import is_mod
 
 from db import online_games
 from online_games_store import OnlineGameRecord, upsert_record
@@ -42,9 +43,6 @@ SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
 SPELLBOT_USER_ID = int(os.getenv("SPELLBOT_USER_ID", "0"))
 ECLBOT_USER_ID   = int(os.getenv("ECLBOT_USER_ID", "0"))
 
-
-ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
-ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
 
 # Max allowed time difference between SpellBot "ready" and TopDeck Start
 ONLINE_MATCH_MAX_TIME_DIFF_SECONDS = int(
@@ -270,7 +268,7 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
         if dt0 < month_start:
             break
 
-        # Mentions are already resolved on the message payload; use them to avoid extra HTTP fetches.
+        # Mentions are already resolved on the message payload; used to avoid extra HTTP fetches.
         mentions_by_id = {m.id: m for m in getattr(msg, "mentions", [])}
         # ✅ allow SpellBot + ECLBot if configured, else accept any bot
         if allowed_bot_ids:
@@ -607,12 +605,8 @@ class TopdeckOnlineSyncCog(commands.Cog):
 
     @staticmethod
     def _is_mod(member: discord.Member) -> bool:
-        for role in getattr(member, "roles", []):
-            if ECL_MOD_ROLE_ID and role.id == ECL_MOD_ROLE_ID:
-                return True
-            if ECL_MOD_ROLE_NAME and role.name == ECL_MOD_ROLE_NAME:
-                return True
-        return False
+        """Check if member is a mod. Delegates to utils.mod_check.is_mod."""
+        return is_mod(member)
 
     @commands.slash_command(
         name="synconline",

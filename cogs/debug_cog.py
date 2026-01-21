@@ -17,6 +17,7 @@ from discord import Option
 
 from utils.logger import get_logger
 from utils.settings import SUBS, LISBON_TZ
+from utils.mod_check import is_mod
 from utils.persistence import (
     get_guild_timers as db_get_guild_timers,
     get_guild_lobbies as db_get_guild_lobbies,
@@ -75,13 +76,8 @@ class DebugCog(commands.Cog):
         self.log = get_logger(bot, self.cfg)
 
     def _is_mod(self, member: discord.Member) -> bool:
-        """Manage Roles OR has configured mod role."""
-        if getattr(member, "guild_permissions", None) and member.guild_permissions.manage_roles:
-            return True
-        rid = int(getattr(self.cfg, "ecl_mod_role_id", 0) or 0)
-        if rid and any(r.id == rid for r in (member.roles or [])):
-            return True
-        return False
+        """Check if member is a mod. Delegates to utils.mod_check.is_mod."""
+        return is_mod(member, check_manage_roles=True)
 
     def _subs_cog(self):
         return self.bot.get_cog("SubscriptionsCog")

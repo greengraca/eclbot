@@ -26,6 +26,7 @@ from utils.persistence import (
     cleanup_expired_timers as db_cleanup_expired_timers,
 )
 from utils.logger import log_sync, log_ok, log_warn, log_error, log_debug
+from utils.mod_check import is_mod
 
 # Import from timer submodule
 from .timer import (
@@ -50,9 +51,6 @@ from .timer import (
 # ---------------- env / config ----------------
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
-
-ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
-ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
 
 
 # Main round duration in minutes
@@ -508,14 +506,8 @@ class ECLTimerCog(commands.Cog):
     # ---------- mod helpers ----------
 
     def _is_mod_member(self, member: Optional[discord.Member]) -> bool:
-        if not member:
-            return False
-        for role in getattr(member, "roles", []) or []:
-            if (ECL_MOD_ROLE_ID and role.id == ECL_MOD_ROLE_ID) or (
-                ECL_MOD_ROLE_NAME and role.name == ECL_MOD_ROLE_NAME
-            ):
-                return True
-        return False
+        """Check if member is a mod. Delegates to utils.mod_check.is_mod."""
+        return is_mod(member)
 
     def _ignore_autostop_for_start(
         self,

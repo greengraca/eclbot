@@ -17,6 +17,7 @@ from db import topdeck_month_dump_runs, topdeck_month_dump_chunks, topdeck_pods
 
 from utils.settings import LISBON_TZ
 from utils.logger import log_sync, log_warn
+from utils.mod_check import is_mod
 
 from topdeck_fetch import (
     Match,
@@ -34,9 +35,6 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "").strip()
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
-
-ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
-ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
 
 # Keep chunks safely under Mongo's 16MB document limit (1MB-ish is comfy)
 MONGO_CHUNK_BYTES = int(os.getenv("TOPDECK_DUMP_CHUNK_BYTES", "900000"))  # ~0.9MB
@@ -337,12 +335,8 @@ class TopdeckMonthDumpCog(commands.Cog):
 
     @staticmethod
     def _is_mod(member: discord.Member) -> bool:
-        for role in getattr(member, "roles", []):
-            if ECL_MOD_ROLE_ID and role.id == ECL_MOD_ROLE_ID:
-                return True
-            if ECL_MOD_ROLE_NAME and role.name == ECL_MOD_ROLE_NAME:
-                return True
-        return False
+        """Check if member is a mod. Delegates to utils.mod_check.is_mod."""
+        return is_mod(member)
 
     @commands.slash_command(
         name="topdeckdumpmonth",
