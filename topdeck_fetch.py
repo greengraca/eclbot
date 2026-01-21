@@ -383,6 +383,25 @@ def _extract_drop_state(fields: Dict[str, Any]):
         "latest_drop": latest_drop,
         "latest_undrop": latest_undrop,
     }
+    
+# topdeck_fetch.py
+async def fetch_topdeck_raw(
+    bracket_id: str,
+    firebase_id_token: Optional[str] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Fetch raw (unmapped) TopDeck endpoints for debugging."""
+    if not bracket_id:
+        raise RuntimeError("bracket_id is required")
+
+    players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
+    doc_url = _get_firestore_doc_url(bracket_id)
+
+    async with aiohttp.ClientSession() as session:
+        players = await _fetch_json(session, players_url, token=None)
+        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+
+    return players, doc
+
 
 
 # --------- Main league fetch ---------

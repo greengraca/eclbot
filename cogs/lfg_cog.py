@@ -133,7 +133,7 @@ class LFGCog(commands.Cog):
     async def _save_lobby_to_db(self, lobby: LFGLobby) -> None:
         """Persist the current lobby state to MongoDB."""
         try:
-            expires_at = lobby.created_at + timedelta(minutes=LOBBY_INACTIVITY_MINUTES)
+            expires_at = now_utc() + timedelta(minutes=LOBBY_INACTIVITY_MINUTES)
             await db_save_lobby(
                 guild_id=lobby.guild_id,
                 lobby_id=lobby.lobby_id,
@@ -289,15 +289,33 @@ class LFGCog(commands.Cog):
         lobby.player_pts = {int(k): float(v) for k, v in pts_doc.items()}
 
         # Timing
+        # created_at = doc.get("created_at")
+        # if isinstance(created_at, datetime):
+        #     lobby.created_at = created_at
+        
+        # almost_full_at = doc.get("almost_full_at")
+        # if isinstance(almost_full_at, datetime):
+        #     lobby.almost_full_at = almost_full_at
+        
+        # lobby.last_seat_open = bool(doc.get("last_seat_open", False))
+        # Timing
+        # Motor/PyMongo often returns UTC datetimes as offset-naive.
+        # Normalize to tz-aware UTC so math vs now_utc() never crashes (Elo window uses created_at).
+        def _as_utc(dt: datetime) -> datetime:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
         created_at = doc.get("created_at")
         if isinstance(created_at, datetime):
-            lobby.created_at = created_at
-        
+            lobby.created_at = _as_utc(created_at)
+
         almost_full_at = doc.get("almost_full_at")
         if isinstance(almost_full_at, datetime):
-            lobby.almost_full_at = almost_full_at
-        
+            lobby.almost_full_at = _as_utc(almost_full_at)
+
         lobby.last_seat_open = bool(doc.get("last_seat_open", False))
+
 
         # Create a new view and attach it
         view = LFGJoinView(self, lobby, timeout_seconds=LOBBY_INACTIVITY_MINUTES * 60)
@@ -840,6 +858,7 @@ class LFGCog(commands.Cog):
             return
 
         lobby.message_id = msg.id
+        await self._save_lobby_to_db(lobby)
 
     # ---------- /lfgelo ----------
 
@@ -942,6 +961,7 @@ class LFGCog(commands.Cog):
 
         lobby.message_id = msg.id
         lobby.update_task = asyncio.create_task(self._run_elo_embed_updater(lobby))
+        await self._save_lobby_to_db(lobby)
 
 
 def setup(bot: commands.Bot):

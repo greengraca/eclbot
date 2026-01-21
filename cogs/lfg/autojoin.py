@@ -187,6 +187,10 @@ async def autojoin_specific_lobby_group(
         if became_full:
             lobby.link_creating = True
         player_ids_snapshot = list(lobby.player_ids)
+        
+    with contextlib.suppress(Exception):
+        await cog._save_lobby_to_db(lobby)
+
 
     channel = guild.get_channel(channel_id)
     if not isinstance(channel, discord.TextChannel):
@@ -340,6 +344,10 @@ async def autojoin_specific_lobby_from_lfg(
         if became_full:
             lobby.link_creating = True
         player_ids_snapshot = list(lobby.player_ids)
+    
+    with contextlib.suppress(Exception):
+        await cog._save_lobby_to_db(lobby)
+
 
     channel = guild.get_channel(channel_id)
     if not isinstance(channel, discord.TextChannel):

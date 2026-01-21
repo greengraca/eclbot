@@ -41,6 +41,7 @@ INITIAL_EXTENSIONS = [
     "cogs.join_league_cog",
     "cogs.topdeck_month_dump",
     "cogs.debug_cog",
+    "cogs.stats_cog",
 ]
 
 _MONGO_BOOTSTRAPPED = False
