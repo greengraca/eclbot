@@ -11,7 +11,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from utils.logger import format_console
+from utils.logger import log_sync, log_warn, log_debug
 
 from db import online_games
 from online_games_store import OnlineGameRecord, upsert_record
@@ -52,12 +52,13 @@ ONLINE_MATCH_MAX_TIME_DIFF_SECONDS = int(
 )
 
 def _log(text: str, level: str = "info") -> None:
-    """Console logger with the same formatting as other cogs (see utils/logger.py)."""
-    raw = str(text or "")
-    try:
-        print(format_console(raw, level=level))
-    except Exception:
-        print(raw)
+    """Console logger using standardized utils.logger functions."""
+    if level == "debug":
+        log_debug(text)
+    elif level == "warn" or level == "warning":
+        log_warn(text)
+    else:
+        log_sync(text)
 
 
 

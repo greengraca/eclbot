@@ -14,8 +14,9 @@ import asyncio
 import contextlib
 import json
 import re
+import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Set, Tuple  # (drop Dict too if you switch to dict)
+from typing import Any, Dict, Optional, Set, Tuple
 
 import discord
 from discord.ext import commands, tasks
@@ -25,12 +26,9 @@ from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, PlayerRo
 from online_games_store import count_online_games_by_topdeck_uid_str
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
-import traceback
-from utils.logger import get_logger
+from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
 
 from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id
-
-
 
 from utils.settings import (
     SUBS,
@@ -40,73 +38,23 @@ from utils.settings import (
     FIREBASE_ID_TOKEN,
 )
 
+# Import consolidated date utilities
+from utils.dates import (
+    month_key,
+    add_months,
+    month_bounds,
+    league_close_at,
+    month_label,
+    last_day_of_month,
+    month_end_inclusive,
+    parse_month_from_text,
+)
+
 
 GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 
 
-# -------------------- date helpers --------------------
-
-def league_close_at(mk: str) -> datetime:
-    """League closes at 19:00 Lisbon time on the last day of mk (YYYY-MM)."""
-    _, end = month_bounds(mk)  # end is first day of next month @ 00:00 Lisbon
-    last_day = (end - timedelta(days=1)).astimezone(LISBON_TZ)
-    return datetime(last_day.year, last_day.month, last_day.day, 19, 0, 0, tzinfo=LISBON_TZ)
-
-
-def month_key(dt: datetime) -> str:
-    return f"{dt.year:04d}-{dt.month:02d}"
-
-
-def month_label(mk: str) -> str:
-    """Pretty label like 'January 2026'."""
-    try:
-        y, m = mk.split("-")
-        dt = datetime(int(y), int(m), 1, tzinfo=LISBON_TZ)
-        return dt.strftime("%B %Y")
-    except Exception:
-        return mk
-
-
-def parse_month_from_text(text: str) -> Optional[str]:
-    """Find YYYY-MM in text."""
-    m = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b", text or "")
-    return m.group(0) if m else None
-
-
-def add_months(mk: str, n: int) -> str:
-    y, m = mk.split("-")
-    y_i, m_i = int(y), int(m)
-    m_i += n
-    while m_i > 12:
-        y_i += 1
-        m_i -= 12
-    while m_i < 1:
-        y_i -= 1
-        m_i += 12
-    return f"{y_i:04d}-{m_i:02d}"
-
-
-def month_bounds(mk: str) -> Tuple[datetime, datetime]:
-    """Return (start, end_exclusive) of mk in Lisbon TZ."""
-    y, m = mk.split("-")
-    start = datetime(int(y), int(m), 1, 0, 0, 0, tzinfo=LISBON_TZ)
-    end_mk = add_months(mk, 1)
-    y2, m2 = end_mk.split("-")
-    end = datetime(int(y2), int(m2), 1, 0, 0, 0, tzinfo=LISBON_TZ)
-    return start, end
-
-
-def last_day_of_month(dt: datetime) -> datetime:
-    mk = month_key(dt)
-    _, end = month_bounds(mk)
-    return (end - timedelta(days=1)).astimezone(LISBON_TZ)
-
-
-def month_end_inclusive(mk: str) -> datetime:
-    """Return the last second of mk in Lisbon TZ."""
-    _, end = month_bounds(mk)
-    return (end - timedelta(seconds=1)).astimezone(LISBON_TZ)
-
+# -------------------- Ko-fi specific helpers --------------------
 
 def compute_kofi_one_time_window(when_lisbon: datetime, days: int) -> tuple[datetime, datetime]:
     """Return (starts_at_utc, expires_at_utc) for a Ko-fi one-time pass."""
@@ -116,8 +64,6 @@ def compute_kofi_one_time_window(when_lisbon: datetime, days: int) -> tuple[date
     expires = starts + timedelta(days=max(1, int(days or 30)))
     return starts, expires
 
-
-# -------------------- Ko-fi parsing helpers --------------------
 
 def extract_discord_user_id(payload: Dict[str, Any]) -> Optional[int]:
     """Best-effort mapping from Ko-fi payload -> Discord user id."""
@@ -235,9 +181,9 @@ class SubscriptionsCog(commands.Cog):
         try:
             await ping()
             await ensure_indexes()
-            print("[subs] MongoDB OK + indexes ensured")
+            log_ok("[subs] MongoDB OK + indexes ensured")
         except Exception as e:
-            print(f"[subs] MongoDB error: {e}")
+            log_error(f"[subs] MongoDB error: {e}")
 
     # -------------------- Marketing embed helpers --------------------
 
@@ -406,7 +352,7 @@ class SubscriptionsCog(commands.Cog):
         # ---- (4) clearer debug print (no ids) ----
         role_lines = [f"{rb['name']}: {rb['count']}" for rb in role_breakdown]
 
-        print(
+        log_sync(
             "[subs] count\n"
             f"  mk: {mk}\n"
             f"  db: month_ent={len(month_ent_set)} | kofi_pass={len(pass_set)} | db_union={len(kofi_set)}\n"
@@ -785,7 +731,7 @@ class SubscriptionsCog(commands.Cog):
 
             if not entries:
                 await self.log.info(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
-                print(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
+                log_sync(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
                 await self._dm_mods_summary(
                     guild,
                     summary=f"[ECL] Top16-online reminder ({mk} {kind}) — sent 0 DMs (0 targets).",
@@ -815,7 +761,7 @@ class SubscriptionsCog(commands.Cog):
                 f"[subs] Top16-online reminder ({mk} {kind}) targets={len(entries)}. "
                 f"Sample (up to 20):\n" + "\n".join(sample_lines)
             )
-            print(msg)
+            log_sync(msg)
             await self._log(msg)
 
             sem = asyncio.Semaphore(cfg.dm_concurrency)
@@ -853,7 +799,7 @@ class SubscriptionsCog(commands.Cog):
 
             await asyncio.gather(*[_send_one(e) for e in entries])
             await self.log.ok(f"[subs] Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
-            print(f"[subs] ✅ Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
+            log_ok(f"[subs] Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
             await self._dm_mods_summary(
                 guild,
                 summary=f"[ECL] Top16-online reminder ({mk} {kind}) — sent {sent}/{len(entries)} DMs.",
@@ -1477,11 +1423,8 @@ class SubscriptionsCog(commands.Cog):
             last_day = last_day_of_month(now)
             last_day_date = last_day.date()
 
-            print(
-                "[subs] debug",
-                "now=", now.isoformat(),
-                "mk=", now_mk,
-                "close_at=", league_close_at(now_mk).isoformat(),
+            log_sync(
+                f"[subs] debug now={now.isoformat()} mk={now_mk} close_at={league_close_at(now_mk).isoformat()}"
             )
 
             # regular "register for next month" reminders
@@ -2071,7 +2014,7 @@ class SubscriptionsCog(commands.Cog):
 
         if not targets:
             await self.log.info(f"[subs] Topcut-prize reminder ({mk} {kind}): 0 targets")
-            print(f"[subs] Topcut-prize reminder ({mk} {kind}): 0 targets")
+            log_sync(f"[subs] Topcut-prize reminder ({mk} {kind}): 0 targets")
             await self._dm_mods_summary(
                 guild,
                 summary=f"[ECL] Topcut-prize reminder ({mk} {kind}) — sent 0 DMs (0 targets).",

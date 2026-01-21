@@ -9,17 +9,38 @@ from utils.console import c
 # ---- central mapping (shared by all files) ----
 
 PREFIX_COLORS = {
+    # Core systems
+    "boot": "cyan",
+    "db": "white",
+    
+    # Subscriptions & access
     "subs": "cyan",
+    "kofi": "cyan",
+    "top16": "cyan",
+    
+    # Voice & timers
     "voice": "magenta",
     "timer": "blue",
     "timer_end": "blue",
     "play_voice_file": "blue",
+    "auto-stop": "blue",
+    "set_timer_stopped": "grey",
+    
+    # TopDeck integration
     "topdeck": "yellow",
     "timer/topdeck": "yellow",
     "online-sync": "yellow",
+    "topdeck-dump": "yellow",
+    
+    # LFG system
     "lfg": "green",
-    "db": "white",
-    "set_timer_stopped": "grey",
+    "lfgelo": "green",
+    
+    # Other cogs
+    "invite_roles": "magenta",
+    "spellbot-watch": "yellow",
+    "join": "green",
+    "debug": "grey",
 }
 
 LEVEL_COLORS = {
@@ -125,3 +146,44 @@ class Logger:
 
 def get_logger(bot: Any, cfg: Any) -> Logger:
     return Logger(bot, cfg)
+
+
+# ---- Sync logging for module-level / startup code ----
+
+def log_sync(text: str, *, level: str = "info") -> None:
+    """
+    Synchronous colored console log for use outside of async contexts.
+    
+    Use this for module-level logging, startup messages, or anywhere
+    you can't await an async Logger method.
+    
+    Args:
+        text: Message to log (can include [prefix] at start).
+        level: One of 'debug', 'info', 'ok', 'warn', 'error'.
+        
+    Example:
+        log_sync("[boot] MongoDB connected", level="ok")
+        log_sync("[voice] Opus not found", level="warn")
+    """
+    raw = str(text or "")
+    try:
+        print(format_console(raw, level=level))
+    except Exception:
+        print(raw)
+
+
+# Convenience aliases for sync logging
+def log_debug(text: str) -> None:
+    log_sync(text, level="debug")
+
+def log_info(text: str) -> None:
+    log_sync(text, level="info")
+
+def log_ok(text: str) -> None:
+    log_sync(text, level="ok")
+
+def log_warn(text: str) -> None:
+    log_sync(text, level="warn")
+
+def log_error(text: str) -> None:
+    log_sync(text, level="error")

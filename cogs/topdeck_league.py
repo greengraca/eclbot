@@ -9,6 +9,7 @@ from discord.ext import commands
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
+from utils.logger import log_sync, log_warn
 
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
@@ -38,12 +39,12 @@ async def _load_online_counts() -> Dict[str, int]:
             TOPDECK_BRACKET_ID, ms.year, ms.month, online_only=True
         )
     except Exception as e:
-        print(f"[topdeck/top16] Error reading online games from Mongo: {type(e).__name__}: {e}")
+        log_warn(f"[topdeck] Error reading online games from Mongo: {type(e).__name__}: {e}")
         return {}
 
     month = f"{ms.year:04d}-{ms.month:02d}"
-    print(
-        "[topdeck/top16] Loaded online-games from Mongo: "
+    log_sync(
+        f"[topdeck] Loaded online-games from Mongo: "
         f"month={month!r}, bracket={TOPDECK_BRACKET_ID!r}, "
         f"players_with_online_games={len(counts)}."
     )
@@ -55,9 +56,9 @@ async def _get_member_index(guild: discord.Guild):
     if not members:
         try:
             members = [m async for m in guild.fetch_members(limit=None)]
-            print(f"[topdeck/identity] fetched {len(members)} members for identity index (cache was empty).")
+            log_sync(f"[topdeck] fetched {len(members)} members for identity index (cache was empty).")
         except Exception as e:
-            print(f"[topdeck/identity] fetch_members failed; using empty index: {type(e).__name__}: {e}")
+            log_warn(f"[topdeck] fetch_members failed; using empty index: {type(e).__name__}: {e}")
             members = []
     return build_member_index(members)
 
@@ -107,8 +108,8 @@ class TopdeckLeagueCog(commands.Cog):
 
         # Lightweight debug signal for confidence (helps spot bad TopDeck discord fields)
         try:
-            print(
-                "[topdeck/identity] author row match: "
+            log_sync(
+                f"[topdeck] author row match: "
                 f"member_id={member.id} conf={m.confidence} key={m.matched_key!r} detail={m.detail}"
             )
         except Exception:
@@ -138,7 +139,7 @@ class TopdeckLeagueCog(commands.Cog):
         try:
             rows, fetched_at = await self._load_rows()
         except Exception as e:
-            print(f"[topdeck] /mostgames fetch error: {type(e).__name__}: {e}")
+            log_warn(f"[topdeck] /mostgames fetch error: {type(e).__name__}: {e}")
             await ctx.followup.send(
                 "I couldn't fetch TopDeck data right now. "
                 "Please try again in a bit.",
@@ -259,10 +260,10 @@ class TopdeckLeagueCog(commands.Cog):
             await ctx.defer(ephemeral=False)
         except discord.errors.NotFound:
             # Interaction already expired (bot lagged). Nothing we can do.
-            print("[topdeck/top16] Interaction expired before defer (Unknown interaction).")
+            log_warn("[topdeck] /top16 interaction expired before defer (Unknown interaction).")
             return
         except discord.errors.HTTPException as e:
-            print(f"[topdeck/top16] Failed to defer: {type(e).__name__}: {e}")
+            log_warn(f"[topdeck] /top16 failed to defer: {type(e).__name__}: {e}")
             return
 
         async def _safe_followup_send(
@@ -274,15 +275,15 @@ class TopdeckLeagueCog(commands.Cog):
             try:
                 await ctx.followup.send(content=content, embed=embed, ephemeral=ephemeral)
             except discord.errors.NotFound:
-                print("[topdeck/top16] Followup failed: interaction expired.")
+                log_warn("[topdeck] /top16 followup failed: interaction expired.")
             except discord.errors.HTTPException as e:
-                print(f"[topdeck/top16] Followup failed: {type(e).__name__}: {e}")
+                log_warn(f"[topdeck] /top16 followup failed: {type(e).__name__}: {e}")
 
         # Load league rows
         try:
             rows, fetched_at = await self._load_rows()
         except Exception as e:
-            print(f"[topdeck] /top16 fetch error: {type(e).__name__}: {e}")
+            log_warn(f"[topdeck] /top16 fetch error: {type(e).__name__}: {e}")
             await _safe_followup_send(
                 "I couldn't fetch TopDeck data right now. Please try again in a bit.",
                 ephemeral=True,

@@ -8,7 +8,7 @@ import discord
 
 from spelltable_client import create_spelltable_game
 from utils.interactions import safe_i_send, safe_i_edit
-from utils.logger import format_console
+from utils.logger import log_error
 
 from .models import now_utc
 from .views import LFGJoinView
@@ -249,7 +249,7 @@ async def handle_join(
         try:
             await cog._save_lobby_to_db(view.lobby)
         except Exception as e:
-            print(format_console(f"[lfg] Failed to persist lobby after join: {e}", level="error"))
+            log_error(f"[lfg] Failed to persist lobby after join: {e}")
 
     if reply_ephemeral is not None:
         # Clear a stale/full lobby if we disabled its view
@@ -273,7 +273,7 @@ async def handle_join(
             is_public=False,
         )
     except Exception as e:
-        print(format_console(f"[lfg] Failed to create SpellTable game: {e}", level="error"))
+        log_error(f"[lfg] Failed to create SpellTable game: {e}")
 
     # Apply the created link if the lobby is still active + still full
     async with cog.state.lock:
@@ -424,7 +424,7 @@ async def handle_leave(
         try:
             await cog._save_lobby_to_db(view.lobby)
         except Exception as e:
-            print(format_console(f"[lfg] Failed to persist lobby after leave: {e}", level="error"))
+            log_error(f"[lfg] Failed to persist lobby after leave: {e}")
 
     if delete_channel_id and delete_message_id:
         channel = guild.get_channel(delete_channel_id)

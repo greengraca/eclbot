@@ -7,6 +7,7 @@ import discord
 
 from spelltable_client import create_spelltable_game
 from utils.interactions import safe_ctx_followup
+from utils.logger import log_error
 
 from .models import LFGLobby, now_utc
 
@@ -206,7 +207,7 @@ async def autojoin_specific_lobby_group(
                 is_public=False,
             )
         except Exception as e:
-            print(f"[lfg] Failed to create SpellTable game (autojoin group): {e}")
+            log_error(f"[lfg] Failed to create SpellTable game (autojoin group): {e}")
 
         if link_created:
             async with cog.state.lock:
@@ -360,7 +361,7 @@ async def autojoin_specific_lobby_from_lfg(
                 is_public=False,
             )
         except Exception as e:
-            print(f"[lfg] Failed to create SpellTable game (autojoin): {e}")
+            log_error(f"[lfg] Failed to create SpellTable game (autojoin): {e}")
 
         if link_created:
             async with cog.state.lock:

@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow, WAGER_RATE
 from utils.topdeck_identity import find_row_for_member
+from utils.logger import log_sync, log_ok, log_warn, log_debug
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
@@ -68,7 +69,7 @@ class SpellBotWatchCog(commands.Cog):
 
     def _debug(self, msg: str) -> None:
         if DEBUG_SPELLBOT_WATCH:
-            print(f"[spellbot-watch] {msg}")
+            log_debug(f"[spellbot-watch] {msg}")
 
     def _is_spellbot_message(self, msg: discord.Message) -> bool:
         # Prefer ID match if provided
@@ -170,8 +171,8 @@ class SpellBotWatchCog(commands.Cog):
                     self._debug(
                         f"_handle_high_stakes: could not resolve member for id={uid}, aborting."
                     )
-                    print(
-                        "[spellbot-watch] High-stakes check aborted: "
+                    log_warn(
+                        f"[spellbot-watch] High-stakes check aborted: "
                         f"could not resolve member for id={uid}"
                     )
                     return
@@ -179,7 +180,7 @@ class SpellBotWatchCog(commands.Cog):
 
             if not TOPDECK_BRACKET_ID:
                 self._debug("_handle_high_stakes: TOPDECK_BRACKET_ID not set, skipping.")
-                print(
+                log_warn(
                     "[spellbot-watch] High-stakes check aborted: "
                     "TOPDECK_BRACKET_ID not configured."
                 )
@@ -203,8 +204,8 @@ class SpellBotWatchCog(commands.Cog):
                     self._debug(
                         f"_handle_high_stakes: no TopDeck row for member {m} ({m.id}), aborting."
                     )
-                    print(
-                        "[spellbot-watch] High-stakes check aborted: "
+                    log_warn(
+                        f"[spellbot-watch] High-stakes check aborted: "
                         f"no TopDeck row found for member {m} ({m.id})."
                     )
                     return
@@ -226,12 +227,12 @@ class SpellBotWatchCog(commands.Cog):
             approx_pot = int(round(pot))
 
             # Always print detailed per-player info when we evaluate a pod
-            print(
-                "[spellbot-watch] High-stakes calculation for message "
+            log_sync(
+                f"[spellbot-watch] High-stakes calculation for message "
                 f"{msg.id}: pot≈{approx_pot}, threshold={HIGH_STAKES_THRESHOLD}"
             )
             for row, stake in stakes:
-                print(
+                log_sync(
                     "[spellbot-watch]   player={name!r}, uid={uid!r}, "
                     "pts={pts:.1f}, stake≈{stake:.1f}".format(
                         name=row.name,
@@ -242,16 +243,16 @@ class SpellBotWatchCog(commands.Cog):
                 )
 
             if pot < HIGH_STAKES_THRESHOLD:
-                print(
-                    "[spellbot-watch] Pod below high-stakes threshold; "
+                log_sync(
+                    f"[spellbot-watch] Pod below high-stakes threshold; "
                     f"pot≈{approx_pot}, threshold={HIGH_STAKES_THRESHOLD} – no announcement."
                 )
                 return
 
             # High-stakes pod!
             player_names = [r.name for r, _ in stakes]
-            print(
-                "[spellbot-watch] HIGH-STAKES POD DETECTED: "
+            log_ok(
+                f"[spellbot-watch] HIGH-STAKES POD DETECTED: "
                 f"message_id={msg.id}, pot≈{approx_pot}, players={player_names}"
             )
 
@@ -261,7 +262,7 @@ class SpellBotWatchCog(commands.Cog):
             )
 
         except Exception as e:
-            print(f"[spellbot-watch] Error in _handle_high_stakes: {type(e).__name__}: {e}")
+            log_warn(f"[spellbot-watch] Error in _handle_high_stakes: {type(e).__name__}: {e}")
 
     def _maybe_log_ready_message(self, msg: discord.Message) -> None:
         """Shared logic used by both on_message and on_message_edit."""
@@ -306,8 +307,8 @@ class SpellBotWatchCog(commands.Cog):
             else str(msg.channel.id)
         )
 
-        print(
-            "[spellbot-watch] Detected ready game: "
+        log_sync(
+            f"[spellbot-watch] Detected ready game: "
             f"message_id={msg.id}, channel={channel_name}, "
             f"link={link or 'unknown'}"
         )

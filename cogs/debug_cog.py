@@ -8,8 +8,7 @@ Goal: provide SAFE "dry-run" tools that emulate logic without applying side-effe
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-import re
+from datetime import datetime
 from typing import Optional, List
 
 import discord
@@ -22,57 +21,17 @@ from utils.persistence import (
     get_guild_timers as db_get_guild_timers,
     get_guild_lobbies as db_get_guild_lobbies,
 )
+from utils.dates import (
+    month_key,
+    add_months,
+    month_bounds,
+    league_close_at,
+    month_label,
+    looks_like_month,
+)
 
 
 GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
-
-
-def _month_key(dt: datetime) -> str:
-    return f"{dt.year:04d}-{dt.month:02d}"
-
-
-def _add_months(mk: str, n: int) -> str:
-    y, m = mk.split("-")
-    y_i, m_i = int(y), int(m)
-    m_i += n
-    while m_i > 12:
-        y_i += 1
-        m_i -= 12
-    while m_i < 1:
-        y_i -= 1
-        m_i += 12
-    return f"{y_i:04d}-{m_i:02d}"
-
-
-def _month_bounds(mk: str) -> tuple[datetime, datetime]:
-    """Return (start, end_exclusive) of mk in Lisbon TZ."""
-    y, m = mk.split("-")
-    start = datetime(int(y), int(m), 1, 0, 0, 0, tzinfo=LISBON_TZ)
-    end_mk = _add_months(mk, 1)
-    y2, m2 = end_mk.split("-")
-    end = datetime(int(y2), int(m2), 1, 0, 0, 0, tzinfo=LISBON_TZ)
-    return start, end
-
-
-def _league_close_at(mk: str) -> datetime:
-    """League closes at 19:00 Lisbon time on the last day of mk (YYYY-MM)."""
-    _, end = _month_bounds(mk)  # end is first day of next month @ 00:00 Lisbon
-    last_day = (end - timedelta(days=1)).astimezone(LISBON_TZ)
-    return datetime(last_day.year, last_day.month, last_day.day, 19, 0, 0, tzinfo=LISBON_TZ)
-
-
-def _month_label(mk: str) -> str:
-    """Pretty label like 'January 2026'."""
-    try:
-        y, m = mk.split("-")
-        dt = datetime(int(y), int(m), 1, tzinfo=LISBON_TZ)
-        return dt.strftime("%B %Y")
-    except Exception:
-        return mk
-
-
-def _looks_like_month(m: str) -> bool:
-    return bool(re.match(r"^20\d{2}-(0[1-9]|1[0-2])$", (m or "").strip()))
 
 
 
@@ -180,8 +139,8 @@ class DebugCog(commands.Cog):
         mk = (month or "").strip()
         now = datetime.now(LISBON_TZ)
         if not mk:
-            mk = _month_key(now)
-        if not _looks_like_month(mk):
+            mk = month_key(now)
+        if not looks_like_month(mk):
             await ctx.respond("Month must be **YYYY-MM** (e.g., 2026-01).", ephemeral=True)
             return
 
@@ -192,8 +151,8 @@ class DebugCog(commands.Cog):
 
         await ctx.defer(ephemeral=True)
 
-        target_mk = _add_months(mk, 1)
-        close_at = _league_close_at(mk)
+        target_mk = add_months(mk, 1)
+        close_at = league_close_at(mk)
 
         # IMPORTANT: use the SAME logic used by the real month-close job.
         # This is a pure read path (no roles, no DB writes).
@@ -230,12 +189,12 @@ class DebugCog(commands.Cog):
         top16_role = ctx.guild.get_role(top16_role_id) if top16_role_id else None
 
         emb = discord.Embed(
-            title=f"🧪 Top16 flip preview — {_month_label(mk)} → {_month_label(target_mk)}",
+            title=f"🧪 Top16 flip preview — {month_label(mk)} → {month_label(target_mk)}",
             description=(
                 "**Dry-run only** (no role/DB changes).\n\n"
                 f"At **{close_at.strftime('%Y-%m-%d %H:%M')} Lisbon**, the month-close job would award:\n"
                 f"• **Top16 role** ({top16_role.mention if top16_role else 'not configured'})\n"
-                f"• **Free entry** for **{_month_label(target_mk)}**\n\n"
+                f"• **Free entry** for **{month_label(target_mk)}**\n\n"
                 f"**Projected winners ({len(display_entries)}/16):**"
             ),
             color=int(getattr(cfg, "embed_color", 0x2ECC71) or 0x2ECC71),
@@ -255,13 +214,14 @@ class DebugCog(commands.Cog):
                     td_name = m.display_name
                 lines.append(f"**{i:02d}.** {m.mention} — {td_name} - {pts} - {games} games")
             
-                chunks = _chunk_lines_for_embed(lines, limit=1024)
-                for idx, chunk in enumerate(chunks):
-                    emb.add_field(
-                        name="Would receive Top16 + free entry" if idx == 0 else "​",
-                        value=chunk,
-                        inline=False,
-                    )
+            # Now chunk and add fields AFTER building all lines
+            chunks = _chunk_lines_for_embed(lines, limit=1024)
+            for idx, chunk in enumerate(chunks):
+                emb.add_field(
+                    name="Would receive Top16 + free entry" if idx == 0 else "​",
+                    value=chunk,
+                    inline=False,
+                )
         else:
             emb.add_field(
                 name="Would receive Top16 + free entry",

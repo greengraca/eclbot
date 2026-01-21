@@ -58,7 +58,7 @@ from utils.persistence import (
     cleanup_expired_lobbies as db_cleanup_expired_lobbies,
     update_lobby_expires_at as db_update_lobby_expires_at,
 )
-from utils.logger import format_console
+from utils.logger import log_sync, log_ok, log_warn, log_error
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 LFG_EMBED_ICON_URL = os.getenv("LFG_EMBED_ICON_URL", "").strip()
@@ -157,14 +157,14 @@ class LFGCog(commands.Cog):
                 expires_at=expires_at,
             )
         except Exception as e:
-            print(format_console(f"[lfg] Failed to persist lobby {lobby.guild_id}:{lobby.lobby_id}: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[lfg] Failed to persist lobby {lobby.guild_id}:{lobby.lobby_id}: {type(e).__name__}: {e}")
 
     async def _delete_lobby_from_db(self, guild_id: int, lobby_id: int) -> None:
         """Delete lobby from DB (used by _clear_lobby)."""
         try:
             await db_delete_lobby(guild_id, lobby_id)
         except Exception as e:
-            print(format_console(f"[lfg] Failed to delete lobby from DB: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[lfg] Failed to delete lobby from DB: {type(e).__name__}: {e}")
 
     async def _refresh_lobby_expiration(self, lobby: LFGLobby) -> None:
         """Called on interactions to reset the inactivity timeout."""
@@ -172,7 +172,7 @@ class LFGCog(commands.Cog):
             expires_at = now_utc() + timedelta(minutes=LOBBY_INACTIVITY_MINUTES)
             await db_update_lobby_expires_at(lobby.guild_id, lobby.lobby_id, expires_at)
         except Exception as e:
-            print(format_console(f"[lfg] Failed to refresh lobby expiration: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[lfg] Failed to refresh lobby expiration: {type(e).__name__}: {e}")
 
     # ---------- Rehydration on startup ----------
 
@@ -184,7 +184,7 @@ class LFGCog(commands.Cog):
             self._persistent_view_registered = True
             self._persistent_view = PersistentLFGView(self)
             self.bot.add_view(self._persistent_view)
-            print(format_console("[lfg] persistent views registered"))
+            log_sync("[lfg] persistent views registered")
 
         if self._rehydrated:
             return
@@ -194,15 +194,15 @@ class LFGCog(commands.Cog):
             # Clean up any expired lobbies first
             cleaned = await db_cleanup_expired_lobbies()
             if cleaned:
-                print(format_console(f"[lfg] Cleaned up {cleaned} expired lobbies from DB"))
+                log_sync(f"[lfg] Cleaned up {cleaned} expired lobbies from DB")
 
             # Load active lobbies
             docs = await db_get_all_active_lobbies()
             if not docs:
-                print(format_console("[lfg] No active lobbies to rehydrate"))
+                log_sync("[lfg] No active lobbies to rehydrate")
                 return
 
-            print(format_console(f"[lfg] Rehydrating {len(docs)} lobbies from DB..."))
+            log_sync(f"[lfg] Rehydrating {len(docs)} lobbies from DB...")
             rehydrated_count = 0
 
             for doc in docs:
@@ -213,12 +213,12 @@ class LFGCog(commands.Cog):
                 except Exception as e:
                     gid = doc.get('guild_id')
                     lid = doc.get('lobby_id')
-                    print(format_console(f"[lfg] Failed to rehydrate lobby {gid}:{lid}: {type(e).__name__}: {e}", level="error"))
+                    log_error(f"[lfg] Failed to rehydrate lobby {gid}:{lid}: {type(e).__name__}: {e}")
 
-            print(format_console(f"[lfg] Successfully rehydrated {rehydrated_count}/{len(docs)} lobbies", level="ok"))
+            log_ok(f"[lfg] Successfully rehydrated {rehydrated_count}/{len(docs)} lobbies")
 
         except Exception as e:
-            print(format_console(f"[lfg] Error during lobby rehydration: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[lfg] Error during lobby rehydration: {type(e).__name__}: {e}")
 
     async def _rehydrate_lobby(self, doc: Dict) -> bool:
         """Reconstruct a single lobby from a DB document. Returns True if successful."""
@@ -232,13 +232,13 @@ class LFGCog(commands.Cog):
 
         guild = self.bot.get_guild(guild_id)
         if not guild:
-            print(format_console(f"[lfg] Rehydrate: guild {guild_id} not found, deleting lobby", level="warn"))
+            log_sync(f"[lfg] Rehydrate: guild {guild_id} not found, deleting lobby", level="warn")
             await db_delete_lobby(guild_id, lobby_id)
             return False
 
         channel = guild.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
-            print(format_console(f"[lfg] Rehydrate: channel {channel_id} not found, deleting lobby", level="warn"))
+            log_sync(f"[lfg] Rehydrate: channel {channel_id} not found, deleting lobby", level="warn")
             await db_delete_lobby(guild_id, lobby_id)
             return False
 
@@ -247,11 +247,11 @@ class LFGCog(commands.Cog):
             try:
                 msg = await channel.fetch_message(int(message_id))
             except discord.NotFound:
-                print(format_console(f"[lfg] Rehydrate: message {message_id} not found, deleting lobby", level="warn"))
+                log_sync(f"[lfg] Rehydrate: message {message_id} not found, deleting lobby", level="warn")
                 await db_delete_lobby(guild_id, lobby_id)
                 return False
             except Exception as e:
-                print(format_console(f"[lfg] Rehydrate: error fetching message {message_id}: {type(e).__name__}: {e}", level="error"))
+                log_error(f"[lfg] Rehydrate: error fetching message {message_id}: {type(e).__name__}: {e}")
                 await db_delete_lobby(guild_id, lobby_id)
                 return False
         else:
@@ -318,14 +318,14 @@ class LFGCog(commands.Cog):
             view._sync_open_last_seat_button()
             await msg.edit(embed=embed, view=view)
         except Exception as e:
-            print(format_console(f"[lfg] Rehydrate: failed to update message view: {type(e).__name__}: {e}", level="warn"))
+            log_warn(f"[lfg] Rehydrate: failed to update message view: {type(e).__name__}: {e}")
             # Still keep the lobby active, the buttons just won't work until next interaction
 
         # Restart Elo embed updater if needed
         if lobby.elo_mode and not lobby.has_link():
             self._ensure_elo_embed_updater(lobby)
 
-        print(format_console(f"[lfg] Rehydrated lobby {guild_id}:{lobby_id} with {len(lobby.player_ids)} players"))
+        log_sync(f"[lfg] Rehydrated lobby {guild_id}:{lobby_id} with {len(lobby.player_ids)} players")
         return True
 
     # ---------- internal helpers ----------
@@ -393,20 +393,20 @@ class LFGCog(commands.Cog):
         player_ids: List[int],
     ) -> None:
         try:
-            print(
+            log_sync(
                 "[lfg] high-stakes check: "
                 f"bracket_set={bool(TOPDECK_BRACKET_ID)} wager_rate={WAGER_RATE} "
                 f"threshold={HIGH_STAKES_THRESHOLD} players={player_ids}"
             )
 
             if not TOPDECK_BRACKET_ID:
-                print("[lfg] high-stakes: skipped (TOPDECK_BRACKET_ID not set)")
+                log_sync("[lfg] high-stakes: skipped (TOPDECK_BRACKET_ID not set)")
                 return
             if WAGER_RATE <= 0 or HIGH_STAKES_THRESHOLD <= 0:
-                print(format_console("[lfg] high-stakes: skipped (feature disabled via envs)"))
+                log_sync("[lfg] high-stakes: skipped (feature disabled via envs)")
                 return
             if len(player_ids) != 4:
-                print(format_console(f"[lfg] high-stakes: skipped (expected 4 players, got {len(player_ids)})"))
+                log_sync(f"[lfg] high-stakes: skipped (expected 4 players, got {len(player_ids)})")
                 return
 
             members: List[discord.Member] = []
@@ -418,7 +418,7 @@ class LFGCog(commands.Cog):
                     except Exception:
                         m = None
                 if not isinstance(m, discord.Member):
-                    print(format_console(f"[lfg] high-stakes: aborted (could not resolve member id={uid})", level="warn"))
+                    log_warn(f"[lfg] high-stakes: aborted (could not resolve member id={uid})")
                     return
                 members.append(m)
 
@@ -432,7 +432,7 @@ class LFGCog(commands.Cog):
             for m in members:
                 found = resolve_points_games_from_map(m, handle_to_best)
                 if found is None:
-                    print(format_console(f"[lfg] high-stakes: aborted (no TopDeck mapping for {m} / {m.id})", level="warn"))
+                    log_warn(f"[lfg] high-stakes: aborted (no TopDeck mapping for {m} / {m.id})")
                     return
                 pts, games = found
                 resolved.append((m, float(pts), int(games)))
@@ -441,23 +441,23 @@ class LFGCog(commands.Cog):
             pot = float(sum(stake for _m, stake in stakes))
             approx_pot = int(round(pot))
 
-            print(format_console(f"[lfg] high-stakes calc: pot≈{approx_pot} threshold={HIGH_STAKES_THRESHOLD}"))
+            log_sync(f"[lfg] high-stakes calc: pot≈{approx_pot} threshold={HIGH_STAKES_THRESHOLD}")
             for m, pts, _games in resolved:
                 stake = pts * float(WAGER_RATE)
-                print(format_console(f"[lfg]   player={m.display_name!r} id={m.id} pts={pts:.1f} stake≈{stake:.1f}"))
+                log_sync(f"[lfg]   player={m.display_name!r} id={m.id} pts={pts:.1f} stake≈{stake:.1f}")
 
             if pot < float(HIGH_STAKES_THRESHOLD):
-                print(format_console("[lfg] high-stakes: below threshold -> no announcement"))
+                log_sync("[lfg] high-stakes: below threshold -> no announcement")
                 return
 
-            print(format_console(f"[lfg] HIGH-STAKES POD DETECTED -> announcing pot≈{approx_pot}", level="ok"))
+            log_ok(f"[lfg] HIGH-STAKES POD DETECTED -> announcing pot≈{approx_pot}")
             await channel.send(
                 f"🚨 **HIGH-STAKES POD DETECTED!** 🚨\n"
                 f"The winner will take home ~**{approx_pot}** points."
             )
 
         except Exception as e:
-            print(format_console(f"[lfg] Error in _maybe_announce_high_stakes: {type(e).__name__}: {e}", level="error"))
+            log_error(f"[lfg] Error in _maybe_announce_high_stakes: {type(e).__name__}: {e}")
 
 
     # ---- Elo updater ----
@@ -663,7 +663,7 @@ class LFGCog(commands.Cog):
                     pts_by_id[int(uid)] = int(round(float(pts)))
 
             except Exception as e:
-                print(format_console(f"[lfg] Error fetching pts for ready embed: {type(e).__name__}: {e}", level="error"))
+                log_error(f"[lfg] Error fetching pts for ready embed: {type(e).__name__}: {e}")
 
         return build_ready_embed(
             guild,
@@ -798,7 +798,7 @@ class LFGCog(commands.Cog):
                 )
                 full_lobby.link = link
             except Exception as e:
-                print(format_console(f"[lfg] Failed to create SpellTable game (friends fill): {e}", level="error"))
+                log_error(f"[lfg] Failed to create SpellTable game (friends fill): {e}")
                 await safe_ctx_followup(
                     ctx,
                     "I couldn't create a SpellTable game right now. Please try again in a bit or ping a mod.",
@@ -834,7 +834,7 @@ class LFGCog(commands.Cog):
         try:
             msg = await safe_ctx_followup(ctx, embed=embed, view=view)
         except Exception as e:
-            print(format_console(f"[lfg] Failed to send lobby message: {e}", level="error"))
+            log_error(f"[lfg] Failed to send lobby message: {e}")
             self._clear_lobby(ctx.guild.id, lobby.lobby_id)
             await safe_ctx_followup(ctx, "Something went wrong creating the lobby message.", ephemeral=True)
             return
@@ -935,7 +935,7 @@ class LFGCog(commands.Cog):
         try:
             msg = await safe_ctx_followup(ctx, embed=embed, view=view)
         except Exception as e:
-            print(f"[lfgelo] Failed to send Elo lobby message: {e}")
+            log_error(f"[lfgelo] Failed to send Elo lobby message: {e}")
             self._clear_lobby(ctx.guild.id, lobby.lobby_id)
             await safe_ctx_followup(ctx, "Something went wrong creating the Elo lobby.", ephemeral=True)
             return

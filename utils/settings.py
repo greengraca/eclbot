@@ -1,11 +1,12 @@
 # utils/settings.py
-import os, re
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import Set
 
-LISBON_TZ = ZoneInfo("Europe/Lisbon")
+# Import and re-export LISBON_TZ from dates for backwards compatibility
+from utils.dates import LISBON_TZ
 
 TOPDECK_BRACKET_ID = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
 NEXT_MONTH_TOPDECK_BRACKET_ID = (os.getenv("NEXT_MONTH_TOPDECK_BRACKET_ID") or "").strip()

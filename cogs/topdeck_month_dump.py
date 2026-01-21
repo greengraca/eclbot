@@ -16,6 +16,7 @@ from pymongo import UpdateOne
 from db import topdeck_month_dump_runs, topdeck_month_dump_chunks, topdeck_pods
 
 from utils.settings import LISBON_TZ
+from utils.logger import log_sync, log_warn
 
 from topdeck_fetch import (
     Match,
@@ -375,7 +376,7 @@ class TopdeckMonthDumpCog(commands.Cog):
 
         async with self._lock:
             try:
-                print(f"[topdeck-dump] {_now_iso()} Starting dump for {month_str} (bracket={TOPDECK_BRACKET_ID}).")
+                log_sync(f"[topdeck-dump] {_now_iso()} Starting dump for {month_str} (bracket={TOPDECK_BRACKET_ID}).")
 
                 mongo_meta = await dump_topdeck_month_to_mongo(
                     guild_id=ctx.guild.id,
@@ -385,14 +386,14 @@ class TopdeckMonthDumpCog(commands.Cog):
                 )
 
                 c = mongo_meta.get("counts") or {}
-                print(
+                log_sync(
                     f"[topdeck-dump] {_now_iso()} Finished dump for {month_str}. "
                     f"saved={c.get('completed_saved')} excluded_in_progress={c.get('excluded_in_progress')} "
                     f"excluded_invalid_completed={c.get('excluded_invalid_completed')}"
                 )
 
             except Exception as e:
-                print(f"[topdeck-dump] Error: {type(e).__name__}: {e}")
+                log_warn(f"[topdeck-dump] Error: {type(e).__name__}: {e}")
                 await ctx.followup.send("Dump failed. Check bot logs for details.", ephemeral=True)
                 return
 

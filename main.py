@@ -4,6 +4,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from colorama import just_fix_windows_console
 
+from utils.logger import log_sync, log_ok, log_warn, log_error
+
 
 just_fix_windows_console()
 load_dotenv()
@@ -14,7 +16,7 @@ try:
 except Exception as e:
     mongo_ping = None
     mongo_ensure_indexes = None
-    print(f"[boot] Mongo not ready: {e}")
+    log_warn(f"[boot] Mongo not ready: {e}")
 
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -46,7 +48,7 @@ _MONGO_BOOTSTRAPPED = False
 
 def load_opus():
     if discord.opus.is_loaded():
-        print("[voice] Opus already loaded")
+        log_sync("[voice] Opus already loaded")
         return
 
     env_path = os.getenv("OPUS_PATH")
@@ -64,12 +66,12 @@ def load_opus():
             continue
         try:
             discord.opus.load_opus(cand)
-            print(f"[voice] Loaded Opus from {cand}")
+            log_ok(f"[voice] Loaded Opus from {cand}")
             return
         except OSError:
             continue
 
-    print("[voice] WARNING: could not load Opus. Voice will not work.")
+    log_warn("[voice] WARNING: could not load Opus. Voice will not work.")
 
 
 @bot.event
@@ -81,10 +83,10 @@ async def on_ready():
         try:
             await mongo_ping()
             await mongo_ensure_indexes()
-            print("[boot] MongoDB OK + indexes ensured")
+            log_ok("[boot] MongoDB OK + indexes ensured")
             _MONGO_BOOTSTRAPPED = True
         except Exception as e:
-            print(f"[boot] MongoDB ERROR: {e}")
+            log_error(f"[boot] MongoDB ERROR: {e}")
 
     # Existing invite-role cache bootstrap (unchanged behavior)
     invite_cog = bot.get_cog("InviteRoles")
@@ -93,8 +95,8 @@ async def on_ready():
         if guild is not None:
             await invite_cog.build_invite_cache(guild)
 
-    print(f"Logged in as {bot.user} ({bot.user.id})")
-    print(f"[boot] voice_states intent on? {bot.intents.voice_states}")
+    log_ok(f"[boot] Logged in as {bot.user} ({bot.user.id})")
+    log_sync(f"[boot] voice_states intent on? {bot.intents.voice_states}")
 
 
 if __name__ == "__main__":
@@ -108,6 +110,6 @@ if __name__ == "__main__":
         try:
             bot.load_extension(ext)
         except Exception as e:
-            print(f"[boot] ⚠️ Failed to load extension '{ext}': {e}")
+            log_warn(f"[boot] ⚠️ Failed to load extension '{ext}': {e}")
 
     bot.run(TOKEN)

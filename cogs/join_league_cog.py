@@ -22,12 +22,16 @@ from typing import Optional, Set, Tuple
 
 import discord
 from discord.ext import commands
-from zoneinfo import ZoneInfo
 
 from db import subs_access, subs_free_entries, subs_jobs
-
-
-LISBON_TZ = ZoneInfo("Europe/Lisbon")
+from utils.dates import (
+    LISBON_TZ,
+    month_key,
+    add_months,
+    month_bounds,
+    month_label,
+)
+from utils.logger import log_sync
 
 
 # -------------------- tiny env helpers --------------------
@@ -48,41 +52,6 @@ def _parse_int_set(csv: str) -> Set[int]:
         if part.isdigit():
             out.add(int(part))
     return out
-
-
-def month_key(dt: datetime) -> str:
-    return f"{dt.year:04d}-{dt.month:02d}"
-
-
-def add_months(mk: str, n: int) -> str:
-    y, m = mk.split("-")
-    y_i, m_i = int(y), int(m)
-    m_i += n
-    while m_i > 12:
-        y_i += 1
-        m_i -= 12
-    while m_i < 1:
-        y_i -= 1
-        m_i += 12
-    return f"{y_i:04d}-{m_i:02d}"
-
-
-def month_bounds(mk: str) -> tuple[datetime, datetime]:
-    y, m = mk.split("-")
-    start = datetime(int(y), int(m), 1, 0, 0, 0, tzinfo=LISBON_TZ)
-    end_mk = add_months(mk, 1)
-    y2, m2 = end_mk.split("-")
-    end = datetime(int(y2), int(m2), 1, 0, 0, 0, tzinfo=LISBON_TZ)
-    return start, end
-
-
-def month_label(mk: str) -> str:
-    try:
-        y, m = mk.split("-")
-        dt = datetime(int(y), int(m), 1, tzinfo=LISBON_TZ)
-        return dt.strftime("%B %Y")
-    except Exception:
-        return mk
 
 
 # -------------------- config --------------------
@@ -190,7 +159,7 @@ class JoinLeagueCog(commands.Cog):
             return
         self.bot.add_view(EnterLeagueView(self))
         self._views_registered = True
-        print("[join] persistent views registered")
+        log_sync("[join] persistent views registered")
 
     # -------------------- helpers --------------------
     def _has_any_role_id(self, member: discord.Member, role_ids: Set[int]) -> bool:

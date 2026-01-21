@@ -6,6 +6,8 @@ from typing import Dict, Optional
 import discord
 from discord.ext import commands
 
+from utils.logger import log_sync, log_ok, log_warn
+
 # ---- Role / Guild config from environment -----------------------------------
 
 PT_ROLE_ID = int(os.getenv("PT_ROLE", "0"))
@@ -84,7 +86,7 @@ class InviteRoles(commands.Cog):
             }
             for inv in invites
         }
-        print(f"[invite_roles] cached {len(invites)} invites for {guild.name}")
+        log_sync(f"[invite_roles] cached {len(invites)} invites for {guild.name}")
 
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite):
@@ -134,9 +136,7 @@ class InviteRoles(commands.Cog):
         # Update cache right away
         self.invite_cache[guild.id] = current
 
-        print(
-            f"[invite_roles] {member} joined. used={used_code} before={before} after={after}"
-        )
+        log_sync(f"[invite_roles] {member} joined. used={used_code} before={before} after={after}")
 
         # Rule: any invite with max_uses == 1 counts as PT
         is_pt = False
@@ -163,15 +163,15 @@ class InviteRoles(commands.Cog):
                     await member.add_roles(
                         pt_role, reason="1-use invite → PT Community"
                     )
-                    print(f"[invite_roles] ✅ Gave PT to {member} (1-use invite).")
+                    log_ok(f"[invite_roles] Gave PT to {member} (1-use invite).")
                 except discord.Forbidden:
-                    print("[invite_roles] ⚠️ Missing permission to add PT role.")
+                    log_warn("[invite_roles] Missing permission to add PT role.")
                 except Exception as e:
-                    print(f"[invite_roles] ⚠️ Error adding PT: {e}")
+                    log_warn(f"[invite_roles] Error adding PT: {e}")
             else:
-                print("[invite_roles] ⚠️ PT role not found.")
+                log_warn("[invite_roles] PT role not found.")
         else:
-            print(f"[invite_roles] no auto-role to {member}")
+            log_sync(f"[invite_roles] no auto-role to {member}")
 
     # ---------------------- Reaction roles: ECL + LFG ------------------------
 
@@ -194,9 +194,7 @@ class InviteRoles(commands.Cog):
                 if _emoji_matches_config(payload.emoji):
                     role = guild.get_role(ECL_ROLE_ID)
                     if not role:
-                        print(
-                            "[invite_roles] ⚠️ ECL role not found for reaction-role."
-                        )
+                        log_warn("[invite_roles] ECL role not found for reaction-role.")
                         return
                     member = guild.get_member(payload.user_id) or await guild.fetch_member(
                         payload.user_id
@@ -207,17 +205,11 @@ class InviteRoles(commands.Cog):
                                 role, reason="Reaction role (ECL)"
                             )
                             msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-                            print(
-                                f"[invite_roles] ✅ ECL ADDED: {member} via reaction {payload.emoji} • {msg_link}"
-                            )
+                            log_ok(f"[invite_roles] ECL ADDED: {member} via reaction {payload.emoji} • {msg_link}")
                         except discord.Forbidden:
-                            print(
-                                "[invite_roles] ⚠️ Missing permission to add ECL role."
-                            )
+                            log_warn("[invite_roles] Missing permission to add ECL role.")
                         except Exception as e:
-                            print(
-                                f"[invite_roles] ⚠️ Error adding ECL (reaction): {e}"
-                            )
+                            log_warn(f"[invite_roles] Error adding ECL (reaction): {e}")
                     return  # stop after handling ECL
 
         # ----- LFG block -----
@@ -229,9 +221,7 @@ class InviteRoles(commands.Cog):
                 if _emoji_matches_generic(LFG_RR_EMOJI, payload.emoji):
                     role = guild.get_role(LFG_ROLE_ID)
                     if not role:
-                        print(
-                            "[invite_roles] ⚠️ LFG role not found for reaction-role."
-                        )
+                        log_warn("[invite_roles] LFG role not found for reaction-role.")
                         return
                     member = guild.get_member(payload.user_id) or await guild.fetch_member(
                         payload.user_id
@@ -242,17 +232,11 @@ class InviteRoles(commands.Cog):
                                 role, reason="Reaction role (LFGLEAGUE)"
                             )
                             msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-                            print(
-                                f"[invite_roles] ✅ LFGLEAGUE ADDED: {member} via reaction {payload.emoji} • {msg_link}"
-                            )
+                            log_ok(f"[invite_roles] LFGLEAGUE ADDED: {member} via reaction {payload.emoji} • {msg_link}")
                         except discord.Forbidden:
-                            print(
-                                "[invite_roles] ⚠️ Missing permission to add LFGLEAGUE role."
-                            )
+                            log_warn("[invite_roles] Missing permission to add LFGLEAGUE role.")
                         except Exception as e:
-                            print(
-                                f"[invite_roles] ⚠️ Error adding LFGLEAGUE (reaction): {e}"
-                            )
+                            log_warn(f"[invite_roles] Error adding LFGLEAGUE (reaction): {e}")
                     return
                 
         # ----- DM OPT-IN block -----
@@ -264,7 +248,7 @@ class InviteRoles(commands.Cog):
                 if _emoji_matches_generic(DM_OPTIN_RR_EMOJI, payload.emoji):
                     role = guild.get_role(DM_OPTIN_ROLE_ID)
                     if not role:
-                        print("[invite_roles] ⚠️ DM opt-in role not found for reaction-role.")
+                        log_warn("[invite_roles] DM opt-in role not found for reaction-role.")
                         return
 
                     member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
@@ -272,11 +256,11 @@ class InviteRoles(commands.Cog):
                         try:
                             await member.add_roles(role, reason="Reaction role (DM opt-in)")
                             msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-                            print(f"[invite_roles] ✅ DM OPT-IN ADDED: {member} via {payload.emoji} • {msg_link}")
+                            log_ok(f"[invite_roles] DM OPT-IN ADDED: {member} via {payload.emoji} • {msg_link}")
                         except discord.Forbidden:
-                            print("[invite_roles] ⚠️ Missing permission to add DM opt-in role.")
+                            log_warn("[invite_roles] Missing permission to add DM opt-in role.")
                         except Exception as e:
-                            print(f"[invite_roles] ⚠️ Error adding DM opt-in role: {e}")
+                            log_warn(f"[invite_roles] Error adding DM opt-in role: {e}")
                     return
 
 
@@ -299,9 +283,7 @@ class InviteRoles(commands.Cog):
                 if _emoji_matches_config(payload.emoji):
                     role = guild.get_role(ECL_ROLE_ID)
                     if not role:
-                        print(
-                            "[invite_roles] ⚠️ ECL role not found for reaction-role."
-                        )
+                        log_warn("[invite_roles] ECL role not found for reaction-role.")
                         return
                     member = guild.get_member(payload.user_id) or await guild.fetch_member(
                         payload.user_id
@@ -312,17 +294,11 @@ class InviteRoles(commands.Cog):
                                 role, reason="Reaction role (ECL) removed"
                             )
                             msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-                            print(
-                                f"[invite_roles] 🗑️ ECL REMOVED: {member} (reaction removed {payload.emoji}) • {msg_link}"
-                            )
+                            log_sync(f"[invite_roles] ECL REMOVED: {member} (reaction removed {payload.emoji}) • {msg_link}")
                         except discord.Forbidden:
-                            print(
-                                "[invite_roles] ⚠️ Missing permission to remove ECL role."
-                            )
+                            log_warn("[invite_roles] Missing permission to remove ECL role.")
                         except Exception as e:
-                            print(
-                                f"[invite_roles] ⚠️ Error removing ECL (reaction): {e}"
-                            )
+                            log_warn(f"[invite_roles] Error removing ECL (reaction): {e}")
                     return
 
         # ----- LFG block -----
@@ -334,9 +310,7 @@ class InviteRoles(commands.Cog):
                 if _emoji_matches_generic(LFG_RR_EMOJI, payload.emoji):
                     role = guild.get_role(LFG_ROLE_ID)
                     if not role:
-                        print(
-                            "[invite_roles] ⚠️ LFG role not found for reaction-role."
-                        )
+                        log_warn("[invite_roles] LFG role not found for reaction-role.")
                         return
                     member = guild.get_member(payload.user_id) or await guild.fetch_member(
                         payload.user_id
@@ -348,17 +322,35 @@ class InviteRoles(commands.Cog):
                                 reason="Reaction role (LFGLEAGUE) removed",
                             )
                             msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
-                            print(
-                                f"[invite_roles] 🗑️ LFGLEAGUE REMOVED: {member} (reaction {payload.emoji}) • {msg_link}"
-                            )
+                            log_sync(f"[invite_roles] LFGLEAGUE REMOVED: {member} (reaction {payload.emoji}) • {msg_link}")
                         except discord.Forbidden:
-                            print(
-                                "[invite_roles] ⚠️ Missing permission to remove LFGLEAGUE role."
-                            )
+                            log_warn("[invite_roles] Missing permission to remove LFGLEAGUE role.")
                         except Exception as e:
-                            print(
-                                f"[invite_roles] ⚠️ Error removing LFGLEAGUE (reaction): {e}"
-                            )
+                            log_warn(f"[invite_roles] Error removing LFGLEAGUE (reaction): {e}")
+                    return
+
+        # ----- DM OPT-IN block -----
+        if DM_OPTIN_RR_CHANNEL_ID and DM_OPTIN_RR_MESSAGE_ID and DM_OPTIN_RR_EMOJI:
+            if (
+                payload.channel_id == DM_OPTIN_RR_CHANNEL_ID
+                and payload.message_id == DM_OPTIN_RR_MESSAGE_ID
+            ):
+                if _emoji_matches_generic(DM_OPTIN_RR_EMOJI, payload.emoji):
+                    role = guild.get_role(DM_OPTIN_ROLE_ID)
+                    if not role:
+                        log_warn("[invite_roles] DM opt-in role not found for reaction-role.")
+                        return
+
+                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+                    if member and not member.bot:
+                        try:
+                            await member.remove_roles(role, reason="Reaction role (DM opt-in) removed")
+                            msg_link = f"https://discord.com/channels/{guild.id}/{payload.channel_id}/{payload.message_id}"
+                            log_sync(f"[invite_roles] DM OPT-IN REMOVED: {member} (reaction {payload.emoji}) • {msg_link}")
+                        except discord.Forbidden:
+                            log_warn("[invite_roles] Missing permission to remove DM opt-in role.")
+                        except Exception as e:
+                            log_warn(f"[invite_roles] Error removing DM opt-in role: {e}")
                     return
 
     # ---------------------- Slash command: /eclgive --------------------------
@@ -397,9 +389,7 @@ class InviteRoles(commands.Cog):
         await ctx.respond(
             f"Added **{role.name}** to {member.mention}.", ephemeral=True
         )
-        print(
-            f"[invite_roles] 🛠️ ECL added to {member} by {ctx.user} via /eclgive"
-        )
+        log_ok(f"[invite_roles] ECL added to {member} by {ctx.user} via /eclgive")
 
 
 def setup(bot: commands.Bot):
