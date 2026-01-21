@@ -27,6 +27,25 @@ from utils.persistence import (
 )
 from utils.logger import log_sync, log_ok, log_warn, log_error, log_debug
 
+# Import from timer submodule
+from .timer import (
+    env_float as _env_float,
+    now_utc,
+    ts,
+    month_start_utc as _month_start_utc,
+    make_timer_id,
+    norm_handle as _norm_handle,
+    norm_member_handles as _norm_member_handles,
+    same_channel as _same_channel,
+    voice_prereqs_ok as _voice_prereqs_ok,
+    ffmpeg_src as _ffmpeg_src,
+    non_bot_members as _non_bot_members,
+    build_progress_bar as _build_progress_bar,
+    VOICE_CONNECT_TIMEOUT,
+    ReplaceTimerView,
+    TopDeckTagger,
+)
+
 
 # ---------------- env / config ----------------
 
@@ -34,13 +53,6 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 ECL_MOD_ROLE_ID = int(os.getenv("ECL_MOD_ROLE_ID", "0"))
 ECL_MOD_ROLE_NAME = os.getenv("ECL_MOD_ROLE_NAME", "ECL MOD")
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
 
 
 # Main round duration in minutes
@@ -71,227 +83,8 @@ TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
 
-# ---------------- small helpers ----------------
 
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def ts(dt: datetime) -> int:
-    return int(dt.timestamp())
-
-
-def _month_start_utc() -> datetime:
-    now = datetime.now(timezone.utc)
-    return datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-
-
-def make_timer_id(voice_channel_id: int, seq: int) -> str:
-    return f"{voice_channel_id}_{seq}"
-
-
-def _norm_handle(s: str) -> str:
-    """Normalize a Discord handle for fuzzy matching."""
-    return "".join(ch for ch in s.lower() if ch.isalnum()) if s else ""
-
-def _norm_member_handles(m: discord.Member) -> set[str]:
-    out: set[str] = set()
-
-    for cand in (m.name, getattr(m, "display_name", None), getattr(m, "global_name", None)):
-        if isinstance(cand, str):
-            h = _norm_handle(cand)
-            if h:
-                out.add(h)
-
-    discrim = getattr(m, "discriminator", None)
-    if discrim and discrim != "0":
-        h = _norm_handle(f"{m.name}#{discrim}")
-        if h:
-            out.add(h)
-
-    return out
-
-
-
-# ---------------- voice helpers ----------------
-
-VOICE_CONNECT_TIMEOUT = 10.0
-
-
-def _same_channel(
-    vc: Optional[discord.VoiceClient],
-    ch: Optional[discord.VoiceChannel],
-) -> bool:
-    return bool(vc and vc.channel and ch and vc.channel.id == ch.id)
-
-
-def _voice_prereqs_ok() -> bool:
-    if not discord.opus.is_loaded():
-        log_warn("[voice] Opus is not loaded")
-        return False
-    try:
-        import nacl  # noqa: F401
-    except Exception:
-        log_warn("[voice] PyNaCl is not installed; voice cannot work")
-        return False
-    return True
-
-
-def _ffmpeg_src(path: str) -> discord.AudioSource:
-    # Simple ffmpeg -> opus, using the resolved ffmpeg binary
-    return discord.FFmpegOpusAudio(
-        path,
-        executable=FFMPEG_EXE,
-        before_options="-nostdin",
-        options="-vn",
-    )
-
-
-def _non_bot_members(ch: discord.VoiceChannel) -> List[discord.Member]:
-    return [m for m in ch.members if not m.bot]
-
-
-def _build_progress_bar(
-    main_total: float,
-    extra_total: float,
-    remaining_main: float,
-    remaining_total: float,
-    *,
-    width: int = 30,
-) -> str:
-    """
-    Build a text progress bar:
-
-    [██████░░░░░░|██░░░░░░░░]
-
-    Left side = main time, right side = extra time.
-    remaining_main / remaining_total are in seconds.
-    """
-    main_total = max(float(main_total), 0.0)
-    extra_total = max(float(extra_total), 0.0)
-    total = main_total + extra_total
-    if total <= 0:
-        return "[----------]"
-
-    width = max(width, 10)
-
-    # how many chars belong to main vs extra
-    main_slots = max(1, int(round(width * (main_total / total))))
-    extra_slots = max(1, width - main_slots)
-
-    # elapsed amounts (clamped)
-    elapsed_total = main_total + extra_total - remaining_total
-    elapsed_total = max(0.0, min(elapsed_total, main_total + extra_total))
-
-    elapsed_main = main_total - remaining_main
-    elapsed_main = max(0.0, min(elapsed_main, main_total))
-
-    elapsed_extra = max(0.0, elapsed_total - elapsed_main)
-    elapsed_extra = max(0.0, min(elapsed_extra, extra_total))
-
-    # convert to filled slots
-    if main_total > 0:
-        main_fill = int(round(main_slots * (elapsed_main / main_total)))
-    else:
-        main_fill = main_slots
-    main_fill = max(0, min(main_fill, main_slots))
-
-    if extra_total > 0:
-        extra_fill = int(round(extra_slots * (elapsed_extra / extra_total)))
-    else:
-        extra_fill = 0
-    extra_fill = max(0, min(extra_fill, extra_slots))
-
-    filled_main = "█" * main_fill + "░" * (main_slots - main_fill)
-    filled_extra = "█" * extra_fill + "░" * (extra_slots - extra_fill)
-
-    return f"[{filled_main}|{filled_extra}]"
-
-
-# ---------------- confirmation view ----------------
-
-
-class ReplaceTimerView(discord.ui.View):
-    """Ask whether to replace an existing timer for a given game room."""
-
-    def __init__(
-        self,
-        cog: "ECLTimerCog",
-        ctx: discord.ApplicationContext,
-        voice_channel: discord.VoiceChannel,
-        game_number: int,
-        existing_timer_id: str,
-        *,
-        timeout: float = 30.0,
-    ) -> None:
-        super().__init__(timeout=timeout)
-        self.cog = cog
-        self.ctx = ctx
-        self.voice_channel = voice_channel
-        self.game_number = game_number
-        self.existing_timer_id = existing_timer_id
-
-    async def _check_user(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message(
-                "Only the user who called `/timer` can use these buttons.",
-                ephemeral=True,
-            )
-            return False
-        return True
-
-    @discord.ui.button(
-        label="Start new timer (replace)",
-        style=discord.ButtonStyle.danger,
-    )
-    async def confirm_replace(
-        self,
-        button: discord.ui.Button,
-        interaction: discord.Interaction,
-    ):
-        if not await self._check_user(interaction):
-            return
-
-        await interaction.response.edit_message(
-            content=f"Stopping existing timer and starting a new one for {self.voice_channel.name}…",
-            view=None,
-        )
-
-        # stop old, start new
-        await self.cog.set_timer_stopped(self.existing_timer_id, reason="replace")
-
-        ignore_autostop = self.cog._ignore_autostop_for_start(
-            interaction.user if isinstance(interaction.user, discord.Member) else None,
-            self.voice_channel,
-        )
-
-        await self.cog._start_timer(
-            self.ctx,
-            self.voice_channel,
-            game_number=self.game_number,
-            ignore_autostop=ignore_autostop,
-        )
-        self.stop()
-
-    @discord.ui.button(
-        label="Keep current timer",
-        style=discord.ButtonStyle.secondary,
-    )
-    async def keep_current(
-        self,
-        button: discord.ui.Button,
-        interaction: discord.Interaction,
-    ):
-        if not await self._check_user(interaction):
-            return
-
-        await interaction.response.edit_message(
-            content=f"Keeping the existing timer for {self.voice_channel.name}.",
-            view=None,
-        )
-        self.stop()
-
+# Helpers, views, and progress bar imported from .timer submodule
 
 # ---------------- Cog ----------------
 
@@ -334,8 +127,12 @@ class ECLTimerCog(commands.Cog):
         # guild_id -> asyncio.Lock (serialize voice ops per guild)
         self._voice_locks: Dict[int, asyncio.Lock] = {}
 
-        # lock for writing/updating the TopDeck online JSON
-        self._online_json_lock: asyncio.Lock = asyncio.Lock()
+        # TopDeck online game tagger
+        self.topdeck_tagger = TopDeckTagger(
+            self,
+            bracket_id=TOPDECK_BRACKET_ID,
+            firebase_token=FIREBASE_ID_TOKEN,
+        )
 
         log_sync(
             "[timer] init "
@@ -815,7 +612,7 @@ class ECLTimerCog(commands.Cog):
                     f"channel {ch.id}, file={source_path}"
                 )
                 try:
-                    task = vc.play(_ffmpeg_src(source_path), wait_finish=True)
+                    task = vc.play(_ffmpeg_src(source_path, FFMPEG_EXE), wait_finish=True)
                 except Exception as e:
                     log_error(f"[voice] vc.play() raised: {e}")
                     return False
@@ -924,7 +721,7 @@ class ECLTimerCog(commands.Cog):
         None  -> couldn't resolve pod (TopDeck mismatch / fetch error)
         """
         try:
-            pod = await self._match_vc_to_in_progress_pod(vc, _non_bot_members(vc))
+            pod = await self.topdeck_tagger.match_vc_to_pod(vc, _non_bot_members(vc))
         except Exception as e:
             log_warn(f"[timer/topdeck] pod check failed: {type(e).__name__}: {e}")
             return None
@@ -938,223 +735,8 @@ class ECLTimerCog(commands.Cog):
 
 
 
-    # ---------- TopDeck online tagging helpers ----------
 
-    async def _match_vc_to_in_progress_pod(
-        self,
-        voice_channel: discord.VoiceChannel,
-        members: List[discord.Member],
-    ) -> Optional[InProgressPod]:
-        """
-        Compare VC member handles with TopDeck in-progress pods.
-
-        - Normalize Discord names (same as elsewhere: a-z0-9 only)
-        - Allow extra people in VC (judge/spectator)
-        - Require good overlap: at least 3 shared names AND >=75% of the pod
-        """
-        handles: set[str] = set()
-        for m in members:
-            if m.bot:
-                continue
-            handles |= _norm_member_handles(m)
-
-        handles_sorted = sorted(handles)
-        log_sync(
-            f"[timer/topdeck] VC {voice_channel.name} -> "
-            f"vc_handles={handles_sorted}"
-        )
-
-        if not handles:
-            log_sync(
-                f"[timer/topdeck] VC {voice_channel.name} has no usable handles; "
-                "skipping TopDeck match."
-            )
-            return None
-
-        if not TOPDECK_BRACKET_ID:
-            log_sync("[timer/topdeck] TOPDECK_BRACKET_ID not set; skipping lookup.")
-            return None
-
-        pods = await get_in_progress_pods(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
-        log_sync(
-            f"[timer/topdeck] get_in_progress_pods returned {len(pods)} pods "
-            f"for bracket={TOPDECK_BRACKET_ID!r}."
-        )
-
-        if not pods:
-            return None
-
-        # Debug log every pod we got from TopDeck
-        for pod in pods:
-            pod_norm = list(getattr(pod, "entrant_discords_norm", []) or [])
-            pod_raw = list(getattr(pod, "entrant_discords_raw", []) or [])
-            pod_uids = list(getattr(pod, "entrant_uids", []) or [])
-            pod_eids = list(getattr(pod, "entrant_ids", []) or [])
-
-            pod_handles_set = {h for h in pod_norm if h}
-            log_debug(
-                "[timer/topdeck] Pod "
-                f"S{pod.season}:T{pod.table} | "
-                f"norm_handles={sorted(pod_handles_set)} | "
-                f"raw_discords={pod_raw} | "
-                f"uids={pod_uids} | "
-                f"eids={pod_eids} | "
-                f"start={pod.start}"
-            )
-
-        best: Optional[InProgressPod] = None
-        best_score: Optional[tuple] = None  # (coverage, inter_count, start_ts)
-
-        for pod in pods:
-            pod_norm = list(getattr(pod, "entrant_discords_norm", []) or [])
-            pod_handles = {h for h in pod_norm if h}
-            if not pod_handles:
-                continue
-
-            intersection = handles & pod_handles
-            inter_count = len(intersection)
-            if inter_count == 0:
-                continue
-
-            pod_size = len(pod_handles)
-            coverage = inter_count / pod_size if pod_size else 0.0
-            start_ts = float(getattr(pod, "start", 0.0) or 0.0)
-
-            log_debug(
-                "[timer/topdeck]   candidate "
-                f"S{pod.season}:T{pod.table} | "
-                f"pod_handles={sorted(pod_handles)} | "
-                f"intersection={sorted(intersection)} | "
-                f"inter_count={inter_count} | coverage={coverage:.2f}"
-            )
-
-            # Require:
-            # - at least 3 shared players (for 4-player pods)
-            # - and at least 75% of that pod present in VC
-            if inter_count < 3:
-                continue
-            if coverage < 0.75:
-                continue
-
-            score = (coverage, inter_count, start_ts)
-            if best_score is None or score > best_score:
-                best_score = score
-                best = pod
-
-        if best:
-            pod_norm = list(getattr(best, "entrant_discords_norm", []) or [])
-            pod_handles = {h for h in pod_norm if h}
-            log_ok(
-                f"[timer/topdeck] VC {voice_channel.name} matched TopDeck pod "
-                f"S{best.season}:T{best.table} with pod_handles="
-                f"{sorted(pod_handles)}."
-            )
-        else:
-            log_sync(
-                f"[timer/topdeck] No in-progress TopDeck pod matched VC "
-                f"{voice_channel.name}; vc_handles={handles_sorted}, pods={len(pods)}."
-            )
-
-        return best
-
-    async def _mark_match_online(
-        self,
-        guild: discord.Guild,
-        match: InProgressPod,
-    ) -> None:
-        """Persist a TopDeck match as online (Mongo)."""
-        if not TOPDECK_BRACKET_ID:
-            return
-
-        ms = _month_start_utc()
-        year, month = ms.year, ms.month
-
-        season = int(getattr(match, "season", 0) or 0)
-        tid = int(getattr(match, "table", 0) or 0)
-        start_ts = float(getattr(match, "start", 0.0) or 0.0)
-
-        entrant_ids: list[int] = []
-        for x in (getattr(match, "entrant_ids", None) or []):
-            try:
-                entrant_ids.append(int(x))
-            except Exception:
-                continue
-
-        # ✅ entrant_uids are TopDeck UIDs (strings)
-        topdeck_uids: list[str] = []
-        for u in (getattr(match, "entrant_uids", None) or []):
-            if u is None:
-                continue
-            s = str(u).strip()
-            if s:
-                topdeck_uids.append(s)
-
-        # de-dupe, stable order
-        seen = set()
-        topdeck_uids = [x for x in topdeck_uids if not (x in seen or seen.add(x))]
-
-        async with self._online_json_lock:
-            existing = await get_record(
-                TOPDECK_BRACKET_ID, year, month, season=season, tid=tid
-            )
-            already_online = bool(existing and existing.online)
-
-            rec = OnlineGameRecord(
-                season=season,
-                tid=tid,
-                start_ts=start_ts or None,
-                entrant_ids=entrant_ids,
-                topdeck_uids=topdeck_uids,
-                online=True,
-            )
-            await upsert_record(TOPDECK_BRACKET_ID, year, month, rec)
-
-        log_ok(
-            f"[timer/topdeck] Marked TopDeck match S{season}:T{tid} as online "
-            f"(already_online={already_online}). Players in match: {topdeck_uids}."
-        )
-
-
-    async def _tag_online_game_for_timer(
-        self,
-        ctx: discord.ApplicationContext,
-        voice_channel: discord.VoiceChannel,
-        non_bot_members: List[discord.Member],
-    ) -> None:
-        guild = ctx.guild
-        if guild is None:
-            return
-        if not TOPDECK_BRACKET_ID:
-            return
-
-        try:
-            match = await self._match_vc_to_in_progress_pod(
-                voice_channel,
-                non_bot_members,
-            )
-        except Exception as e:
-            log_warn(
-                "[timer/topdeck] Error while matching VC to TopDeck pods: "
-                f"{type(e).__name__}: {e}"
-            )
-            return
-
-        if match is None:
-            # No match → warn chat (public)
-            try:
-                await ctx.channel.send(
-                    "⚠️ I couldn't find a matching **TopDeck game in progress** "
-                    "for this table. Make sure your game is started in TopDeck "
-                    "and that your Discord name on TopDeck matches your name here."
-                )
-            except Exception as e:
-                log_warn(
-                    "[timer/topdeck] Failed to send 'no TopDeck match' warning: "
-                    f"{type(e).__name__}: {e}"
-                )
-            return
-
-        await self._mark_match_online(guild, match)
+    # TopDeck online tagging now handled by self.topdeck_tagger (see timer/topdeck.py)
 
     # ---------- core actions ----------
 
@@ -1555,10 +1137,10 @@ class ECLTimerCog(commands.Cog):
 
         # Try to tag this pod as an online TopDeck game (or warn if not found)
         try:
-            await self._tag_online_game_for_timer(ctx, voice_channel, non_bot)
+            await self.topdeck_tagger.tag_online_game_for_timer(ctx, voice_channel, non_bot)
         except Exception as e:
             log_warn(
-                "[timer/topdeck] Unexpected error in _tag_online_game_for_timer: "
+                "[timer/topdeck] Unexpected error in tag_online_game_for_timer: "
                 f"{type(e).__name__}: {e}"
             )
 
@@ -2026,15 +1608,18 @@ class ECLTimerCog(commands.Cog):
             data = self.active_timers.get(timer_id) or self.paused_timers.get(timer_id) or {}
 
             # If timer was started in mod-testing mode:
-            # - keep it alive while underfilled
-            # - but if it ever reaches 3+ players, flip back to normal behavior
+            # - keep it alive while at least 1 person is in the room
+            # - but if room is completely empty, still stop
+            # - if it ever reaches 3+ players, flip back to normal behavior
             if data.get("ignore_autostop"):
                 if len(non_bot) >= 3:
                     data["ignore_autostop"] = False
                     log_sync(f"[auto-stop] Re-enabled for {timer_id} (table reached 3+ players).")
-                elif len(non_bot) < 2:
-                    log_sync(f"[auto-stop] Skipped for {timer_id} (mod testing mode).")
+                elif len(non_bot) >= 1:
+                    # At least 1 person still in room - keep timer alive (mod testing)
+                    log_sync(f"[auto-stop] Skipped for {timer_id} (mod testing mode, {len(non_bot)} player(s)).")
                     continue
+                # len(non_bot) == 0 falls through to stop the timer
 
             if len(non_bot) < 2:
                 log_sync(
