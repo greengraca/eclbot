@@ -220,7 +220,7 @@ async def autojoin_specific_lobby_group(
                     lobby.link = link_created
                     lobby.link_creating = False
 
-            ready_embed = cog._build_ready_embed(guild, lobby, started_at)
+            ready_embed = await cog._build_ready_embed(guild, lobby, started_at)
 
             if msg:
                 with contextlib.suppress(Exception):
