@@ -8,13 +8,14 @@ Goal: provide SAFE "dry-run" tools that emulate logic without applying side-effe
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 import discord
 from discord.ext import commands
 from discord import Option
 
+from db import subs_free_entries
 from utils.logger import get_logger
 from utils.settings import SUBS, LISBON_TZ
 from utils.mod_check import is_mod
@@ -94,11 +95,11 @@ class DebugCog(commands.Cog):
             str,
             "Which debug action to run.",
             required=True,
-            choices=["month_flip", "top16onflip", "subs_dms_preview", "timers", "lobbies"],
+            choices=["month_flip", "top16onflip", "subs_dms_preview", "timers", "lobbies", "backfill_free_roles"],
         ),
         month: Optional[str] = Option(
             str,
-            "For month_flip/top16onflip: cut month YYYY-MM (defaults to current month).",
+            "For month_flip/top16onflip/backfill_free_roles: month YYYY-MM (defaults to current month).",
             required=False,
         ),
     ):
@@ -136,6 +137,11 @@ class DebugCog(commands.Cog):
             await self._debug_lobbies(ctx)
             return
 
+        # --- Backfill free-role DB entries (one-time migration tool) ---
+        if action == "backfill_free_roles":
+            await self._backfill_free_roles(ctx, month)
+            return
+
         # --- top16onflip dry-run preview ---
         mk = (month or "").strip()
         now = datetime.now(LISBON_TZ)
@@ -150,7 +156,11 @@ class DebugCog(commands.Cog):
             await ctx.respond("SubscriptionsCog is not loaded.", ephemeral=True)
             return
 
-        await ctx.defer(ephemeral=True)
+        if not ctx.response.is_done():
+            try:
+                await ctx.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
 
         target_mk = add_months(mk, 1)
         close_at = league_close_at(mk)
@@ -194,8 +204,7 @@ class DebugCog(commands.Cog):
             description=(
                 "**Dry-run only** (no role/DB changes).\n\n"
                 f"At **{close_at.strftime('%Y-%m-%d %H:%M')} Lisbon**, the month-close job would award:\n"
-                f"• **Top16 role** ({top16_role.mention if top16_role else 'not configured'})\n"
-                f"• **Free entry** for **{month_label(target_mk)}**\n\n"
+                f"• **Top16 role** ({top16_role.mention if top16_role else 'not configured'})\n\n"
                 f"**Projected winners ({len(display_entries)}/16):**"
             ),
             color=int(getattr(cfg, "embed_color", 0x2ECC71) or 0x2ECC71),
@@ -219,13 +228,13 @@ class DebugCog(commands.Cog):
             chunks = _chunk_lines_for_embed(lines, limit=1024)
             for idx, chunk in enumerate(chunks):
                 emb.add_field(
-                    name="Would receive Top16 + free entry" if idx == 0 else "​",
+                    name="Would receive Top16 role" if idx == 0 else "​",
                     value=chunk,
                     inline=False,
                 )
         else:
             emb.add_field(
-                name="Would receive Top16 + free entry",
+                name="Would receive Top16 role",
                 value="(none resolved — likely mapping misses)",
                 inline=False,
             )
@@ -271,7 +280,12 @@ class DebugCog(commands.Cog):
             await ctx.respond("Month must be **YYYY-MM** (e.g., 2026-01).", ephemeral=True)
             return
 
-        await ctx.defer(ephemeral=True)
+        # Safely defer - handle case where interaction might already be acknowledged
+        if not ctx.response.is_done():
+            try:
+                await ctx.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass  # Already acknowledged, continue anyway
 
         guild = ctx.guild
         cfg = subs.cfg if hasattr(subs, "cfg") else self.cfg
@@ -333,7 +347,7 @@ class DebugCog(commands.Cog):
         # ==================== EMBED 2: Top16 Recipients ====================
         emb2 = discord.Embed(
             title="🏆 Step 1: Top16 Cut",
-            description="Who would receive **Top16 role** + **free entry** for next month:",
+            description="Who would receive **Top16 role**:",
             color=0xF1C40F,
         )
 
@@ -496,7 +510,11 @@ class DebugCog(commands.Cog):
 
     async def _debug_timers(self, ctx: discord.ApplicationContext) -> None:
         """Show persisted timers for this guild (from DB + in-memory)."""
-        await ctx.defer(ephemeral=True)
+        if not ctx.response.is_done():
+            try:
+                await ctx.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
 
         guild = ctx.guild
         if not guild:
@@ -561,7 +579,11 @@ class DebugCog(commands.Cog):
 
     async def _debug_lobbies(self, ctx: discord.ApplicationContext) -> None:
         """Show persisted lobbies for this guild (from DB + in-memory)."""
-        await ctx.defer(ephemeral=True)
+        if not ctx.response.is_done():
+            try:
+                await ctx.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
 
         guild = ctx.guild
         if not guild:
@@ -624,6 +646,186 @@ class DebugCog(commands.Cog):
 
         emb.set_footer(text="ECL Debug • lobbies")
         await ctx.followup.send(embed=emb, ephemeral=True)
+
+    async def _backfill_free_roles(self, ctx: discord.ApplicationContext, month: Optional[str]) -> None:
+        """One-time backfill: write DB free entries for all members with free-entry roles.
+        
+        This allows removing roles from FREE_ENTRY_ROLE_IDS env var while preserving
+        the free entry for users who already had those roles.
+        """
+        subs = self._subs_cog()
+        if subs is None:
+            await ctx.respond("SubscriptionsCog is not loaded.", ephemeral=True)
+            return
+
+        mk = (month or "").strip()
+        now = datetime.now(LISBON_TZ)
+        if not mk:
+            mk = month_key(now)
+        if not looks_like_month(mk):
+            await ctx.respond("Month must be **YYYY-MM** (e.g., 2026-01).", ephemeral=True)
+            return
+
+        if not ctx.response.is_done():
+            try:
+                await ctx.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+        guild = ctx.guild
+        cfg = subs.cfg if hasattr(subs, "cfg") else self.cfg
+
+        role_ids = getattr(cfg, "free_entry_role_ids", set()) or set()
+        if not role_ids:
+            await ctx.followup.send("❌ No free-entry role IDs configured (FREE_ENTRY_ROLE_IDS).", ephemeral=True)
+            return
+
+        # Build per-user list of role names that grant free entry
+        user_roles: dict[int, list[str]] = {}
+        for rid in role_ids:
+            role = guild.get_role(rid)
+            if not role:
+                continue
+            for m in getattr(role, "members", []) or []:
+                if m.bot:
+                    continue
+                user_roles.setdefault(int(m.id), []).append(role.name)
+
+        if not user_roles:
+            await ctx.followup.send(f"❌ No members found with free-entry roles for {month_label(mk)}.", ephemeral=True)
+            return
+
+        # Build role summary for preview
+        role_counts: dict[str, int] = {}
+        for rnames in user_roles.values():
+            for rn in rnames:
+                role_counts[rn] = role_counts.get(rn, 0) + 1
+        
+        role_summary = "\n".join(f"• **{rn}**: {cnt} members" for rn, cnt in sorted(role_counts.items(), key=lambda x: -x[1]))
+
+        # Preview embed
+        emb = discord.Embed(
+            title=f"⚠️ Backfill free-entry — {month_label(mk)}",
+            description=(
+                f"This will write **{len(user_roles)}** free-entry records to the database.\n\n"
+                f"After this, these users will have DB-backed free entry for **{month_label(mk)}** "
+                f"and will keep it even if the role is removed from `FREE_ENTRY_ROLE_IDS`.\n\n"
+                f"**This action writes to the database.**"
+            ),
+            color=0xF39C12,
+        )
+        emb.add_field(name="Roles to process", value=role_summary[:1024] or "(none)", inline=False)
+        emb.set_footer(text="ECL Debug • backfill_free_roles")
+
+        # Create confirmation view
+        view = BackfillConfirmView(
+            cog=self,
+            ctx=ctx,
+            mk=mk,
+            user_roles=user_roles,
+            cfg=cfg,
+        )
+
+        await ctx.followup.send(embed=emb, view=view, ephemeral=True)
+
+
+class BackfillConfirmView(discord.ui.View):
+    """Confirmation view for backfill_free_roles command."""
+
+    def __init__(self, cog: "DebugCog", ctx: discord.ApplicationContext, mk: str, user_roles: dict, cfg):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.ctx = ctx
+        self.mk = mk
+        self.user_roles = user_roles
+        self.cfg = cfg
+        self.completed = False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.user.id:
+            await interaction.response.send_message("Only the command user can confirm.", ephemeral=True)
+            return
+
+        if self.completed:
+            await interaction.response.send_message("Already processed.", ephemeral=True)
+            return
+
+        self.completed = True
+        await interaction.response.defer()
+
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+        await interaction.edit_original_response(view=self)
+
+        # Execute backfill
+        written = 0
+        for uid, role_names in self.user_roles.items():
+            roles_txt = ", ".join(sorted(set(role_names)))
+            reason = f"free role: {roles_txt}"
+            await subs_free_entries.update_one(
+                {"guild_id": self.cfg.guild_id, "user_id": int(uid), "month": self.mk},
+                {
+                    "$setOnInsert": {
+                        "guild_id": self.cfg.guild_id,
+                        "user_id": int(uid),
+                        "month": self.mk,
+                        "created_at": datetime.now(timezone.utc),
+                    },
+                    "$set": {"reason": reason, "updated_at": datetime.now(timezone.utc)},
+                },
+                upsert=True,
+            )
+            written += 1
+
+        # Build role summary
+        role_counts: dict[str, int] = {}
+        for rnames in self.user_roles.values():
+            for rn in rnames:
+                role_counts[rn] = role_counts.get(rn, 0) + 1
+        role_summary = "\n".join(f"• **{rn}**: {cnt} members" for rn, cnt in sorted(role_counts.items(), key=lambda x: -x[1]))
+
+        # Success embed
+        emb = discord.Embed(
+            title=f"✅ Backfill complete — {month_label(self.mk)}",
+            description=(
+                f"Wrote **{written}** free-entry records to database.\n\n"
+                f"These users now have DB-backed free entry for **{month_label(self.mk)}** "
+                f"and will keep it even if the role is removed from `FREE_ENTRY_ROLE_IDS`."
+            ),
+            color=0x2ECC71,
+        )
+        emb.add_field(name="Roles processed", value=role_summary[:1024] or "(none)", inline=False)
+        emb.set_footer(text="ECL Debug • backfill_free_roles")
+
+        await interaction.followup.send(embed=emb, ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.user.id:
+            await interaction.response.send_message("Only the command user can cancel.", ephemeral=True)
+            return
+
+        self.completed = True
+        
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content="❌ Backfill cancelled.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        if not self.completed:
+            for item in self.children:
+                item.disabled = True
+            try:
+                await self.ctx.edit(view=self)
+            except Exception:
+                pass
 
 
 def setup(bot: commands.Bot):

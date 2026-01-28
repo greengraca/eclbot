@@ -2,10 +2,11 @@
 """Month-end flip logic for subscriptions.
 
 Handles:
-- Month close at 19:00 Lisbon on last day
+- Month close at 00:00 Lisbon on last day (midnight between penultimate and last day)
 - Top16 cut application for next month
 - Monthly midnight role revocation
 - Flip reminder DMs (mods + free-role users)
+- Free-entry role DB persistence
 """
 
 from __future__ import annotations
@@ -228,21 +229,22 @@ class MonthFlipHandler:
 
         applied = 0
         for uid in top16_ids:
-            await subs_free_entries.update_one(
-                {"guild_id": cfg.guild_id, "user_id": int(uid), "month": target_month},
-                {
-                    "$setOnInsert": {
-                        "guild_id": cfg.guild_id,
-                        "user_id": int(uid),
-                        "month": target_month,
-                        "created_at": datetime.now(timezone.utc),
-                    },
-                    "$set": {"reason": f"Top16 ({cut_month})", "updated_at": datetime.now(timezone.utc)},
-                },
-                upsert=True,
-            )
+            #TOP16 free entry DB write + grant role
+            # await subs_free_entries.update_one(
+            #     {"guild_id": cfg.guild_id, "user_id": int(uid), "month": target_month},
+            #     {
+            #         "$setOnInsert": {
+            #             "guild_id": cfg.guild_id,
+            #             "user_id": int(uid),
+            #             "month": target_month,
+            #             "created_at": datetime.now(timezone.utc),
+            #         },
+            #         "$set": {"reason": f"Top16 ({cut_month})", "updated_at": datetime.now(timezone.utc)},
+            #     },
+            #     upsert=True,
+            # )
 
-            await self.cog._grant_ecl(uid, reason=f"Top16 free entry ({target_month})")
+            # await self.cog._grant_ecl(uid, reason=f"Top16 free entry ({target_month})")
             await self.cog._grant_top16(uid, reason=f"Top16 qualifier ({cut_month})")
             applied += 1
 
@@ -299,7 +301,11 @@ class MonthFlipHandler:
         await self.cog._dm_mods_embed(guild, embed=emb)
 
     async def run_free_role_flip_info_job(self, guild: discord.Guild, *, mk: str) -> None:
-        """Once-per-month DM to players who have free-entry via specific roles."""
+        """Once-per-month DM to players who have free-entry via specific roles.
+        
+        Also writes free-entry to database so the source of truth is the DB
+        (in case someone loses the role mid-month).
+        """
         cfg = self.cfg
         role_ids = set(int(x) for x in (cfg.free_entry_role_ids or set()) if int(x))
         if not role_ids:
@@ -327,9 +333,10 @@ class MonthFlipHandler:
         nice_month = month_label(mk)
         sem = asyncio.Semaphore(cfg.dm_concurrency)
         sent = 0
+        db_written = 0
 
         async def _send_one(uid: int, role_names: list[str]):
-            nonlocal sent
+            nonlocal sent, db_written
             async with sem:
                 try:
                     member = guild.get_member(uid) or await guild.fetch_member(uid)
@@ -338,15 +345,32 @@ class MonthFlipHandler:
                 if not member or member.bot:
                     return
 
+                # Write free entry to database (source of truth)
+                roles_txt = ", ".join(sorted(set(role_names)))
+                reason = f"free role: {roles_txt}"
+                await subs_free_entries.update_one(
+                    {"guild_id": cfg.guild_id, "user_id": int(uid), "month": mk},
+                    {
+                        "$setOnInsert": {
+                            "guild_id": cfg.guild_id,
+                            "user_id": int(uid),
+                            "month": mk,
+                            "created_at": datetime.now(timezone.utc),
+                        },
+                        "$set": {"reason": reason, "updated_at": datetime.now(timezone.utc)},
+                    },
+                    upsert=True,
+                )
+                db_written += 1
+
                 # ensure access role is present
                 await self.cog._grant_ecl(uid, reason=f"Free entry role(s) ({nice_month})")
 
-                roles_txt = ", ".join(sorted(set(role_names)))
                 emb = discord.Embed(
                     title=f"✅ Free entry — {nice_month}",
                     description=(
                         f"You have **free entry** for **{nice_month}** because you have: **{roles_txt}**.\n\n"
-                        "If you lose that role, your free entry goes away."
+                        "Your access is secured for this month."
                     ),
                     color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
                 )
@@ -362,4 +386,4 @@ class MonthFlipHandler:
                     await asyncio.sleep(cfg.dm_sleep_seconds)
 
         await asyncio.gather(*[_send_one(uid, rnames) for uid, rnames in user_roles.items()])
-        await self.log.info(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)}")
+        await self.log.info(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)} DMs, wrote {db_written} DB entries")

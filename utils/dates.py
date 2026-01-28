@@ -91,7 +91,8 @@ def league_close_at(mk: str) -> datetime:
     """
     Return the league close time for a given month.
     
-    The league closes at 19:00 Lisbon time on the last day of the month.
+    The league closes at 00:00 Lisbon time on the last day of the month
+    (i.e., midnight between the penultimate and last day).
     
     Args:
         mk: Month key in 'YYYY-MM' format.
@@ -103,7 +104,7 @@ def league_close_at(mk: str) -> datetime:
     last_day = (end - timedelta(days=1)).astimezone(LISBON_TZ)
     return datetime(
         last_day.year, last_day.month, last_day.day,
-        19, 0, 0,
+        0, 0, 0,
         tzinfo=LISBON_TZ
     )
 
