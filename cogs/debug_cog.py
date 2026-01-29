@@ -303,7 +303,7 @@ class DebugCog(commands.Cog):
                 f"**Cut month:** {month_label(mk)}\n"
                 f"**Target month:** {month_label(target_mk)}\n"
                 f"**Close time:** {close_at.strftime('%Y-%m-%d %H:%M')} Lisbon\n"
-                f"**Flip time:** {flip_at.strftime('%Y-%m-%d %H:%M')} Lisbon"
+                f"At close: Top16 role granted, free-role DB entries, ECL revoked for ineligible"
             ),
             color=0x3498DB,
         )
@@ -446,10 +446,10 @@ class DebugCog(commands.Cog):
         emb3.set_footer(text="ECL Debug • month_flip (3/4)")
         embeds.append(emb3)
 
-        # ==================== EMBED 4: Midnight Revoke ====================
+        # ==================== EMBED 4: ECL Revoke ====================
         emb4 = discord.Embed(
-            title="🌙 Midnight Revoke Preview",
-            description=f"Who would **lose ECL role** when {month_label(target_mk)} starts:",
+            title="🔒 ECL Revoke Preview",
+            description=f"Who would **lose ECL role** at close time (not eligible for {month_label(target_mk)}):",
             color=0xE74C3C,
         )
 
@@ -496,7 +496,7 @@ class DebugCog(commands.Cog):
             if len(members_with_ecl) > check_limit:
                 emb4.add_field(
                     name="⚠️ Note",
-                    value=f"Only checked first {check_limit} members. Full check happens at actual midnight.",
+                    value=f"Only checked first {check_limit} members. Full check happens at close time.",
                     inline=False,
                 )
         else:
