@@ -15,10 +15,11 @@ import discord
 from discord.ext import commands
 from discord import Option
 
-from db import subs_free_entries
+from db import subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col
 from utils.logger import get_logger
 from utils.settings import SUBS, LISBON_TZ
 from utils.mod_check import is_mod
+from utils.treasure_pods import TreasurePodManager
 from utils.persistence import (
     get_guild_timers as db_get_guild_timers,
     get_guild_lobbies as db_get_guild_lobbies,
@@ -95,11 +96,11 @@ class DebugCog(commands.Cog):
             str,
             "Which debug action to run.",
             required=True,
-            choices=["month_flip", "top16onflip", "subs_dms_preview", "timers", "lobbies", "backfill_free_roles"],
+            choices=["month_flip", "top16onflip", "subs_dms_preview", "timers", "lobbies", "backfill_free_roles", "treasure_stats"],
         ),
         month: Optional[str] = Option(
             str,
-            "For month_flip/top16onflip/backfill_free_roles: month YYYY-MM (defaults to current month).",
+            "Month YYYY-MM for month_flip/top16onflip/backfill/treasure_stats (default: current).",
             required=False,
         ),
     ):
@@ -140,6 +141,11 @@ class DebugCog(commands.Cog):
         # --- Backfill free-role DB entries (one-time migration tool) ---
         if action == "backfill_free_roles":
             await self._backfill_free_roles(ctx, month)
+            return
+
+        # --- Treasure pod stats ---
+        if action == "treasure_stats":
+            await self._debug_treasure_stats(ctx, month)
             return
 
         # --- top16onflip dry-run preview ---
@@ -727,6 +733,67 @@ class DebugCog(commands.Cog):
         )
 
         await ctx.followup.send(embed=emb, view=view, ephemeral=True)
+
+    async def _debug_treasure_stats(self, ctx: discord.ApplicationContext, month: Optional[str]) -> None:
+        """Show Bring a Friend Treasure Pod stats for a month (safe - doesn't reveal pod numbers)."""
+        mk = (month or "").strip()
+        now = datetime.now(LISBON_TZ)
+        if not mk:
+            mk = month_key(now)
+        if not looks_like_month(mk):
+            await ctx.respond("Month must be **YYYY-MM** (e.g., 2026-01).", ephemeral=True)
+            return
+
+        if not ctx.response.is_done():
+            try:
+                await ctx.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+        guild = ctx.guild
+        manager = TreasurePodManager(treasure_pod_schedule, treasure_pods_col)
+
+        stats = await manager.get_stats(guild.id, mk)
+        won_pods = await manager.get_won_pods(guild.id, mk)
+
+        emb = discord.Embed(
+            title=f"🎁 Treasure Pod Stats — {month_label(mk)}",
+            color=0xFFD700,  # Gold
+        )
+
+        if not stats.get("scheduled"):
+            emb.description = "No treasure pod schedule found for this month."
+        else:
+            emb.description = (
+                f"**Estimated total tables:** {stats['estimated_total']}\n\n"
+                f"**Treasures fired:** {stats['treasures_fired']}\n"
+                f"**Treasures remaining:** {stats['treasures_remaining']}"
+            )
+
+        if won_pods:
+            lines = []
+            for pod in won_pods[:10]:
+                # Try to get winner display name from stored data
+                winner_handle = pod.get("winner_discord_handle")
+                winner_uid = pod.get("winner_topdeck_uid")
+                
+                if winner_handle:
+                    winner_name = winner_handle
+                elif winner_uid:
+                    winner_name = winner_uid
+                else:
+                    winner_name = "Unknown"
+                
+                lines.append(f"• Table #{pod['table']} → **{winner_name}**")
+            
+            emb.add_field(
+                name=f"🏆 Winners ({len(won_pods)})",
+                value="\n".join(lines) or "(none)",
+                inline=False,
+            )
+
+        emb.set_footer(text="ECL Debug • treasure_stats")
+        await ctx.followup.send(embed=emb, ephemeral=True)
 
 
 class BackfillConfirmView(discord.ui.View):

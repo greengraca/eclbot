@@ -21,11 +21,12 @@ import discord
 from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
 
-from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, PlayerRow
+from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
-from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events
+from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
 from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
+from utils.treasure_pods import TreasurePodManager
 
 from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id
 
@@ -87,6 +88,9 @@ class SubscriptionsCog(commands.Cog):
 
         # Month flip handler (manages month-end logic)
         self.flip_handler = MonthFlipHandler(self)
+
+        # Treasure pod manager (Bring a Friend)
+        self._treasure_manager = TreasurePodManager(treasure_pod_schedule, treasure_pods_col)
 
 
     def cog_unload(self):
@@ -934,8 +938,6 @@ class SubscriptionsCog(commands.Cog):
                 "$setOnInsert": {
                     "guild_id": ctx.guild.id,
                     "user_id": member.id,
-                    "discord_name": discord_name,
-                    "discord_username": discord_username,
                     "month": month,
                     "created_at": datetime.now(timezone.utc),
                 },
@@ -1162,6 +1164,53 @@ class SubscriptionsCog(commands.Cog):
                 elif now.date() == d1_before_close:
                     await self._run_topcut_prize_reminder_job(guild, mk=mk_current, kind="1d")
                     await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="last")
+
+            # --- Treasure pod checks (using cached TopDeck data) ---
+            if TOPDECK_BRACKET_ID:
+                try:
+                    cached = get_cached_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+                    if cached:
+                        matches, entrant_to_uid, player_map = cached
+                        
+                        # Get current_max_table from matches
+                        current_max_table = max((m.id for m in matches), default=0)
+                        
+                        # Get player count for estimation
+                        player_count = None
+                        try:
+                            rows, _ = await get_league_rows_cached(
+                                TOPDECK_BRACKET_ID,
+                                FIREBASE_ID_TOKEN,
+                                force_refresh=False,
+                            )
+                            if rows:
+                                player_count = len([r for r in rows if not r.dropped])
+                        except Exception:
+                            pass
+                        
+                        # Check pending treasure pod results (win/draw)
+                        await self._treasure_manager.check_pending_results(
+                            guild_id=guild.id,
+                            month=now_mk,
+                            matches=matches,
+                            entrant_to_uid=entrant_to_uid,
+                            player_map=player_map,
+                            current_max_table=current_max_table,
+                            new_player_count=player_count,
+                        )
+                        
+                        # Check if recalculation needed (if nearing month end)
+                        days_until_close = (close_at - now).total_seconds() / 86400.0
+                        if days_until_close <= 11 and days_until_close > 0:
+                            await self._treasure_manager.check_and_recalculate_if_needed(
+                                guild_id=guild.id,
+                                month=now_mk,
+                                days_until_close=days_until_close,
+                                current_max_table=current_max_table,
+                                new_player_count=player_count,
+                            )
+                except Exception as e:
+                    await self.log.warn(f"[treasure] Check failed: {type(e).__name__}: {e}")
 
         except Exception as e:
             tb = traceback.format_exc()

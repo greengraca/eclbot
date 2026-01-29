@@ -9,3 +9,4 @@ pymongo==4.9.2
 dnspython==2.7.0
 tzdata
 colorama
+cryptography

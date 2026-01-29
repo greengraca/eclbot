@@ -60,6 +60,10 @@ topdeck_month_dump_chunks = db["topdeck_month_dump_chunks"]
 persistent_timers = db["persistent_timers"]
 persistent_lobbies = db["persistent_lobbies"]
 
+# Treasure pods (Bring a Friend)
+treasure_pod_schedule = db["treasure_pod_schedule"]
+treasure_pods = db["treasure_pods"]
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
@@ -229,6 +233,30 @@ async def ensure_indexes() -> None:
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="by_expires_at",
+            ),
+        ]
+    )
+
+    # ---- Treasure Pods (Bring a Friend) ----
+    await treasure_pod_schedule.create_indexes(
+        [
+            IndexModel(
+                [("guild_id", ASCENDING), ("month", ASCENDING)],
+                unique=True,
+                name="uniq_guild_month",
+            ),
+        ]
+    )
+
+    await treasure_pods.create_indexes(
+        [
+            IndexModel(
+                [("guild_id", ASCENDING), ("month", ASCENDING), ("status", ASCENDING)],
+                name="by_guild_month_status",
+            ),
+            IndexModel(
+                [("guild_id", ASCENDING), ("month", ASCENDING), ("season", ASCENDING), ("table", ASCENDING)],
+                name="by_guild_month_season_table",
             ),
         ]
     )

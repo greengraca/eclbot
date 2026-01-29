@@ -2,6 +2,7 @@
 """TopDeck online game tagging for the timer cog.
 
 Matches voice channels to in-progress TopDeck pods and marks games as online.
+Also handles Bring a Friend Treasure Pod detection.
 """
 
 from __future__ import annotations
@@ -13,8 +14,11 @@ import discord
 
 from topdeck_fetch import get_in_progress_pods, InProgressPod
 from online_games_store import OnlineGameRecord, get_record, upsert_record
+from db import treasure_pod_schedule, treasure_pods as treasure_pods_col
 
 from utils.logger import log_sync, log_ok, log_warn, log_debug
+from utils.treasure_pods import TreasurePodManager
+from utils.dates import month_key
 
 from .helpers import norm_member_handles, month_start_utc
 
@@ -35,6 +39,7 @@ class TopDeckTagger:
         self.bracket_id = bracket_id
         self.firebase_token = firebase_token
         self._lock = asyncio.Lock()
+        self._treasure_manager = TreasurePodManager(treasure_pod_schedule, treasure_pods_col)
 
     async def match_vc_to_pod(
         self,
@@ -210,6 +215,73 @@ class TopDeckTagger:
             f"(already_online={already_online}). Players in match: {topdeck_uids}."
         )
 
+    async def check_treasure_pod(
+        self,
+        guild: discord.Guild,
+        match: InProgressPod,
+        channel: discord.TextChannel,
+    ) -> Optional[dict]:
+        """
+        Check if this match is a Bring a Friend Treasure Pod.
+        
+        Returns the treasure pod doc if it is, None otherwise.
+        Sends announcement to channel if triggered.
+        """
+        ms = month_start_utc()
+        mk = month_key(ms)
+        
+        table = int(getattr(match, "table", 0) or 0)
+        
+        # Get player discord IDs (entrant_ids from TopDeck)
+        player_discord_ids: list[int] = []
+        for x in (getattr(match, "entrant_ids", None) or []):
+            try:
+                player_discord_ids.append(int(x))
+            except Exception:
+                continue
+        
+        # Get player TopDeck UIDs
+        player_topdeck_uids: list[str] = []
+        for u in (getattr(match, "entrant_uids", None) or []):
+            if u is None:
+                continue
+            s = str(u).strip()
+            if s:
+                player_topdeck_uids.append(s)
+        
+        # Check for treasure pod
+        try:
+            treasure = await self._treasure_manager.check_if_treasure_pod(
+                guild_id=guild.id,
+                month=mk,
+                table=table,
+                player_discord_ids=player_discord_ids,
+                player_topdeck_uids=player_topdeck_uids,
+            )
+        except Exception as e:
+            log_warn(f"[timer/treasure] Error checking treasure pod: {type(e).__name__}: {e}")
+            return None
+        
+        if treasure:
+            # It's a treasure pod! Send announcement
+            try:
+                embed = discord.Embed(
+                    title="🎁 Bring a Friend Treasure Pod!",
+                    description=(
+                        "**Congratulations!** This game is a **Treasure Pod**!\n\n"
+                        "The **winner** of this game will receive **free ECL access** "
+                        "for an unregistered friend for the current or next league!\n\n"
+                        "Good luck to all players! 🍀"
+                    ),
+                    color=0xFFD700,  # Gold
+                )
+                embed.set_footer(text="ECL • Bring a Friend Treasure Pod")
+                await channel.send(embed=embed)
+            except Exception as e:
+                log_warn(f"[timer/treasure] Failed to send treasure pod announcement: {e}")
+        
+        return treasure
+
     async def tag_online_game_for_timer(
         self,
         ctx: discord.ApplicationContext,
@@ -248,3 +320,6 @@ class TopDeckTagger:
             return
 
         await self.mark_match_online(guild, match)
+        
+        # Check for Bring a Friend Treasure Pod
+        await self.check_treasure_pod(guild, match, ctx.channel)

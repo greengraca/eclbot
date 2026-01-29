@@ -7,6 +7,7 @@ Handles:
 - Monthly midnight role revocation
 - Flip reminder DMs (mods + free-role users)
 - Free-entry role DB persistence
+- Bring a Friend Treasure Pod schedule generation
 """
 
 from __future__ import annotations
@@ -18,12 +19,13 @@ from typing import TYPE_CHECKING, Optional
 
 import discord
 
-from topdeck_fetch import get_in_progress_pods
-from db import subs_jobs, subs_free_entries
+from topdeck_fetch import get_in_progress_pods, get_league_rows_cached
+from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col
 
 from utils.settings import LISBON_TZ, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
 from utils.dates import add_months, month_bounds, month_label
 from utils.logger import log_sync
+from utils.treasure_pods import TreasurePodManager
 
 from .embeds import build_flip_mods_embed
 
@@ -38,6 +40,7 @@ class MonthFlipHandler:
         self.cog = cog
         self._month_close_lock = asyncio.Lock()
         self._warned_revoke_delayed_for: set[str] = set()
+        self._treasure_manager = TreasurePodManager(treasure_pod_schedule, treasure_pods_col)
 
     @property
     def cfg(self):
@@ -91,11 +94,11 @@ class MonthFlipHandler:
 
     async def run_month_close_logic(self, guild: discord.Guild, *, cut_month: str) -> None:
         """
-        The 7pm close logic (may run later if games are still in progress).
+        The close logic (may run later if games are still in progress).
         """
         target_month = add_months(cut_month, 1)
 
-        # 1) Apply Top16 cut => free entry next month + Top16 role
+        # 1) Apply Top16 cut => Top16 role
         await self.apply_top16_cut_for_next_month(
             guild,
             cut_month=cut_month,
@@ -110,6 +113,9 @@ class MonthFlipHandler:
 
         # 4) Dump the CLOSED month (cut_month) to Mongo
         await self.cog._run_topdeck_month_dump_flip_job(guild, month_str=cut_month)
+
+        # 5) Generate Bring a Friend Treasure Pod schedule for NEXT month
+        await self.generate_treasure_pod_schedule(guild, target_month=target_month)
 
     async def maybe_run_month_close_job(self, guild: discord.Guild, *, cut_month: str) -> None:
         """
@@ -387,3 +393,45 @@ class MonthFlipHandler:
 
         await asyncio.gather(*[_send_one(uid, rnames) for uid, rnames in user_roles.items()])
         await self.log.info(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)} DMs, wrote {db_written} DB entries")
+
+    # -------------------- Treasure Pod Schedule --------------------
+
+    async def generate_treasure_pod_schedule(self, guild: discord.Guild, *, target_month: str) -> None:
+        """
+        Generate the Bring a Friend Treasure Pod schedule for a month.
+        
+        Called at month flip to set up treasure pods for the upcoming month.
+        Uses the current player count from TopDeck to estimate total games.
+        """
+        job_id = f"treasure-schedule:{guild.id}:{target_month}"
+        if await subs_jobs.find_one({"_id": job_id}):
+            return  # Already created
+        
+        # Get current player count from TopDeck
+        player_count = 100  # default fallback
+        if TOPDECK_BRACKET_ID:
+            try:
+                rows, _ = await get_league_rows_cached(
+                    TOPDECK_BRACKET_ID,
+                    FIREBASE_ID_TOKEN,
+                    force_refresh=True,
+                )
+                if rows:
+                    # Count non-dropped players
+                    player_count = len([r for r in rows if not r.dropped])
+            except Exception as e:
+                await self.log.warn(f"[treasure] Failed to get player count: {type(e).__name__}: {e}")
+        
+        if player_count < 50:
+            player_count = 100  # Minimum reasonable estimate
+        
+        try:
+            await self._treasure_manager.create_schedule(
+                guild_id=guild.id,
+                month=target_month,
+                player_count=player_count,
+            )
+            await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+            await self.log.ok(f"[treasure] Created treasure pod schedule for {target_month} (players={player_count})")
+        except Exception as e:
+            await self.log.error(f"[treasure] Failed to create schedule for {target_month}: {type(e).__name__}: {e}")
