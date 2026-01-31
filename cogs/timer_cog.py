@@ -54,10 +54,10 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 
 # Main round duration in minutes
-TIMER_MINUTES: float = _env_float("TIMER_MINUTES", 80.0)
+TIMER_MINUTES: float = _env_float("TIMER_MINUTES", 75.0)
 
 # Extra time for turns in minutes
-EXTRA_TURNS_MINUTES: float = _env_float("EXTRA_TURNS_MINUTES", 20.0)
+EXTRA_TURNS_MINUTES: float = _env_float("EXTRA_TURNS_MINUTES", 15.0)
 
 # offset: minutes BEFORE main time end when it should play
 OFFSET_MINUTES: float = _env_float("OFFSET_MINUTES", 10.0)

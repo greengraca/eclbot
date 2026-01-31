@@ -154,3 +154,62 @@ async def count_online_games_by_topdeck_uid_str(
 # ---- OPTIONAL: keep legacy names so nothing else explodes ----
 # If you truly want “rename everywhere”, you can delete these aliases after you update all call sites.
 count_online_games_by_discord_str = count_online_games_by_topdeck_uid_str
+
+
+async def has_recent_game_by_topdeck_uid(
+    bracket_id: str,
+    year: int,
+    month: int,
+    uids: List[str],
+    after_day: int = 20,
+    *,
+    online_only: bool = True,
+) -> Dict[str, bool]:
+    """
+    Check if each TopDeck UID has at least one game after the specified day of the month.
+    
+    Args:
+        bracket_id: TopDeck bracket ID
+        year: Year
+        month: Month
+        uids: List of TopDeck UIDs to check
+        after_day: Day of month (games on or after this day count as "recent")
+        online_only: Only count online games
+    
+    Returns:
+        Dict mapping each UID to True/False
+    """
+    if not uids:
+        return {}
+    
+    # Calculate the timestamp for the start of after_day
+    cutoff_dt = datetime(year, month, after_day, 0, 0, 0, tzinfo=timezone.utc)
+    cutoff_ts = cutoff_dt.timestamp()
+    
+    match: Dict[str, object] = {
+        "bracket_id": str(bracket_id),
+        "year": int(year),
+        "month": int(month),
+        "start_ts": {"$gte": cutoff_ts},
+    }
+    if online_only:
+        match["online"] = True
+    
+    # Find all games after the cutoff and collect which UIDs participated
+    pipeline = [
+        {"$match": match},
+        {"$unwind": "$topdeck_uids"},
+        {"$group": {"_id": "$topdeck_uids"}},
+    ]
+    
+    uids_with_recent: set = set()
+    async for row in online_games.aggregate(pipeline):
+        try:
+            k = str(row["_id"]).strip()
+            if k:
+                uids_with_recent.add(k)
+        except Exception:
+            continue
+    
+    # Build result dict for all requested UIDs
+    return {uid: (uid in uids_with_recent) for uid in uids}

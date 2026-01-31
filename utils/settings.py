@@ -67,6 +67,8 @@ class SubsConfig:
 
     top16_role_id: int
     top16_min_online_games: int
+    top16_min_online_games_no_recency: int  # >= this many games = no recency needed
+    top16_recency_after_day: int  # games after this day of month count as "recent"
     top16_min_total_games: int
     topcut_close_pts: int
 
@@ -116,6 +118,8 @@ def load_subs_config() -> SubsConfig:
 
         top16_role_id=env_int("TOP16_ROLE_ID", 0),
         top16_min_online_games=env_int("TOP16_MIN_ONLINE_GAMES", 10),
+        top16_min_online_games_no_recency=env_int("TOP16_MIN_ONLINE_GAMES_NO_RECENCY", 20),
+        top16_recency_after_day=env_int("TOP16_RECENCY_AFTER_DAY", 20),
         top16_min_total_games=env_int("TOP16_MIN_TOTAL_GAMES", 10),
         topcut_close_pts=env_int("TOPCUT_CLOSE_PTS", 250),
 

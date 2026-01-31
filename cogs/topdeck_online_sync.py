@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from utils.logger import log_sync, log_warn, log_debug
 from utils.mod_check import is_mod
@@ -48,6 +48,9 @@ ECLBOT_USER_ID   = int(os.getenv("ECLBOT_USER_ID", "0"))
 ONLINE_MATCH_MAX_TIME_DIFF_SECONDS = int(
     os.getenv("ONLINE_MATCH_MAX_TIME_DIFF_SECONDS", str(5 * 60 * 60))  # default 5h
 )
+
+# Auto-sync interval in hours (0 to disable)
+SYNCONLINE_AUTO_HOURS = float(os.getenv("SYNCONLINE_AUTO_HOURS", "6"))
 
 def _log(text: str, level: str = "info") -> None:
     """Console logger using standardized utils.logger functions."""
@@ -596,17 +599,146 @@ class TopdeckOnlineSyncCog(commands.Cog):
     - Marks each TopDeck match as online/offline using handles + timestamps
     - Writes results to MongoDB (collection: online_games).
 
-    No automatic hook is registered; this is manual-only.
+    Auto-sync runs every SYNCONLINE_AUTO_HOURS (default 6h, set 0 to disable).
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._lock = asyncio.Lock()
 
+    async def cog_load(self) -> None:
+        """Start the auto-sync loop if enabled."""
+        if SYNCONLINE_AUTO_HOURS > 0:
+            self.auto_sync_loop.change_interval(hours=SYNCONLINE_AUTO_HOURS)
+            self.auto_sync_loop.start()
+            _log(f"[online-sync] Auto-sync enabled: every {SYNCONLINE_AUTO_HOURS}h")
+        else:
+            _log("[online-sync] Auto-sync disabled (SYNCONLINE_AUTO_HOURS=0)")
+
+    async def cog_unload(self) -> None:
+        """Stop the auto-sync loop."""
+        if self.auto_sync_loop.is_running():
+            self.auto_sync_loop.cancel()
+
+    @tasks.loop(hours=6)  # Default, overridden in cog_load
+    async def auto_sync_loop(self):
+        """Periodic auto-sync of online games."""
+        if not GUILD_ID:
+            return
+        
+        guild = self.bot.get_guild(GUILD_ID)
+        if not guild:
+            _log("[online-sync] Auto-sync skipped: guild not found", level="warn")
+            return
+        
+        _log(f"[online-sync] Auto-sync starting...")
+        result = await self.run_sync(guild)
+        
+        if result.get("success"):
+            _log(
+                f"[online-sync] Auto-sync completed: "
+                f"spellbot={result.get('spellbot_games', 0)}, "
+                f"topdeck={result.get('topdeck_matches', 0)}, "
+                f"online={result.get('online_count', 0)}"
+            )
+        else:
+            _log(f"[online-sync] Auto-sync failed: {result.get('error', 'unknown')}", level="warn")
+
+    @auto_sync_loop.before_loop
+    async def before_auto_sync(self):
+        """Wait for bot to be ready before starting auto-sync."""
+        await self.bot.wait_until_ready()
+
     @staticmethod
     def _is_mod(member: discord.Member) -> bool:
         """Check if member is a mod. Delegates to utils.mod_check.is_mod."""
         return is_mod(member)
+
+    async def run_sync(self, guild: discord.Guild, month_str: Optional[str] = None) -> dict:
+        """
+        Run the online-games sync programmatically (no ctx required).
+        
+        Args:
+            guild: The Discord guild to scan SpellBot messages from
+            month_str: Month in YYYY-MM format (defaults to current month)
+        
+        Returns:
+            dict with keys: success, spellbot_games, topdeck_matches, online_count, players_with_online
+        """
+        if month_str is None:
+            month_str = _month_start_utc().strftime("%Y-%m")
+        
+        _log(f"[online-sync] {_now_iso()} run_sync started for month {month_str}.")
+        
+        async with self._lock:
+            try:
+                # 1) Scan SpellBot ready games in this guild
+                spellbot_games = await _scan_spellbot_ready_games(guild)
+
+                # 2) Fetch TopDeck matches for this month
+                topdeck_matches = await _fetch_topdeck_matches_for_month()
+
+                # 3) Mark which TopDeck matches are online (handles + time)
+                match_online, per_player_online = _match_spellbot_to_topdeck(
+                    spellbot_games,
+                    topdeck_matches,
+                )
+
+                # 4) Build entries for ALL TopDeck matches
+                entries: List[Dict[str, Any]] = []
+                online_count = 0
+                for mi in topdeck_matches:
+                    key = (mi.season, mi.table)
+                    online = bool(match_online.get(key, False))
+                    if online:
+                        online_count += 1
+
+                    entries.append(
+                        {
+                            "season": mi.season,
+                            "table": mi.table,
+                            "topdeck_match_key": f"S{mi.season}:T{mi.table}",
+                            "start_ts": mi.start_ts,
+                            "player_entrants": mi.entrant_ids,
+                            "player_uids": mi.uids,
+                            "online": online,
+                        }
+                    )
+
+                # 5) Save JSON (merged with existing/timer-written data)
+                payload = {
+                    "bracket_id": TOPDECK_BRACKET_ID,
+                    "guild_id": guild.id,
+                    "month": month_str,
+                    "built_at": int(datetime.now(timezone.utc).timestamp()),
+                    "spellbot_lfg_channel_id": SPELLBOT_LFG_CHANNEL_ID,
+                    "matches": entries,
+                    "per_player_online": per_player_online,
+                }
+                await _save_online_stats_to_db(payload)
+
+                _log(
+                    f"[online-sync] {_now_iso()} run_sync finished. "
+                    f"SpellBot ready games: {len(spellbot_games)}, "
+                    f"TopDeck matches: {len(topdeck_matches)}, "
+                    f"Online TopDeck games: {online_count}, "
+                    f"Players with ≥1 online game: {len(per_player_online)}."
+                )
+
+                return {
+                    "success": True,
+                    "spellbot_games": len(spellbot_games),
+                    "topdeck_matches": len(topdeck_matches),
+                    "online_count": online_count,
+                    "players_with_online": len(per_player_online),
+                }
+
+            except Exception as e:
+                _log(f"[online-sync] Error during run_sync: {type(e).__name__}: {e}")
+                return {
+                    "success": False,
+                    "error": f"{type(e).__name__}: {e}",
+                }
 
     @commands.slash_command(
         name="synconline",

@@ -98,6 +98,9 @@ class MonthFlipHandler:
         """
         target_month = add_months(cut_month, 1)
 
+        # 0) Sync online games FIRST (required for accurate Top16 eligibility)
+        await self._run_synconline(guild, month_str=cut_month)
+
         # 1) Apply Top16 cut => Top16 role
         await self.apply_top16_cut_for_next_month(
             guild,
@@ -393,6 +396,43 @@ class MonthFlipHandler:
 
         await asyncio.gather(*[_send_one(uid, rnames) for uid, rnames in user_roles.items()])
         await self.log.info(f"[subs] flip free-role info {mk}: sent {sent}/{len(user_roles)} DMs, wrote {db_written} DB entries")
+
+    # -------------------- Sync Online Games --------------------
+
+    async def _run_synconline(self, guild: discord.Guild, *, month_str: str) -> None:
+        """
+        Run online games sync before month close.
+        
+        This ensures accurate online game counts for Top16 eligibility.
+        """
+        job_id = f"synconline-monthclose:{guild.id}:{month_str}"
+        if await subs_jobs.find_one({"_id": job_id}):
+            await self.log.info(f"[subs] synconline already ran for {month_str}")
+            return
+        
+        try:
+            # Get the TopdeckOnlineSyncCog
+            sync_cog = self.bot.get_cog("TopdeckOnlineSyncCog")
+            if not sync_cog:
+                await self.log.warn("[subs] TopdeckOnlineSyncCog not found, skipping synconline")
+                return
+            
+            await self.log.info(f"[subs] Running synconline for {month_str} before month close...")
+            result = await sync_cog.run_sync(guild, month_str=month_str)
+            
+            if result.get("success"):
+                await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+                await self.log.ok(
+                    f"[subs] synconline completed for {month_str}: "
+                    f"spellbot={result.get('spellbot_games', 0)}, "
+                    f"topdeck={result.get('topdeck_matches', 0)}, "
+                    f"online={result.get('online_count', 0)}, "
+                    f"players={result.get('players_with_online', 0)}"
+                )
+            else:
+                await self.log.error(f"[subs] synconline failed for {month_str}: {result.get('error', 'unknown')}")
+        except Exception as e:
+            await self.log.error(f"[subs] synconline error for {month_str}: {type(e).__name__}: {e}")
 
     # -------------------- Treasure Pod Schedule --------------------
 
