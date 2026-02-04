@@ -90,13 +90,17 @@ def norm_name(s: str) -> str:
 
 
 def member_handle_candidates(member: discord.Member) -> List[str]:
-    """Return normalized handle candidates for TopDeck matching (stable order)."""
+    """Return normalized handle candidates for TopDeck matching (stable order).
+    
+    Priority: username (@handle) first, then global_name, then display_name.
+    Username is what players typically enter in TopDeck.
+    """
     cands: List[str] = []
 
     ordered = [
-        getattr(member, "display_name", None),
-        getattr(member, "global_name", None),
-        getattr(member, "name", None),
+        getattr(member, "name", None),          # Username (@handle) - stable, unique
+        getattr(member, "global_name", None),   # Global display name
+        getattr(member, "display_name", None),  # Server nickname (last resort)
     ]
 
     # add name#discriminator when it exists (older accounts / bots)
@@ -116,9 +120,9 @@ def member_handle_candidates(member: discord.Member) -> List[str]:
 
 def _member_name_candidates(member: discord.Member) -> List[str]:
     ordered = [
-        getattr(member, "display_name", None),
+        getattr(member, "name", None),          # Username first
         getattr(member, "global_name", None),
-        getattr(member, "name", None),
+        getattr(member, "display_name", None),
     ]
     out: List[str] = []
     for raw in ordered:

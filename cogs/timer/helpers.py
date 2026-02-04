@@ -51,10 +51,14 @@ def norm_handle(s: str) -> str:
 
 
 def norm_member_handles(m: discord.Member) -> set[str]:
-    """Get all normalized handles for a Discord member."""
+    """Get all normalized handles for a Discord member.
+    
+    Returns a set of all possible handles (username, display_name, global_name).
+    Username (m.name) is the primary match target.
+    """
     out: set[str] = set()
 
-    for cand in (m.name, getattr(m, "display_name", None), getattr(m, "global_name", None)):
+    for cand in (m.name, getattr(m, "global_name", None), getattr(m, "display_name", None)):
         if isinstance(cand, str):
             h = norm_handle(cand)
             if h:
