@@ -764,11 +764,26 @@ class DebugCog(commands.Cog):
         if not stats.get("scheduled"):
             emb.description = "No treasure pod schedule found for this month."
         else:
-            emb.description = (
-                f"**Estimated total tables:** {stats['estimated_total']}\n\n"
-                f"**Treasures fired:** {stats['treasures_fired']}\n"
-                f"**Treasures remaining:** {stats['treasures_remaining']}"
-            )
+            desc_lines = [
+                f"**Estimated total tables:** {stats['estimated_total']}",
+                "",
+                f"**Treasures fired:** {stats['treasures_fired']}",
+                f"**Treasures remaining:** {stats['treasures_remaining']}",
+            ]
+
+            # Per-type breakdown
+            type_stats = stats.get("type_stats", {})
+            if len(type_stats) > 1 or (type_stats and next(iter(type_stats)) != "bring_a_friend"):
+                desc_lines.append("")
+                desc_lines.append("**Per-type breakdown:**")
+                for type_id, ts in type_stats.items():
+                    label = ts.get("title", type_id.replace("_", " ").title())
+                    desc_lines.append(
+                        f"  • {label}: {ts['fired']}/{ts['total']} fired, "
+                        f"{ts['remaining']} remaining"
+                    )
+
+            emb.description = "\n".join(desc_lines)
 
         if won_pods:
             lines = []
@@ -776,16 +791,17 @@ class DebugCog(commands.Cog):
                 # Try to get winner display name from stored data
                 winner_handle = pod.get("winner_discord_handle")
                 winner_uid = pod.get("winner_topdeck_uid")
-                
+
                 if winner_handle:
                     winner_name = winner_handle
                 elif winner_uid:
                     winner_name = winner_uid
                 else:
                     winner_name = "Unknown"
-                
-                lines.append(f"• Table #{pod['table']} → **{winner_name}**")
-            
+
+                pod_title = pod.get("pod_title", "Treasure Pod")
+                lines.append(f"• Table #{pod['table']} ({pod_title}) → **{winner_name}**")
+
             emb.add_field(
                 name=f"🏆 Winners ({len(won_pods)})",
                 value="\n".join(lines) or "(none)",

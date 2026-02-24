@@ -220,18 +220,19 @@ class TopDeckTagger:
         guild: discord.Guild,
         match: InProgressPod,
         channel: discord.TextChannel,
+        vc_members: Optional[List[discord.Member]] = None,
     ) -> Optional[dict]:
         """
-        Check if this match is a Bring a Friend Treasure Pod.
-        
+        Check if this match is a Treasure Pod.
+
         Returns the treasure pod doc if it is, None otherwise.
         Sends announcement to channel if triggered.
         """
         ms = month_start_utc()
         mk = month_key(ms)
-        
+
         table = int(getattr(match, "table", 0) or 0)
-        
+
         # Get player discord IDs (entrant_ids from TopDeck)
         player_discord_ids: list[int] = []
         for x in (getattr(match, "entrant_ids", None) or []):
@@ -239,7 +240,7 @@ class TopDeckTagger:
                 player_discord_ids.append(int(x))
             except Exception:
                 continue
-        
+
         # Get player TopDeck UIDs
         player_topdeck_uids: list[str] = []
         for u in (getattr(match, "entrant_uids", None) or []):
@@ -248,7 +249,7 @@ class TopDeckTagger:
             s = str(u).strip()
             if s:
                 player_topdeck_uids.append(s)
-        
+
         # Check for treasure pod
         try:
             treasure = await self._treasure_manager.check_if_treasure_pod(
@@ -261,25 +262,42 @@ class TopDeckTagger:
         except Exception as e:
             log_warn(f"[timer/treasure] Error checking treasure pod: {type(e).__name__}: {e}")
             return None
-        
+
         if treasure:
-            # It's a treasure pod! Send announcement
+            # Build player mentions from VC members that matched the pod (exclude spectators)
+            mentions = ""
+            if vc_members:
+                pod_handles = {h for h in (getattr(match, "entrant_discords_norm", []) or []) if h}
+                matched_members = []
+                for m in vc_members:
+                    if m.bot:
+                        continue
+                    member_handles = norm_member_handles(m)
+                    if member_handles & pod_handles:
+                        matched_members.append(m)
+                mentions = " ".join(f"<@{m.id}>" for m in matched_members)
+
+            # Use dynamic title/description/image from treasure doc
+            pod_title = treasure.get("pod_title", "Treasure Pod!")
+            pod_description = treasure.get("pod_description", "")
+            pod_image_url = treasure.get("pod_image_url", "")
+
             try:
                 embed = discord.Embed(
-                    title="🎁 Bring a Friend Treasure Pod!",
-                    description=(
-                        "**Congratulations!** This game is a **Treasure Pod**!\n\n"
-                        "The **winner** of this game will receive **free ECL access** "
-                        "for an unregistered friend for the current or next league!\n\n"
-                        "Good luck to all players! 🍀"
-                    ),
+                    title=f"🎁 {pod_title}",
+                    description=pod_description,
                     color=0xFFD700,  # Gold
                 )
-                embed.set_footer(text="ECL • Bring a Friend Treasure Pod")
-                await channel.send(embed=embed)
+                if pod_image_url:
+                    embed.set_thumbnail(url=pod_image_url)
+                pod_type_label = treasure.get("pod_type", "treasure")
+                embed.set_footer(text=f"ECL • {pod_type_label.replace('_', ' ').title()} Treasure Pod")
+
+                content = mentions if mentions else None
+                await channel.send(content=content, embed=embed)
             except Exception as e:
                 log_warn(f"[timer/treasure] Failed to send treasure pod announcement: {e}")
-        
+
         return treasure
 
     async def tag_online_game_for_timer(
@@ -321,5 +339,5 @@ class TopDeckTagger:
 
         await self.mark_match_online(guild, match)
         
-        # Check for Bring a Friend Treasure Pod
-        await self.check_treasure_pod(guild, match, ctx.channel)
+        # Check for Treasure Pod
+        await self.check_treasure_pod(guild, match, ctx.channel, vc_members=non_bot_members)
