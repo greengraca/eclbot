@@ -82,6 +82,24 @@ class InProgressPod:
 
 # --------- HTTP + Firestore helpers ---------
 
+_shared_session: Optional[aiohttp.ClientSession] = None
+
+
+def _get_shared_session() -> aiohttp.ClientSession:
+    """Return (and lazily create) a module-level aiohttp session."""
+    global _shared_session
+    if _shared_session is None or _shared_session.closed:
+        _shared_session = aiohttp.ClientSession()
+    return _shared_session
+
+
+async def close_shared_session() -> None:
+    """Close the shared session (call on bot shutdown)."""
+    global _shared_session
+    if _shared_session and not _shared_session.closed:
+        await _shared_session.close()
+        _shared_session = None
+
 
 async def _fetch_json(
     session: aiohttp.ClientSession,
@@ -396,9 +414,9 @@ async def fetch_topdeck_raw(
     players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
     doc_url = _get_firestore_doc_url(bracket_id)
 
-    async with aiohttp.ClientSession() as session:
-        players = await _fetch_json(session, players_url, token=None)
-        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+    session = _get_shared_session()
+    players = await _fetch_json(session, players_url, token=None)
+    doc = await _fetch_json(session, doc_url, token=firebase_id_token)
 
     return players, doc
 
@@ -421,9 +439,9 @@ async def get_league_rows(
     players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
     doc_url = _get_firestore_doc_url(bracket_id)
 
-    async with aiohttp.ClientSession() as session:
-        players = await _fetch_json(session, players_url, token=None)
-        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+    session = _get_shared_session()
+    players = await _fetch_json(session, players_url, token=None)
+    doc = await _fetch_json(session, doc_url, token=firebase_id_token)
 
     fields = _parse_tournament_fields(doc)
     drop_state = _extract_drop_state(fields)
@@ -508,9 +526,9 @@ async def get_in_progress_pods(
     players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
     doc_url = _get_firestore_doc_url(bracket_id)
 
-    async with aiohttp.ClientSession() as session:
-        players = await _fetch_json(session, players_url, token=None)
-        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+    session = _get_shared_session()
+    players = await _fetch_json(session, players_url, token=None)
+    doc = await _fetch_json(session, doc_url, token=firebase_id_token)
 
     fields = _parse_tournament_fields(doc)
     entrant_to_uid = _extract_entrant_to_uid(fields)
@@ -569,6 +587,7 @@ async def get_in_progress_pods(
 
 # --------- Shared cached wrapper ---------
 
+_TOPDECK_CACHE_LOCK = asyncio.Lock()
 
 # --------- Derived caches (computed from cached rows) ---------
 
@@ -614,9 +633,9 @@ async def _fetch_league_data_full(
     players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
     doc_url = _get_firestore_doc_url(bracket_id)
 
-    async with aiohttp.ClientSession() as session:
-        players = await _fetch_json(session, players_url, token=None)
-        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+    session = _get_shared_session()
+    players = await _fetch_json(session, players_url, token=None)
+    doc = await _fetch_json(session, doc_url, token=firebase_id_token)
 
     fields = _parse_tournament_fields(doc)
     drop_state = _extract_drop_state(fields)
@@ -701,44 +720,47 @@ async def get_league_rows_cached(
     if not bracket_id:
         raise RuntimeError("bracket_id is required")
 
-    now = datetime.now(timezone.utc)
     key = (bracket_id, firebase_id_token or "")
 
-    if not force_refresh and key in _TOPDECK_CACHE:
-        rows, cached_at = _TOPDECK_CACHE[key]
-        if now - cached_at < _TOPDECK_CACHE_TTL:
-            return rows, cached_at
+    async with _TOPDECK_CACHE_LOCK:
+        now = datetime.now(timezone.utc)
 
-    # ✅ Cache miss: DO NOT block the event loop awaiting a hook
-    if _TOPDECK_CACHE_MISS_HOOK is not None:
-        try:
-            asyncio.create_task(_TOPDECK_CACHE_MISS_HOOK())
-        except Exception as e:
-            print(
-                "[topdeck] Warning: cache-miss hook scheduling failed "
-                f"{type(e).__name__}: {e}"
-            )
+        if not force_refresh and key in _TOPDECK_CACHE:
+            rows, cached_at = _TOPDECK_CACHE[key]
+            if now - cached_at < _TOPDECK_CACHE_TTL:
+                return rows, cached_at
 
-    print(
-        f"[topdeck] Fetching fresh TopDeck data from API for bracket "
-        f"{bracket_id!r} (cache miss or expired)."
-    )
+        # Cache miss: fire hook outside the lock isn't needed — the
+        # lock only serialises cache access, the actual fetch is below.
+        if _TOPDECK_CACHE_MISS_HOOK is not None:
+            try:
+                asyncio.create_task(_TOPDECK_CACHE_MISS_HOOK())
+            except Exception as e:
+                print(
+                    "[topdeck] Warning: cache-miss hook scheduling failed "
+                    f"{type(e).__name__}: {e}"
+                )
 
-    # Fetch full data including matches
-    rows, matches, entrant_to_uid, player_map = await _fetch_league_data_full(
-        bracket_id, firebase_id_token
-    )
-    
-    # Cache rows (main cache)
-    _TOPDECK_CACHE[key] = (rows, now)
-    
-    # Cache matches data for treasure pod checking
-    _TOPDECK_MATCHES_CACHE[key] = (matches, entrant_to_uid, player_map, now)
-    
-    # Invalidate derived caches for this key
-    _TOPDECK_HANDLE_BEST_CACHE.pop(key, None)
-    
-    return rows, now
+        print(
+            f"[topdeck] Fetching fresh TopDeck data from API for bracket "
+            f"{bracket_id!r} (cache miss or expired)."
+        )
+
+        # Fetch full data including matches
+        rows, matches, entrant_to_uid, player_map = await _fetch_league_data_full(
+            bracket_id, firebase_id_token
+        )
+
+        # Cache rows (main cache)
+        _TOPDECK_CACHE[key] = (rows, now)
+
+        # Cache matches data for treasure pod checking
+        _TOPDECK_MATCHES_CACHE[key] = (matches, entrant_to_uid, player_map, now)
+
+        # Invalidate derived caches for this key
+        _TOPDECK_HANDLE_BEST_CACHE.pop(key, None)
+
+        return rows, now
 
 
 def get_cached_matches(
@@ -747,21 +769,25 @@ def get_cached_matches(
 ) -> Optional[Tuple[List[Match], Dict[int, Optional[str]], Dict[str, Dict]]]:
     """
     Get cached matches data without making an API call.
-    
+
     Returns (matches, entrant_to_uid, player_map) if cache is fresh, None otherwise.
     Use this for treasure pod result checking in _tick.
+
+    NOTE: This is a sync function reading cache dicts that are only
+    mutated under _TOPDECK_CACHE_LOCK (always on the same event-loop
+    thread), so no lock is needed for the read itself.
     """
     key = (bracket_id, firebase_id_token or "")
-    
+
     if key not in _TOPDECK_MATCHES_CACHE:
         return None
-    
+
     matches, entrant_to_uid, player_map, cached_at = _TOPDECK_MATCHES_CACHE[key]
-    
+
     now = datetime.now(timezone.utc)
     if now - cached_at >= _TOPDECK_CACHE_TTL:
         return None  # Cache expired
-    
+
     return matches, entrant_to_uid, player_map
 
 

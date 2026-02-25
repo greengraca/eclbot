@@ -211,6 +211,10 @@ async def ensure_indexes() -> None:
                 [("expires_at", ASCENDING)],
                 name="by_expires_at",
             ),
+            IndexModel(
+                [("status", ASCENDING), ("expires_at", ASCENDING)],
+                name="by_status_expires",
+            ),
         ]
     )
 
@@ -233,6 +237,10 @@ async def ensure_indexes() -> None:
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="by_expires_at",
+            ),
+            IndexModel(
+                [("guild_id", ASCENDING), ("link", ASCENDING), ("expires_at", ASCENDING)],
+                name="by_guild_link_expires",
             ),
         ]
     )
