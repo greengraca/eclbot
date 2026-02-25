@@ -12,6 +12,7 @@ What it does:
 
 import asyncio
 import contextlib
+import os
 import traceback
 import re
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from .topdeck_month_dump import dump_topdeck_month_to_mongo
 from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
 from utils.treasure_pods import TreasurePodManager
 
+from cogs.lfg_cog import LFG_ELO_MIN_DAY
 from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id
 
 from utils.settings import (
@@ -64,6 +66,7 @@ from .subscriptions import (
 
 
 GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
+TOURNAMENT_UPDATES_CHANNEL_ID = int(os.getenv("TOURNAMENT_UPDATES_CHANNEL_ID", "1439720684170248293"))
 
 
 
@@ -1164,6 +1167,23 @@ class SubscriptionsCog(commands.Cog):
                 elif now.date() == d1_before_close:
                     await self._run_topcut_prize_reminder_job(guild, mk=mk_current, kind="1d")
                     await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="last")
+
+            # --- /lfgelo unlock announcement ---
+            if LFG_ELO_MIN_DAY and now.day >= LFG_ELO_MIN_DAY:
+                elo_job_id = f"lfgelo-unlock-announce:{guild.id}:{now_mk}"
+                if not await subs_jobs.find_one({"_id": elo_job_id}):
+                    elo_ch = guild.get_channel(TOURNAMENT_UPDATES_CHANNEL_ID)
+                    if elo_ch and isinstance(elo_ch, discord.TextChannel):
+                        embed = discord.Embed(
+                            title="⚔️ /lfgelo is now available!",
+                            description=(
+                                "Elo-matched lobbies are unlocked for the rest of the month.\n"
+                                "Use `/lfgelo` to queue into a skill-based pod!"
+                            ),
+                            color=0x5865F2,
+                        )
+                        await elo_ch.send(embed=embed)
+                    await subs_jobs.insert_one({"_id": elo_job_id, "ran_at": datetime.now(timezone.utc)})
 
             # --- Treasure pod checks (using cached TopDeck data) ---
             if TOPDECK_BRACKET_ID:
