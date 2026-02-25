@@ -1177,8 +1177,8 @@ class SubscriptionsCog(commands.Cog):
                         embed = discord.Embed(
                             title="⚔️ /lfgelo is now available!",
                             description=(
-                                "Elo-matched lobbies are unlocked for the rest of the month.\n"
-                                "Use `/lfgelo` to queue into a skill-based pod!"
+                                f"Elo-matched lobbies are unlocked for the rest of **{month_label(now_mk)}**.\n"
+                                "Use `/lfgelo` to queue into an elo-limited pod!"
                             ),
                             color=0x5865F2,
                         )
