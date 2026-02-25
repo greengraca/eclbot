@@ -214,6 +214,13 @@ class LFGCog(commands.Cog):
                     gid = doc.get('guild_id')
                     lid = doc.get('lobby_id')
                     log_error(f"[lfg] Failed to rehydrate lobby {gid}:{lid}: {type(e).__name__}: {e}")
+                    # Delete corrupted lobby so it doesn't block LFG on every restart
+                    if gid and lid:
+                        try:
+                            await db_delete_lobby(int(gid), int(lid))
+                            log_sync(f"[lfg] Deleted corrupted lobby {gid}:{lid} from DB", level="warn")
+                        except Exception as del_err:
+                            log_error(f"[lfg] Failed to delete corrupted lobby {gid}:{lid}: {type(del_err).__name__}: {del_err}")
 
             log_ok(f"[lfg] Successfully rehydrated {rehydrated_count}/{len(docs)} lobbies")
 
@@ -375,8 +382,6 @@ class LFGCog(commands.Cog):
             lobby.update_task.cancel()
         # Schedule DB deletion (fire-and-forget)
         asyncio.create_task(self._delete_lobby_from_db(guild_id, lobby_id))
-        if lobby and lobby.update_task:
-            lobby.update_task.cancel()
 
     def _is_lobby_active(self, lobby: LFGLobby) -> bool:
         return self.state.is_lobby_active(lobby) and not lobby.has_link() and not getattr(lobby, "link_creating", False)
@@ -386,8 +391,11 @@ class LFGCog(commands.Cog):
             return
         if not self._is_lobby_active(lobby):
             return
-        if lobby.update_task is None or lobby.update_task.done():
-            lobby.update_task = asyncio.create_task(self._run_elo_embed_updater(lobby))
+        if lobby.update_task is not None and not lobby.update_task.done():
+            return
+        if lobby.update_task is not None and lobby.update_task.done():
+            lobby.update_task = None
+        lobby.update_task = asyncio.create_task(self._run_elo_embed_updater(lobby))
 
     async def _compute_dynamic_window(self, host_elo: float) -> Tuple[int, int]:
         return await compute_dynamic_window(
