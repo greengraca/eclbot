@@ -24,7 +24,7 @@ from pymongo.errors import DuplicateKeyError
 
 from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str, has_recent_game_by_topdeck_uid
-from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col
+from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
 from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
 from utils.treasure_pods import TreasurePodManager
@@ -33,6 +33,7 @@ from cogs.lfg_cog import LFG_ELO_MIN_DAY
 from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id
 
 from utils.settings import (
+    GUILD_ID,
     SUBS,
     LISBON_TZ,
     TOPDECK_BRACKET_ID,
@@ -49,6 +50,7 @@ from utils.dates import (
     month_label,
     month_end_inclusive,
     parse_month_from_text,
+    now_lisbon,
 )
 
 # Import from subscriptions submodule
@@ -63,9 +65,9 @@ from .subscriptions import (
     build_topcut_prize_reminder_embed,
     MonthFlipHandler,
 )
+from .subscriptions.embeds import _get_color, _apply_thumbnail
 
 
-GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 TOURNAMENT_UPDATES_CHANNEL_ID = int(os.getenv("TOURNAMENT_UPDATES_CHANNEL_ID", "1439720684170248293"))
 
 
@@ -105,7 +107,7 @@ class SubscriptionsCog(commands.Cog):
         start = getattr(self.cfg, "enforcement_start", None)
         if not isinstance(start, datetime):
             return False
-        now = at or datetime.now(LISBON_TZ)
+        now = at or now_lisbon()
         if now.tzinfo is None:
             now = now.replace(tzinfo=LISBON_TZ)
         now = now.astimezone(LISBON_TZ)
@@ -288,7 +290,7 @@ class SubscriptionsCog(commands.Cog):
             })
 
         # ---- (3) projected Top16 for NEXT month (no IDs yet) ----
-        now_mk = month_key(datetime.now(LISBON_TZ))
+        now_mk = month_key(now_lisbon())
         next_mk = add_months(now_mk, 1)
         projected_top16 = 16 if mk == next_mk else 0
 
@@ -520,9 +522,8 @@ class SubscriptionsCog(commands.Cog):
     
     async def _run_topdeck_month_dump_flip_job(self, guild: discord.Guild, *, month_str: str) -> None:
         job_id = f"topdeckdumpmonth:auto:{guild.id}:{month_str}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         async with self._topdeck_dump_lock:
             try:
@@ -558,9 +559,8 @@ class SubscriptionsCog(commands.Cog):
         Also logs/prints who would receive it.
         """
         job_id = f"top16-online-remind:{guild.id}:{mk}:{kind}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         cfg = self.cfg
 
@@ -861,15 +861,15 @@ class SubscriptionsCog(commands.Cog):
         added_lbl = ", ".join(_label_role(r) for r in added) if added else "-"
         removed_lbl = ", ".join(_label_role(r) for r in removed) if removed else "-"
 
-        now_lisbon = datetime.now(LISBON_TZ)
-        mk = month_key(now_lisbon)
+        now_dt = now_lisbon()
+        mk = month_key(now_dt)
 
         # ---- eligibility snapshot (so logs are unambiguous) ----
         has_patreon = self._has_any_role_id(after, cfg.patreon_role_ids)
         has_kofi_role = self._has_any_role_id(after, cfg.kofi_role_ids)
         has_free_role = self._has_any_role_id(after, cfg.free_entry_role_ids)
         has_free_list = await self._has_free_entry(after.id, mk)
-        has_db_access = await self._has_db_access(after.id, mk, at=now_lisbon)
+        has_db_access = await self._has_db_access(after.id, mk, at=now_dt)
 
         ok = any([has_patreon, has_kofi_role, has_free_role, has_free_list, has_db_access])
 
@@ -897,7 +897,7 @@ class SubscriptionsCog(commands.Cog):
             return
 
         # Not eligible after the change: only revoke if enforcement is active
-        if self._enforcement_active(now_lisbon):
+        if self._enforcement_active(now_dt):
             await self._log(
                 "[subs] revoking ECL (eligibility false) "
                 f"user_id={after.id} mk={mk} "
@@ -968,8 +968,8 @@ class SubscriptionsCog(commands.Cog):
         member: discord.Member,
         month: Optional[str] = None,
     ):
-        mk = month or month_key(datetime.now(LISBON_TZ))
-        ok, why = await self._eligibility(member, mk, at=datetime.now(LISBON_TZ))
+        mk = month or month_key(now_lisbon())
+        ok, why = await self._eligibility(member, mk, at=now_lisbon())
         await ctx.respond(
             f"**{member.display_name}** for **{mk}**: {'✅ eligible' if ok else '❌ not eligible'}\n{why}",
             ephemeral=True,
@@ -988,7 +988,7 @@ class SubscriptionsCog(commands.Cog):
         await ctx.defer(ephemeral=True)
 
         cfg = self.cfg
-        now = datetime.now(LISBON_TZ)
+        now = now_lisbon()
 
         # "first option" choices:
         kind_sub = "3d"     # subscription reminder
@@ -1045,15 +1045,14 @@ class SubscriptionsCog(commands.Cog):
                 "Looks like your subscription/eligibility role is no longer active, so your **ECL** access was removed.\n\n"
                 "The league is still running — you can rejoin anytime by subscribing again."
             ),
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
+            color=_get_color(cfg.embed_color),
         )
         emb_removed.add_field(
             name="Need help?",
             value="If you believe this is a mistake, please open a ticket and an admin will help you.",
             inline=False,
         )
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb_removed.set_thumbnail(url=cfg.embed_thumbnail_url)
+        _apply_thumbnail(emb_removed, cfg.embed_thumbnail_url)
         embeds_to_send.append(("4/5 • Access removed notice", emb_removed, view))
 
         # 5) Free-entry role notice preview (placeholder)
@@ -1065,11 +1064,10 @@ class SubscriptionsCog(commands.Cog):
                 f"You have **free entry** for **{nice_month}** because you have: **{roles_txt}**.\n\n"
                 "If you lose that role, your free entry goes away."
             ),
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
+            color=_get_color(cfg.embed_color),
         )
         emb_free.set_footer(text="ECL • Free entry notice")
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb_free.set_thumbnail(url=cfg.embed_thumbnail_url)
+        _apply_thumbnail(emb_free, cfg.embed_thumbnail_url)
         embeds_to_send.append(("5/5 • Free-entry role notice", emb_free, None))
         
         emb_flip = self._build_flip_mods_embed(ctx.guild, current_mk)
@@ -1121,7 +1119,7 @@ class SubscriptionsCog(commands.Cog):
             if not guild:
                 return
 
-            now = datetime.now(LISBON_TZ)
+            now = now_lisbon()
             now_mk = month_key(now)
 
             # Calculate close time and reminder days relative to close_at
@@ -1253,8 +1251,8 @@ class SubscriptionsCog(commands.Cog):
         if not guild:
             return
 
-        now_lisbon = datetime.now(LISBON_TZ)
-        if not self._enforcement_active(now_lisbon):
+        now_dt = now_lisbon()
+        if not self._enforcement_active(now_dt):
             return
 
         async with self._access_audit_lock:
@@ -1274,11 +1272,11 @@ class SubscriptionsCog(commands.Cog):
         if not role:
             return
 
-        now_lisbon = datetime.now(LISBON_TZ)
-        if not self._enforcement_active(now_lisbon):
+        now_dt = now_lisbon()
+        if not self._enforcement_active(now_dt):
             return
 
-        mk = month_key(now_lisbon)
+        mk = month_key(now_dt)
 
         members = list(role.members)
         if len(members) < 50:
@@ -1295,7 +1293,7 @@ class SubscriptionsCog(commands.Cog):
             if m.bot:
                 continue
             checked += 1
-            ok, _ = await self._eligibility(m, mk, at=datetime.now(LISBON_TZ))
+            ok, _ = await self._eligibility(m, mk, at=now_lisbon())
             if ok:
                 continue
             did = await self._revoke_ecl_member(m, reason=f"Audit: not eligible for {mk}", dm=True)
@@ -1779,9 +1777,8 @@ class SubscriptionsCog(commands.Cog):
 
     async def _run_topcut_prize_reminder_job(self, guild: discord.Guild, *, mk: str, kind: str) -> None:
         job_id = f"topcut-prize-remind:{guild.id}:{mk}:{kind}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         cfg = self.cfg
         targets, misses, cutoff_pts = await self._topcut_prize_reminder_targets(guild, mk=mk)
@@ -1922,11 +1919,11 @@ class SubscriptionsCog(commands.Cog):
         if not self._dm_opted_in(member):
             return
 
-        now_lisbon = datetime.now(LISBON_TZ)
-        if not self._enforcement_active(now_lisbon):
+        now_dt = now_lisbon()
+        if not self._enforcement_active(now_dt):
             return
 
-        mk = month_key(now_lisbon)
+        mk = month_key(now_dt)
         job_id = f"ecl-revoked-dm:{cfg.guild_id}:{int(member.id)}:{mk}"
         with contextlib.suppress(Exception):
             if await subs_jobs.find_one({"_id": job_id}):
@@ -1939,7 +1936,7 @@ class SubscriptionsCog(commands.Cog):
                 "Looks like your subscription/eligibility role is no longer active, so your **ECL** access was removed.\n\n"
                 "The league is still running — you can rejoin anytime by subscribing again."
             ),
-            color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
+            color=_get_color(cfg.embed_color),
         )
 
         emb.add_field(
@@ -1948,8 +1945,7 @@ class SubscriptionsCog(commands.Cog):
             inline=False,
         )
 
-        if cfg.embed_thumbnail_url and cfg.embed_thumbnail_url.startswith(("http://", "https://")):
-            emb.set_thumbnail(url=cfg.embed_thumbnail_url)
+        _apply_thumbnail(emb, cfg.embed_thumbnail_url)
 
         view = self._build_links_view()
         with contextlib.suppress(Exception):
@@ -1982,9 +1978,8 @@ class SubscriptionsCog(commands.Cog):
 
     async def _run_reminder_job(self, guild: discord.Guild, target_month: str, kind: str):
         job_id = f"remind:{guild.id}:{target_month}:{kind}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         cfg = self.cfg
         role = guild.get_role(cfg.ecl_role_id) if cfg.ecl_role_id else None

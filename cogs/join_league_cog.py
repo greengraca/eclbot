@@ -23,35 +23,17 @@ from typing import Optional, Set, Tuple
 import discord
 from discord.ext import commands
 
-from db import subs_access, subs_free_entries, subs_jobs
+from db import subs_access, subs_free_entries, subs_jobs, job_once
 from utils.dates import (
     LISBON_TZ,
     month_key,
     add_months,
     month_bounds,
     month_label,
+    now_lisbon,
 )
 from utils.logger import log_sync
-
-
-# -------------------- tiny env helpers --------------------
-
-def _env_int(name: str, default: int = 0) -> int:
-    raw = (os.getenv(name) or "").strip()
-    try:
-        return int(raw)
-    except Exception:
-        return default
-
-
-def _parse_int_set(csv: str) -> Set[int]:
-    out: Set[int] = set()
-    for part in re.split(r"[\s,]+", (csv or "").strip()):
-        if not part:
-            continue
-        if part.isdigit():
-            out.add(int(part))
-    return out
+from utils.settings import env_int as _env_int, parse_int_set as _parse_int_set
 
 
 # -------------------- config --------------------
@@ -94,7 +76,7 @@ def load_config() -> JoinLeagueConfig:
     if raw_mk and re.match(r"^20\d{2}-(0[1-9]|1[0-2])$", raw_mk):
         target_month = raw_mk
     else:
-        now = datetime.now(LISBON_TZ)
+        now = now_lisbon()
         target_month = month_key(now)
 
 
@@ -276,8 +258,7 @@ class JoinLeagueCog(commands.Cog):
         job_id = f"join-welcome-dm:{guild.id}:{int(member.id)}:{cfg.target_month}"
         sent_dm = False
         try:
-            if not await subs_jobs.find_one({"_id": job_id}):
-                await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+            if await job_once(job_id):
                 rules = self._rules_mention(guild)
                 get_started = self._get_started_mention(guild)
                 await member.send(

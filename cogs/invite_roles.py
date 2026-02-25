@@ -7,12 +7,12 @@ import discord
 from discord.ext import commands
 
 from utils.logger import log_sync, log_ok, log_warn
+from utils.settings import GUILD_ID
 
 # ---- Role / Guild config from environment -----------------------------------
 
 PT_ROLE_ID = int(os.getenv("PT_ROLE", "0"))
 ECL_ROLE_ID = int(os.getenv("ECL_ROLE", "0"))
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 # ---- Reaction-role config (leave 0/empty to disable) ------------------------
 

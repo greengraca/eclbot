@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from colorama import just_fix_windows_console
 
 from utils.logger import log_sync, log_ok, log_warn, log_error
+from utils.settings import GUILD_ID
 
 
 just_fix_windows_console()
@@ -20,7 +21,6 @@ except Exception as e:
 
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 intents = discord.Intents.default()
 intents.members = True

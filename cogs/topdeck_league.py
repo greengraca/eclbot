@@ -10,9 +10,9 @@ from topdeck_fetch import get_league_rows_cached, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
+from utils.settings import GUILD_ID
 
 
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 

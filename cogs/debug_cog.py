@@ -17,7 +17,7 @@ from discord import Option
 
 from db import subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col
 from utils.logger import get_logger
-from utils.settings import SUBS, LISBON_TZ
+from utils.settings import GUILD_ID, SUBS, LISBON_TZ
 from utils.mod_check import is_mod
 from utils.treasure_pods import TreasurePodManager
 from utils.persistence import (
@@ -31,10 +31,10 @@ from utils.dates import (
     league_close_at,
     month_label,
     looks_like_month,
+    now_lisbon,
 )
 
 
-GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 
 
 
@@ -150,7 +150,7 @@ class DebugCog(commands.Cog):
 
         # --- top16onflip dry-run preview ---
         mk = (month or "").strip()
-        now = datetime.now(LISBON_TZ)
+        now = now_lisbon()
         if not mk:
             mk = month_key(now)
         if not looks_like_month(mk):
@@ -279,7 +279,7 @@ class DebugCog(commands.Cog):
             return
 
         mk = (month or "").strip()
-        now = datetime.now(LISBON_TZ)
+        now = now_lisbon()
         if not mk:
             mk = month_key(now)
         if not looks_like_month(mk):
@@ -665,7 +665,7 @@ class DebugCog(commands.Cog):
             return
 
         mk = (month or "").strip()
-        now = datetime.now(LISBON_TZ)
+        now = now_lisbon()
         if not mk:
             mk = month_key(now)
         if not looks_like_month(mk):
@@ -737,7 +737,7 @@ class DebugCog(commands.Cog):
     async def _debug_treasure_stats(self, ctx: discord.ApplicationContext, month: Optional[str]) -> None:
         """Show Bring a Friend Treasure Pod stats for a month (safe - doesn't reveal pod numbers)."""
         mk = (month or "").strip()
-        now = datetime.now(LISBON_TZ)
+        now = now_lisbon()
         if not mk:
             mk = month_key(now)
         if not looks_like_month(mk):

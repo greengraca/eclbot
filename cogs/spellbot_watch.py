@@ -9,8 +9,7 @@ from discord.ext import commands
 from topdeck_fetch import get_league_rows_cached, PlayerRow, WAGER_RATE
 from utils.topdeck_identity import find_row_for_member
 from utils.logger import log_sync, log_ok, log_warn, log_debug
-
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+from utils.settings import GUILD_ID
 
 SPELLBOT_USER_ID = int(os.getenv("SPELLBOT_USER_ID", "0"))
 SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))

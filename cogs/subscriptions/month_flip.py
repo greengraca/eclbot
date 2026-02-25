@@ -20,14 +20,14 @@ from typing import TYPE_CHECKING, Optional
 import discord
 
 from topdeck_fetch import get_in_progress_pods, get_league_rows_cached
-from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col
+from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 
 from utils.settings import LISBON_TZ, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
-from utils.dates import add_months, month_bounds, month_label
+from utils.dates import add_months, month_bounds, month_label, now_lisbon
 from utils.logger import log_sync
 from utils.treasure_pods import TreasurePodManager
 
-from .embeds import build_flip_mods_embed
+from .embeds import build_flip_mods_embed, _get_color
 
 if TYPE_CHECKING:
     from ..subscriptions_cog import SubscriptionsCog
@@ -88,9 +88,8 @@ class MonthFlipHandler:
     async def ensure_month_close_pending(self, guild: discord.Guild, *, cut_month: str) -> None:
         """Create the pending marker once the close window begins (idempotent)."""
         pid = self.month_close_pending_job_id(guild.id, cut_month)
-        if await subs_jobs.find_one({"_id": pid}):
+        if not await job_once(pid):
             return
-        await subs_jobs.insert_one({"_id": pid, "ran_at": datetime.now(timezone.utc)})
 
     async def run_month_close_logic(self, guild: discord.Guild, *, cut_month: str) -> None:
         """
@@ -179,7 +178,7 @@ class MonthFlipHandler:
                 await self.log.info(f"[subs] monthly revoke delayed for {target_month}: month-close still pending for {prev_month}")
             return
 
-        if not self.cog._enforcement_active(datetime.now(LISBON_TZ)):
+        if not self.cog._enforcement_active(now_lisbon()):
             await self.log.info("[subs] monthly revoke skipped: enforcement not active yet")
             return
 
@@ -264,9 +263,8 @@ class MonthFlipHandler:
     async def run_cleanup_job(self, guild: discord.Guild, target_month: str) -> None:
         """Remove ECL from ineligible users for target_month."""
         job_id = f"cleanup:{guild.id}:{target_month}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         cfg = self.cfg
         role = guild.get_role(cfg.ecl_role_id) if cfg.ecl_role_id else None
@@ -302,9 +300,8 @@ class MonthFlipHandler:
     async def run_flip_mods_reminder_job(self, guild: discord.Guild, *, mk: str) -> None:
         """DM mods the month-flip checklist."""
         job_id = f"flip-mods:{guild.id}:{mk}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         emb = self.cog._build_flip_mods_embed(guild, mk)
         await self.cog._dm_mods_embed(guild, embed=emb)
@@ -321,9 +318,8 @@ class MonthFlipHandler:
             return
 
         job_id = f"flip-free-role-info:{guild.id}:{mk}"
-        if await subs_jobs.find_one({"_id": job_id}):
+        if not await job_once(job_id):
             return
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         # Build per-user list of role names that grant free entry
         user_roles: dict[int, list[str]] = {}
@@ -381,7 +377,7 @@ class MonthFlipHandler:
                         f"You have **free entry** for **{nice_month}** because you have: **{roles_txt}**.\n\n"
                         "Your access is secured for this month."
                     ),
-                    color=cfg.embed_color if isinstance(cfg.embed_color, int) else 0x2ECC71,
+                    color=_get_color(cfg.embed_color),
                 )
                 emb.set_footer(text="ECL • Free entry notice")
 

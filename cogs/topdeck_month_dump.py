@@ -15,7 +15,8 @@ from discord.ext import commands
 from pymongo import UpdateOne
 from db import topdeck_month_dump_runs, topdeck_month_dump_chunks, topdeck_pods
 
-from utils.settings import LISBON_TZ
+from utils.settings import GUILD_ID, LISBON_TZ
+from utils.dates import now_lisbon
 from utils.logger import log_sync, log_warn
 from utils.mod_check import is_mod
 
@@ -30,8 +31,6 @@ from topdeck_fetch import (
 )
 
 # ---------- ENV / CONFIG ----------
-
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "").strip()
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
@@ -60,7 +59,7 @@ def _normalize_ts(ts: Optional[float]) -> Optional[float]:
 
 
 def _current_month_str() -> str:
-    return datetime.now(LISBON_TZ).strftime("%Y-%m")
+    return now_lisbon().strftime("%Y-%m")
 
 
 def _month_bounds_utc_ts(month_str: str) -> Tuple[float, float]:

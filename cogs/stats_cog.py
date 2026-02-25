@@ -24,14 +24,10 @@ from utils.topdeck_identity import find_row_for_member
 from online_games_store import count_online_games_by_topdeck_uid_str
 
 from utils.dates import current_month_key, add_months
-from utils.settings import SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
 from utils.topdeck_identity import find_row_for_member
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
 from utils.mod_check import is_mod
-
-
-
-GUILD_ID = int(getattr(SUBS, "guild_id", 0) or 0)
 
 
 def _pct(x: float) -> str:

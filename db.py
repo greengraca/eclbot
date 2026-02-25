@@ -70,6 +70,20 @@ async def ping() -> bool:
     return True
 
 
+async def job_once(job_id: str) -> bool:
+    """Return True if *this* call claimed the job (first run).
+
+    Return False if the job was already recorded (duplicate run).
+    Uses subs_jobs with _id = job_id for atomic idempotence.
+    """
+    from datetime import datetime, timezone
+
+    if await subs_jobs.find_one({"_id": job_id}):
+        return False
+    await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+    return True
+
+
 async def ensure_indexes() -> None:
     await subs_access.create_indexes(
         [

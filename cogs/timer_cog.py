@@ -48,9 +48,9 @@ from .timer import (
 )
 
 
-# ---------------- env / config ----------------
+from utils.settings import GUILD_ID
 
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+# ---------------- env / config ----------------
 
 
 # Main round duration in minutes

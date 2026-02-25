@@ -8,6 +8,8 @@ from typing import Set
 # Import and re-export LISBON_TZ from dates for backwards compatibility
 from utils.dates import LISBON_TZ
 
+GUILD_ID: int = int((os.getenv("GUILD_ID") or "0").strip())
+
 TOPDECK_BRACKET_ID = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
 NEXT_MONTH_TOPDECK_BRACKET_ID = (os.getenv("NEXT_MONTH_TOPDECK_BRACKET_ID") or "").strip()
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN")  # can be None

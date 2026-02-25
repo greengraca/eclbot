@@ -59,8 +59,7 @@ from utils.persistence import (
     update_lobby_expires_at as db_update_lobby_expires_at,
 )
 from utils.logger import log_sync, log_ok, log_warn, log_error
-
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+from utils.settings import GUILD_ID
 LFG_EMBED_ICON_URL = os.getenv("LFG_EMBED_ICON_URL", "").strip()
 
 # minutes of inactivity (no button clicks) before a lobby auto-expires
