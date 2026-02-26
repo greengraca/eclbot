@@ -196,11 +196,16 @@ class StatsCog(commands.Cog):
         row: Optional[PlayerRow] = match.row if match else None
 
         emb = discord.Embed(
-            title=f"ECL Stats — {target.display_name}",
+            title=f"\U0001f3c6 ECL Stats — {target.display_name}",
             color=int(getattr(SUBS, "embed_color", 0x2ECC71) or 0x2ECC71),
         )
 
-        emb.set_footer(text=f"Bracket {TOPDECK_BRACKET_ID} • {mk}")
+        # Thumbnail branding (same pattern as subscriptions embeds)
+        thumb_url = getattr(SUBS, "embed_thumbnail_url", "") or ""
+        if thumb_url.startswith(("http://", "https://")):
+            emb.set_thumbnail(url=thumb_url)
+
+        emb.set_footer(text=f"ECL \u2022 {mk} \u2022 Bracket {TOPDECK_BRACKET_ID}")
 
         # ---- Access snapshot (current + next month) ----
         cfg = SUBS
@@ -258,27 +263,18 @@ class StatsCog(commands.Cog):
         dropped = bool(getattr(row, "dropped", False))
 
         rank = _rank_of_row(rows or [], row)
-        rank_str = f"#{rank}" if rank else "—"
+        rank_str = f"#{rank}" if rank else "\u2014"
 
-        td_lines = [
-            f"Name: **{getattr(row, 'name', '—')}**",
-            f"Rank: **{rank_str}**",
-            f"Points: **{pts}**",
-            f"Games: **{games}**",
-            f"Record: **{wins}-{losses}-{draws}**(W-L-D)",
-            f"Win%: **{_pct(win_pct)}**",
-        ]
+        # ---- Summary line in description ----
+        name = getattr(row, "name", "\u2014")
+        emb.description = f"**{name}**  \u00b7  Rank **{rank_str}**  \u00b7  **{pts}** pts"
 
-        # Gate UID + dropped status to mods only.
-        if caller_is_mod:
-            td_lines.insert(1, f"UID: `{(getattr(row, 'uid', None) or '—')}`")
-            td_lines.append(f"Dropped: {'✅' if dropped else '❌'}")
-
-        # Identity mapping confidence (mods only)
-        if caller_is_mod and match is not None:
-            td_lines.append(_fmt_map(match.confidence, match.matched_key, match.detail))
-
-        emb.add_field(name="TopDeck", value="\n".join(td_lines), inline=False)
+        # ---- Season Record (compact) ----
+        emb.add_field(
+            name="\U0001f4ca Season Record",
+            value=f"**{games}** games  \u00b7  **{wins}**W **{losses}**L **{draws}**D  \u00b7  **{_pct(win_pct)}** win rate",
+            inline=False,
+        )
 
         # ---- Online games for current month ----
         uid = (getattr(row, "uid", None) or "").strip()
@@ -304,21 +300,11 @@ class StatsCog(commands.Cog):
         top16_pos = _top16_position(rows or [], row)
         in_top16_window = bool(top16_pos and top16_pos <= 16)
 
-        online_lines = []
-        if online_count is None:
-            online_lines.append("Online games: —")
-        else:
-            online_lines.append(f"Online games: **{online_count}** (need **{min_online}**) — {'✅' if meets_online else '❌'}")
-        online_lines.append(f"Min total games: **{min_total}** — {'✅' if meets_total else '❌'}")
-        if top16_pos:
-            online_lines.append(f"Top16 window (by pts, min games): **#{top16_pos}** — {'✅' if in_top16_window else '❌'}")
-        else:
-            online_lines.append("Top16 window (by pts, min games): —")
-            
         # ---- Recency check for 10-19 online games ----
         no_recency_threshold = int(getattr(cfg, "top16_min_online_games_no_recency", 20) or 20)
         recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
         meets_recency = True  # default: not needed (20+ games or < min)
+        has_recent = None
         if online_count is not None and min_online <= online_count < no_recency_threshold:
             try:
                 y, m = mk.split("-")
@@ -332,34 +318,72 @@ class StatsCog(commands.Cog):
 
             if has_recent is False:
                 meets_recency = False
-                online_lines.append(
-                    f"🔴 **Warning:** No online game played after day **{recency_after_day}** — "
-                    f"required for eligibility with fewer than **{no_recency_threshold}** online games."
-                )
-            elif has_recent is True:
-                online_lines.append(
-                    f"Recency (game after day {recency_after_day}): ✅"
-                )
 
-        # ---- Final eligibility verdict ----
+        # ---- Inline fields: Online Games + Recency ----
+        if online_count is None:
+            emb.add_field(name="\U0001f3ae Online Games", value="\u2014", inline=True)
+        else:
+            emb.add_field(
+                name="\U0001f3ae Online Games",
+                value=f"**{online_count}** / {min_online} required {'✅' if meets_online else '❌'}",
+                inline=True,
+            )
+
+        # Recency field (only shown when applicable: 10-19 online games)
+        if online_count is not None and min_online <= online_count < no_recency_threshold:
+            if has_recent is True:
+                emb.add_field(name="\U0001f4c5 Recency", value=f"Game after day {recency_after_day} ✅", inline=True)
+            elif has_recent is False:
+                emb.add_field(name="\U0001f4c5 Recency", value=f"Game after day {recency_after_day} ❌", inline=True)
+
+        # ---- Top16 Eligibility (checklist + verdict) ----
+        elig_lines = []
+        if top16_pos:
+            elig_lines.append(f"Position: **#{top16_pos}** {'✅' if in_top16_window else '❌'}")
+        else:
+            elig_lines.append("Position: \u2014")
+        elig_lines.append(f"Total games: **{games}** / {min_total} {'✅' if meets_total else '❌'}")
+        if online_count is not None:
+            elig_lines.append(f"Online games: **{online_count}** / {min_online} {'✅' if meets_online else '❌'}")
+        else:
+            elig_lines.append("Online games: \u2014")
+        if online_count is not None and min_online <= online_count < no_recency_threshold:
+            if has_recent is True:
+                elig_lines.append("Recency: ✅")
+            elif has_recent is False:
+                elig_lines.append("Recency: ❌")
+                elig_lines.append(
+                    f"\U0001f534 **Warning:** No online game after day **{recency_after_day}** \u2014 "
+                    f"required with fewer than **{no_recency_threshold}** online games."
+                )
+        elig_lines.append("\u2500")
+
         all_eligible = meets_total and meets_online and in_top16_window and meets_recency
         if all_eligible:
-            online_lines.append("🟢 **You are on the Top cut this month**")
+            elig_lines.append("\U0001f7e2 **You are on the Top cut this month**")
         else:
-            online_lines.append("🔴 **You are not eligible for Top cut this month**")
+            elig_lines.append("\U0001f534 **You are not eligible for Top cut this month**")
 
-        emb.add_field(name=f"Eligibility Top16 ({mk})", value="\n".join(online_lines), inline=False)
+        emb.add_field(name="\U0001f3c5 Top16 Eligibility", value="\n".join(elig_lines), inline=False)
 
-        # ---- Most Games (separate category) ----
-        emb.add_field(
-            name=f"Most Games ({mk})",
-            value=_most_games_contender_line(rows or [], row, top_n=5),
-            inline=False,
-        )
-        
-        # Gate entitlement/access info to mods only.
+        # ---- Most Games Raffle ----
+        mg_raw = _most_games_contender_line(rows or [], row, top_n=5)
+        # Reformat: strip prefix, keep the status part
+        mg_value = mg_raw.replace("Most games contender: ", "", 1)
+        emb.add_field(name="\U0001f3b2 Most Games Raffle", value=mg_value, inline=False)
+
+        # ---- Mods-only: Access + identity details ----
         if caller_is_mod:
-            emb.add_field(name="Access", value="\n".join(access_lines), inline=False)
+            uid_display = getattr(row, "uid", None) or "\u2014"
+            mod_lines = [
+                f"UID: `{uid_display}`",
+                f"Dropped: {'✅' if dropped else '❌'}",
+            ]
+            if match is not None:
+                mod_lines.append(_fmt_map(match.confidence, match.matched_key, match.detail))
+            mod_lines.append("")
+            mod_lines.extend(access_lines)
+            emb.add_field(name="\U0001f512 Access", value="\n".join(mod_lines), inline=False)
 
         await safe_ctx_followup(ctx, embed=emb, ephemeral=True)
 
