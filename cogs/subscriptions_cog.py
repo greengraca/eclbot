@@ -1124,6 +1124,7 @@ class SubscriptionsCog(commands.Cog):
 
             now = now_lisbon()
             now_mk = month_key(now)
+            await self.log.info(f"[subs] _tick running: {now_mk} {now.isoformat()}")
 
             # Calculate close time and reminder days relative to close_at
             close_at = league_close_at(now_mk)
@@ -1190,6 +1191,8 @@ class SubscriptionsCog(commands.Cog):
             if TOPDECK_BRACKET_ID:
                 try:
                     cached = get_cached_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+                    if not cached:
+                        await self.log.info("[treasure] No cached matches yet, skipping treasure checks")
                     if cached:
                         matches, entrant_to_uid, player_map = cached
                         

@@ -647,6 +647,14 @@ class TreasurePodManager:
             )
 
         if not any_skipped:
+            total_unfired = sum(
+                1 for tables in table_map.values()
+                for t in tables if t not in fired
+            )
+            log_ok(
+                f"[treasure] redistribute check: 0 skipped "
+                f"(max_table={current_max_table}, unfired={total_unfired})"
+            )
             return False
 
         new_encrypted = _encrypt_table_map(table_map)
