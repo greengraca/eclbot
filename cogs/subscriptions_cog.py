@@ -1219,7 +1219,15 @@ class SubscriptionsCog(commands.Cog):
                             current_max_table=current_max_table,
                             new_player_count=player_count,
                         )
-                        
+
+                        # Redistribute any treasure pods that were skipped
+                        # (table number already passed without the bot timer firing)
+                        await self._treasure_manager.redistribute_skipped_pods(
+                            guild_id=guild.id,
+                            month=now_mk,
+                            current_max_table=current_max_table,
+                        )
+
                         # Check if recalculation needed (if nearing month end)
                         days_until_close = (close_at - now).total_seconds() / 86400.0
                         if days_until_close <= 11 and days_until_close > 0:

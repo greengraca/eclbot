@@ -577,6 +577,89 @@ class TreasurePodManager:
         })
         return await cursor.to_list(length=None)
 
+    async def redistribute_skipped_pods(
+        self,
+        guild_id: int,
+        month: str,
+        current_max_table: int,
+    ) -> bool:
+        """
+        Detect unfired pods whose table numbers are already below current_max_table
+        (i.e. skipped because the game was played without the bot timer) and
+        redistribute them to upcoming table numbers.
+
+        Returns True if any pods were redistributed.
+        """
+        schedule = await self.get_schedule(guild_id, month)
+        if not schedule:
+            return False
+
+        encrypted = schedule.get("encrypted_tables")
+        if not encrypted:
+            return False
+
+        table_map = _decrypt_table_map(encrypted)
+        if not table_map:
+            return False
+
+        fired = set(schedule.get("fired_tables", []))
+
+        # Collect ALL tables across all types (for collision avoidance)
+        all_tables: set[int] = set()
+        for tables in table_map.values():
+            all_tables.update(tables)
+
+        # Find skipped pods per type: unfired AND below current_max_table
+        any_skipped = False
+        for type_id, tables in table_map.items():
+            skipped = [t for t in tables if t not in fired and t < current_max_table]
+            if not skipped:
+                continue
+
+            any_skipped = True
+            remaining = [t for t in tables if t not in skipped]
+
+            # Generate replacement table numbers in [current_max_table+1, current_max_table+30]
+            min_new = current_max_table + 1
+            max_new = current_max_table + 30
+            replacements: List[int] = []
+
+            for old_table in skipped:
+                for _ in range(50):
+                    candidate = random.randint(min_new, max_new)
+                    if candidate not in all_tables and candidate not in replacements:
+                        break
+                else:
+                    # Fallback: pick sequentially
+                    for fallback in range(min_new, max_new + 1):
+                        if fallback not in all_tables and fallback not in replacements:
+                            candidate = fallback
+                            break
+                replacements.append(candidate)
+
+            all_tables.update(replacements)
+            table_map[type_id] = sorted(remaining + replacements)
+
+            skipped_str = ", ".join(f"#{t}" for t in skipped)
+            log_ok(
+                f"[treasure] Redistributed {len(skipped)} skipped {type_id} pod(s): "
+                f"{skipped_str} (max_table={current_max_table})"
+            )
+
+        if not any_skipped:
+            return False
+
+        new_encrypted = _encrypt_table_map(table_map)
+        if not new_encrypted:
+            return False
+
+        await self.schedule_col.update_one(
+            {"guild_id": guild_id, "month": month},
+            {"$set": {"encrypted_tables": new_encrypted}},
+        )
+
+        return True
+
     async def check_and_recalculate_if_needed(
         self,
         guild_id: int,
