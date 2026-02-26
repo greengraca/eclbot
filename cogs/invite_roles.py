@@ -6,6 +6,7 @@ from typing import Dict, Optional
 import discord
 from discord.ext import commands
 
+from utils.interactions import resolve_member
 from utils.logger import log_sync, log_ok, log_warn
 from utils.settings import GUILD_ID
 
@@ -196,9 +197,7 @@ class InviteRoles(commands.Cog):
                     if not role:
                         log_warn("[invite_roles] ECL role not found for reaction-role.")
                         return
-                    member = guild.get_member(payload.user_id) or await guild.fetch_member(
-                        payload.user_id
-                    )
+                    member = await resolve_member(guild, payload.user_id)
                     if member and not member.bot:
                         try:
                             await member.add_roles(
@@ -223,9 +222,7 @@ class InviteRoles(commands.Cog):
                     if not role:
                         log_warn("[invite_roles] LFG role not found for reaction-role.")
                         return
-                    member = guild.get_member(payload.user_id) or await guild.fetch_member(
-                        payload.user_id
-                    )
+                    member = await resolve_member(guild, payload.user_id)
                     if member and not member.bot:
                         try:
                             await member.add_roles(
@@ -251,7 +248,7 @@ class InviteRoles(commands.Cog):
                         log_warn("[invite_roles] DM opt-in role not found for reaction-role.")
                         return
 
-                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+                    member = await resolve_member(guild, payload.user_id)
                     if member and not member.bot:
                         try:
                             await member.add_roles(role, reason="Reaction role (DM opt-in)")
@@ -285,9 +282,7 @@ class InviteRoles(commands.Cog):
                     if not role:
                         log_warn("[invite_roles] ECL role not found for reaction-role.")
                         return
-                    member = guild.get_member(payload.user_id) or await guild.fetch_member(
-                        payload.user_id
-                    )
+                    member = await resolve_member(guild, payload.user_id)
                     if member and not member.bot:
                         try:
                             await member.remove_roles(
@@ -312,9 +307,7 @@ class InviteRoles(commands.Cog):
                     if not role:
                         log_warn("[invite_roles] LFG role not found for reaction-role.")
                         return
-                    member = guild.get_member(payload.user_id) or await guild.fetch_member(
-                        payload.user_id
-                    )
+                    member = await resolve_member(guild, payload.user_id)
                     if member and not member.bot:
                         try:
                             await member.remove_roles(
@@ -341,7 +334,7 @@ class InviteRoles(commands.Cog):
                         log_warn("[invite_roles] DM opt-in role not found for reaction-role.")
                         return
 
-                    member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+                    member = await resolve_member(guild, payload.user_id)
                     if member and not member.bot:
                         try:
                             await member.remove_roles(role, reason="Reaction role (DM opt-in) removed")

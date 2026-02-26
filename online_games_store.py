@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
 from db import online_games
+from utils.logger import log_warn
 
 
 @dataclass
@@ -135,7 +136,8 @@ async def count_online_games_by_topdeck_uid(
             if not k:
                 continue
             out[k] = int(row.get("count") or 0)
-        except Exception:
+        except Exception as e:
+            log_warn(f"[online_games] Aggregation row parse error: {type(e).__name__}: {e}")
             continue
     return out
 
@@ -208,7 +210,8 @@ async def has_recent_game_by_topdeck_uid(
             k = str(row["_id"]).strip()
             if k:
                 uids_with_recent.add(k)
-        except Exception:
+        except Exception as e:
+            log_warn(f"[online_games] Recency check row parse error: {type(e).__name__}: {e}")
             continue
     
     # Build result dict for all requested UIDs

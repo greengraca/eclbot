@@ -16,6 +16,7 @@ from discord.ext import commands
 from discord import Option
 
 from db import subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col
+from utils.interactions import resolve_member
 from utils.logger import get_logger
 from utils.settings import GUILD_ID, SUBS, LISBON_TZ
 from utils.mod_check import is_mod
@@ -189,12 +190,7 @@ class DebugCog(commands.Cog):
             did = int(e.get("discord_id") or 0)
             if not did:
                 continue
-            mbr = ctx.guild.get_member(did)
-            if mbr is None:
-                try:
-                    mbr = await ctx.guild.fetch_member(did)
-                except Exception:
-                    mbr = None
+            mbr = await resolve_member(ctx.guild, did)
             if mbr is None:
                 continue
             e2 = dict(e)

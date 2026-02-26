@@ -24,6 +24,7 @@ from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pod
 
 from utils.settings import LISBON_TZ, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
 from utils.dates import add_months, month_bounds, month_label, now_lisbon
+from utils.interactions import resolve_member
 from utils.logger import log_sync
 from utils.treasure_pods import TreasurePodManager
 
@@ -343,10 +344,7 @@ class MonthFlipHandler:
         async def _send_one(uid: int, role_names: list[str]):
             nonlocal sent, db_written
             async with sem:
-                try:
-                    member = guild.get_member(uid) or await guild.fetch_member(uid)
-                except Exception:
-                    return
+                member = await resolve_member(guild, uid)
                 if not member or member.bot:
                     return
 

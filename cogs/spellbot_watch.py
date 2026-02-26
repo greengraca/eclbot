@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow, WAGER_RATE
 from utils.topdeck_identity import find_row_for_member
+from utils.interactions import resolve_member
 from utils.logger import log_sync, log_ok, log_warn, log_debug
 from utils.settings import GUILD_ID
 
@@ -160,13 +161,8 @@ class SpellBotWatchCog(commands.Cog):
             # Resolve members
             members: List[discord.Member] = []
             for uid in player_ids:
-                member = guild.get_member(uid)
+                member = await resolve_member(guild, uid)
                 if member is None:
-                    try:
-                        member = await guild.fetch_member(uid)
-                    except discord.NotFound:
-                        member = None
-                if member is None or not isinstance(member, discord.Member):
                     self._debug(
                         f"_handle_high_stakes: could not resolve member for id={uid}, aborting."
                     )

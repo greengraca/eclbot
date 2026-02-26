@@ -26,6 +26,7 @@ from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cach
 from online_games_store import count_online_games_by_topdeck_uid_str, has_recent_game_by_topdeck_uid
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
+from utils.interactions import resolve_member
 from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
 from utils.treasure_pods import TreasurePodManager
 
@@ -201,7 +202,8 @@ class SubscriptionsCog(commands.Cog):
                 "month": mk,
                 "kind": {"$ne": "kofi-one-time"},
             })
-        except Exception:
+        except Exception as e:
+            log_error(f"[subs] DB error fetching month entitlements for {mk}: {type(e).__name__}: {e}")
             month_ent_ids = []
 
         try:
@@ -211,7 +213,8 @@ class SubscriptionsCog(commands.Cog):
                 "starts_at": {"$lt": end_utc},
                 "expires_at": {"$gt": start_utc},
             })
-        except Exception:
+        except Exception as e:
+            log_error(f"[subs] DB error fetching one-time passes for {mk}: {type(e).__name__}: {e}")
             pass_ids = []
 
         def _to_int_set(xs) -> set[int]:
@@ -230,7 +233,8 @@ class SubscriptionsCog(commands.Cog):
         # ---- Free-entry DB list ----
         try:
             free_ids = await subs_free_entries.distinct("user_id", {"guild_id": cfg.guild_id, "month": mk})
-        except Exception:
+        except Exception as e:
+            log_error(f"[subs] DB error fetching free entries for {mk}: {type(e).__name__}: {e}")
             free_ids = []
         free_set = _to_int_set(free_ids)
 
@@ -612,11 +616,7 @@ class SubscriptionsCog(commands.Cog):
                 nonlocal sent
                 async with sem:
                     uid = int(entry["discord_id"])
-                    try:
-                        member = guild.get_member(uid) or await guild.fetch_member(uid)
-                    except Exception:
-                        return
-
+                    member = await resolve_member(guild, uid)
                     if not member or member.bot:
                         return
 
@@ -700,7 +700,8 @@ class SubscriptionsCog(commands.Cog):
         currency = str(payload.get("currency") or "").upper().strip()
         try:
             amount = float(payload.get("amount") or 0)
-        except Exception:
+        except Exception as e:
+            log_warn(f"[subs] Ko-fi amount parse failed (txn={txn_id}): {type(e).__name__}: {e}")
             amount = 0.0
 
         if currency == "EUR" and amount < 7.0:
@@ -752,7 +753,8 @@ class SubscriptionsCog(commands.Cog):
                 "month": pass_mk,
                 "kind": "kofi-one-time",
             })
-        except Exception:
+        except Exception as e:
+            log_warn(f"[subs] DB error checking existing pass (txn={txn_id}): {type(e).__name__}: {e}")
             existing = None
 
         if existing and isinstance(existing.get("expires_at"), datetime):
@@ -1005,7 +1007,8 @@ class SubscriptionsCog(commands.Cog):
         # 1) Subscription reminder (3d)
         try:
             registered_count = await self._count_registered_for_month(ctx.guild, target_month)
-        except Exception:
+        except Exception as e:
+            log_warn(f"[subs] Error counting registered for {target_month}: {type(e).__name__}: {e}")
             registered_count = 0
 
         emb_sub = await self._build_reminder_embed(
@@ -1565,13 +1568,7 @@ class SubscriptionsCog(commands.Cog):
                     f"-> discord_id={did} conf={res.confidence} key={res.matched_key!r}"
                 )
 
-            member = index.id_to_member.get(int(did)) or guild.get_member(int(did))
-            if member is None:
-                try:
-                    member = await guild.fetch_member(int(did))
-                except Exception:
-                    member = None
-
+            member = index.id_to_member.get(int(did)) or await resolve_member(guild, did)
             if not member or member.bot:
                 continue
 
@@ -1700,13 +1697,7 @@ class SubscriptionsCog(commands.Cog):
                     f"-> discord_id={did} conf={res.confidence} key={res.matched_key!r}"
                 )
 
-            member = index.id_to_member.get(int(did)) or guild.get_member(int(did))
-            if member is None:
-                try:
-                    member = await guild.fetch_member(int(did))
-                except Exception:
-                    member = None
-
+            member = index.id_to_member.get(int(did)) or await resolve_member(guild, did)
             if not member or member.bot:
                 continue
 
@@ -1802,10 +1793,7 @@ class SubscriptionsCog(commands.Cog):
             nonlocal sent
             async with sem:
                 uid = int(entry["discord_id"])
-                try:
-                    member = guild.get_member(uid) or await guild.fetch_member(uid)
-                except Exception:
-                    return
+                member = await resolve_member(guild, uid)
                 if not member or member.bot:
                     return
 
@@ -1858,11 +1846,8 @@ class SubscriptionsCog(commands.Cog):
         role = guild.get_role(cfg.ecl_role_id)
         if not role:
             return
-        try:
-            member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
-        except Exception:
-            return
-        if member.bot:
+        member = await resolve_member(guild, user_id)
+        if not member or member.bot:
             return
         if role in member.roles:
             return
@@ -1902,11 +1887,7 @@ class SubscriptionsCog(commands.Cog):
         if not guild:
             return False
 
-        try:
-            member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
-        except Exception:
-            return False
-
+        member = await resolve_member(guild, user_id)
         if not member or member.bot:
             return False
 
@@ -1965,12 +1946,8 @@ class SubscriptionsCog(commands.Cog):
         if not role:
             return
 
-        try:
-            member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
-        except Exception:
-            return
-
-        if member.bot or role in member.roles:
+        member = await resolve_member(guild, user_id)
+        if not member or member.bot or role in member.roles:
             return
 
         with contextlib.suppress(Exception):

@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 from dataclasses import dataclass
+from utils.logger import log_sync, log_warn
 from datetime import datetime, timezone, timedelta
 from typing import (
     Any,
@@ -736,12 +737,12 @@ async def get_league_rows_cached(
             try:
                 asyncio.create_task(_TOPDECK_CACHE_MISS_HOOK())
             except Exception as e:
-                print(
-                    "[topdeck] Warning: cache-miss hook scheduling failed "
+                log_warn(
+                    f"[topdeck] cache-miss hook scheduling failed "
                     f"{type(e).__name__}: {e}"
                 )
 
-        print(
+        log_sync(
             f"[topdeck] Fetching fresh TopDeck data from API for bracket "
             f"{bracket_id!r} (cache miss or expired)."
         )

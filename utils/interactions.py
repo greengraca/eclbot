@@ -15,7 +15,7 @@ Supports:
 from __future__ import annotations
 
 import contextlib
-from typing import Optional
+from typing import Optional, Union
 
 import discord
 
@@ -130,3 +130,18 @@ async def safe_i_edit(
                 return await msg.edit(content=content, embed=embed, view=view)
     except Exception:
         return
+
+
+async def resolve_member(
+    guild: discord.Guild,
+    user_id: Union[int, str],
+) -> Optional[discord.Member]:
+    """Try cache first, then API fetch. Returns None on failure."""
+    uid = int(user_id)
+    member = guild.get_member(uid)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(uid)
+    except Exception:
+        return None

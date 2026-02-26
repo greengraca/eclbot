@@ -18,6 +18,7 @@ from utils.interactions import (
     safe_ctx_followup,
     safe_i_send,
     safe_i_edit,
+    resolve_member,
 )
 
 from .lfg.models import LFGLobby, now_utc
@@ -436,12 +437,7 @@ class LFGCog(commands.Cog):
 
             members: List[discord.Member] = []
             for uid in player_ids:
-                m = guild.get_member(int(uid))
-                if m is None:
-                    try:
-                        m = await guild.fetch_member(int(uid))
-                    except Exception:
-                        m = None
+                m = await resolve_member(guild, uid)
                 if not isinstance(m, discord.Member):
                     log_warn(f"[lfg] high-stakes: aborted (could not resolve member id={uid})")
                     return
@@ -672,12 +668,8 @@ class LFGCog(commands.Cog):
                 )
 
                 for uid in (lobby.player_ids or []):
-                    member = guild.get_member(int(uid))
+                    member = await resolve_member(guild, uid)
                     if member is None:
-                        with contextlib.suppress(Exception):
-                            member = await guild.fetch_member(int(uid))
-
-                    if not isinstance(member, discord.Member):
                         continue
 
                     found = resolve_points_games_from_map(member, handle_to_best)

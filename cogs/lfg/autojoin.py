@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import discord
 
 from spelltable_client import create_spelltable_game
-from utils.interactions import safe_ctx_followup
+from utils.interactions import safe_ctx_followup, resolve_member
 from utils.logger import log_error
 
 from .models import LFGLobby, now_utc
@@ -83,16 +83,6 @@ async def can_member_join_elo_lobby(
 
     return float(user_elo) >= float(floor)
 
-
-async def resolve_member(guild: discord.Guild, uid: int) -> Optional[discord.Member]:
-    m = guild.get_member(uid)
-    if isinstance(m, discord.Member):
-        return m
-    with contextlib.suppress(Exception):
-        m2 = await guild.fetch_member(uid)
-        if isinstance(m2, discord.Member):
-            return m2
-    return None
 
 
 async def elo_join_reason(
