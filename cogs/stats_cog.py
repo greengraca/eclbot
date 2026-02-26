@@ -99,33 +99,22 @@ def _top16_position(rows: List[PlayerRow], target: PlayerRow) -> Optional[int]:
 
 def _most_games_contender_line(rows: List[PlayerRow], target: PlayerRow, top_n: int = 5) -> str:
     """
-    Same rules as /mostgames:
-      - compute Top 4 by points (excluding dropped)
-      - build "eligible" list sorted by games desc, pts desc, excluding those Top4
-      - contender if in eligible[:top_n]
+    Most-games raffle contender check.
+    All non-dropped players are eligible — exclusion only happens if
+    a player actually reaches the finals (not tracked here).
+    Sorted by games desc, pts desc.
     """
     def _key(r: PlayerRow) -> str:
         uid = (getattr(r, "uid", None) or "").strip()
         return uid if uid else (getattr(r, "name", "") or "").strip().lower()
 
-    # Top 4 by points (exclude dropped)
-    top4_by_points = sorted(
-        [r for r in rows if not getattr(r, "dropped", False)],
-        key=lambda r: (-float(getattr(r, "pts", 0.0) or 0.0), -int(getattr(r, "games", 0) or 0)),
-    )[:4]
-
-    top4_keys = {_key(r) for r in top4_by_points if _key(r)}
     tkey = _key(target)
 
-    if tkey and tkey in top4_keys:
-        return "Most games contender: ❌ (excluded: Top 4 by points)"
-
-    # Eligible: sorted by games, exclude Top4-by-points keys
-    eligible = [
-        r
-        for r in sorted(rows, key=lambda r: (-int(getattr(r, "games", 0) or 0), -float(getattr(r, "pts", 0.0) or 0.0)))
-        if _key(r) not in top4_keys
-    ]
+    # All non-dropped players sorted by games desc, pts desc
+    eligible = sorted(
+        [r for r in rows if not getattr(r, "dropped", False)],
+        key=lambda r: (-int(getattr(r, "games", 0) or 0), -float(getattr(r, "pts", 0.0) or 0.0)),
+    )
     top = eligible[:top_n]
 
     if not top:
