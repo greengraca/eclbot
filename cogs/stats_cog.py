@@ -326,9 +326,10 @@ class StatsCog(commands.Cog):
         else:
             online_lines.append("Top16 window (by pts, min games): —")
             
-        # ---- Recency warning for 10-19 online games ----
+        # ---- Recency check for 10-19 online games ----
         no_recency_threshold = int(getattr(cfg, "top16_min_online_games_no_recency", 20) or 20)
         recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
+        meets_recency = True  # default: not needed (20+ games or < min)
         if online_count is not None and min_online <= online_count < no_recency_threshold:
             try:
                 y, m = mk.split("-")
@@ -341,6 +342,7 @@ class StatsCog(commands.Cog):
                 has_recent = None
 
             if has_recent is False:
+                meets_recency = False
                 online_lines.append(
                     f"🔴 **Warning:** No online game played after day **{recency_after_day}** — "
                     f"required for eligibility with fewer than **{no_recency_threshold}** online games."
@@ -350,9 +352,21 @@ class StatsCog(commands.Cog):
                     f"Recency (game after day {recency_after_day}): ✅"
                 )
 
-        online_lines.append(_most_games_contender_line(rows or [], row, top_n=5))
+        # ---- Final eligibility verdict ----
+        all_eligible = meets_total and meets_online and in_top16_window and meets_recency
+        if all_eligible:
+            online_lines.append("🟢 **You are on the Top cut this month**")
+        else:
+            online_lines.append("🔴 **You are not eligible for Top cut this month**")
 
-        emb.add_field(name=f"Eligibility ({mk})", value="\n".join(online_lines), inline=False)
+        emb.add_field(name=f"Eligibility Top16 ({mk})", value="\n".join(online_lines), inline=False)
+
+        # ---- Most Games (separate category) ----
+        emb.add_field(
+            name=f"Most Games ({mk})",
+            value=_most_games_contender_line(rows or [], row, top_n=5),
+            inline=False,
+        )
         
         # Gate entitlement/access info to mods only.
         if caller_is_mod:
