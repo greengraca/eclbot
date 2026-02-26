@@ -288,6 +288,7 @@ class TopDeckTagger:
                     description=pod_description,
                     color=0xFFD700,  # Gold
                 )
+                embed.add_field(name="Pod Number", value=str(table), inline=True)
                 if pod_image_url:
                     embed.set_thumbnail(url=pod_image_url)
                 pod_type_label = treasure.get("pod_type", "treasure")
