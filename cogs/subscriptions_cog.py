@@ -1190,27 +1190,27 @@ class SubscriptionsCog(commands.Cog):
             # --- Treasure pod checks (using cached TopDeck data) ---
             if TOPDECK_BRACKET_ID:
                 try:
+                    # Ensure cache is populated (triggers API fetch on cold start)
+                    player_count = None
+                    try:
+                        rows, _ = await get_league_rows_cached(
+                            TOPDECK_BRACKET_ID,
+                            FIREBASE_ID_TOKEN,
+                            force_refresh=False,
+                        )
+                        if rows:
+                            player_count = len([r for r in rows if not r.dropped])
+                    except Exception:
+                        pass
+
                     cached = get_cached_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
                     if not cached:
                         await self.log.info("[treasure] No cached matches yet, skipping treasure checks")
                     if cached:
                         matches, entrant_to_uid, player_map = cached
-                        
+
                         # Get current_max_table from matches
                         current_max_table = max((m.id for m in matches), default=0)
-                        
-                        # Get player count for estimation
-                        player_count = None
-                        try:
-                            rows, _ = await get_league_rows_cached(
-                                TOPDECK_BRACKET_ID,
-                                FIREBASE_ID_TOKEN,
-                                force_refresh=False,
-                            )
-                            if rows:
-                                player_count = len([r for r in rows if not r.dropped])
-                        except Exception:
-                            pass
                         
                         # Check pending treasure pod results (win/draw)
                         await self._treasure_manager.check_pending_results(
