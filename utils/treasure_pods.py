@@ -418,6 +418,7 @@ class TreasurePodManager:
         is_draw: bool,
         current_max_table: int = 0,
         new_player_count: Optional[int] = None,
+        days_until_close: float = 30.0,
     ) -> bool:
         """
         Update a treasure pod with the game result.
@@ -459,6 +460,7 @@ class TreasurePodManager:
             await self._add_replacement_table(
                 guild_id, month, current_max_table, new_player_count,
                 pod_type=pod_type,
+                days_until_close=days_until_close,
             )
 
         return result.modified_count > 0
@@ -470,6 +472,7 @@ class TreasurePodManager:
         current_max_table: int,
         new_player_count: Optional[int] = None,
         pod_type: str = "bring_a_friend",
+        days_until_close: float = 30.0,
     ) -> None:
         """Add a replacement treasure table number after a draw."""
         schedule = await self.get_schedule(guild_id, month)
@@ -494,9 +497,16 @@ class TreasurePodManager:
         for tables in table_map.values():
             all_tables.update(tables)
 
-        # Add replacement 1-30 tables after current max (can appear immediately!)
+        # Determine max distance based on days until close
+        if days_until_close <= 3:
+            max_distance = 5
+        elif days_until_close <= 5:
+            max_distance = 15
+        else:
+            max_distance = 30
+
         min_new = current_max_table + 1
-        max_new = current_max_table + 30
+        max_new = current_max_table + max_distance
 
         for _ in range(20):
             candidate = random.randint(min_new, max_new)
@@ -518,6 +528,7 @@ class TreasurePodManager:
                 {"$set": {
                     "encrypted_tables": new_encrypted,
                     "estimated_total": estimated_total,
+                    "updated_at": datetime.now(timezone.utc),
                 }},
             )
             log_ok(f"[treasure] Added replacement table #{candidate} ({pod_type}) for {month} after draw")
@@ -582,6 +593,7 @@ class TreasurePodManager:
         guild_id: int,
         month: str,
         current_max_table: int,
+        days_until_close: float = 30.0,
     ) -> bool:
         """
         Detect unfired pods whose table numbers are already below current_max_table
@@ -619,9 +631,17 @@ class TreasurePodManager:
             any_skipped = True
             remaining = [t for t in tables if t not in skipped]
 
-            # Generate replacement table numbers in [current_max_table+1, current_max_table+30]
+            # Determine max distance based on days until close
+            if days_until_close <= 3:
+                max_distance = 5
+            elif days_until_close <= 5:
+                max_distance = 15
+            else:
+                max_distance = 30
+
+            # Generate replacement table numbers in [current_max_table+1, current_max_table+max_distance]
             min_new = current_max_table + 1
-            max_new = current_max_table + 30
+            max_new = current_max_table + max_distance
             replacements: List[int] = []
 
             for old_table in skipped:
@@ -647,14 +667,6 @@ class TreasurePodManager:
             )
 
         if not any_skipped:
-            total_unfired = sum(
-                1 for tables in table_map.values()
-                for t in tables if t not in fired
-            )
-            log_ok(
-                f"[treasure] redistribute check: 0 skipped "
-                f"(max_table={current_max_table}, unfired={total_unfired})"
-            )
             return False
 
         new_encrypted = _encrypt_table_map(table_map)
@@ -663,7 +675,10 @@ class TreasurePodManager:
 
         await self.schedule_col.update_one(
             {"guild_id": guild_id, "month": month},
-            {"$set": {"encrypted_tables": new_encrypted}},
+            {"$set": {
+                "encrypted_tables": new_encrypted,
+                "updated_at": datetime.now(timezone.utc),
+            }},
         )
 
         return True
@@ -757,7 +772,10 @@ class TreasurePodManager:
         if not new_encrypted:
             return False
 
-        update_doc: Dict[str, Any] = {"$set": {"encrypted_tables": new_encrypted}}
+        update_doc: Dict[str, Any] = {"$set": {
+            "encrypted_tables": new_encrypted,
+            "updated_at": datetime.now(timezone.utc),
+        }}
 
         if new_player_count and new_player_count > 0:
             new_estimated = estimate_total_tables(new_player_count)
@@ -781,6 +799,7 @@ class TreasurePodManager:
         player_map: Dict[str, Dict],
         current_max_table: int = 0,
         new_player_count: Optional[int] = None,
+        days_until_close: float = 30.0,
     ) -> Dict[str, int]:
         """
         Check pending treasure pods against TopDeck match results.
@@ -826,6 +845,7 @@ class TreasurePodManager:
                     is_draw=True,
                     current_max_table=current_max_table,
                     new_player_count=new_player_count,
+                    days_until_close=days_until_close,
                 )
                 results["draw"] += 1
                 log_ok(f"[treasure] Treasure pod table #{table} was a DRAW - replacement scheduled")

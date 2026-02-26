@@ -1124,7 +1124,6 @@ class SubscriptionsCog(commands.Cog):
 
             now = now_lisbon()
             now_mk = month_key(now)
-            await self.log.info(f"[subs] _tick running: {now_mk} {now.isoformat()}")
 
             # Calculate close time and reminder days relative to close_at
             close_at = league_close_at(now_mk)
@@ -1204,8 +1203,6 @@ class SubscriptionsCog(commands.Cog):
                         pass
 
                     cached = get_cached_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
-                    if not cached:
-                        await self.log.info("[treasure] No cached matches yet, skipping treasure checks")
                     if cached:
                         matches, entrant_to_uid, player_map = cached
 
@@ -1213,6 +1210,7 @@ class SubscriptionsCog(commands.Cog):
                         current_max_table = max((m.id for m in matches), default=0)
                         
                         # Check pending treasure pod results (win/draw)
+                        days_until_close = (close_at - now).total_seconds() / 86400.0
                         await self._treasure_manager.check_pending_results(
                             guild_id=guild.id,
                             month=now_mk,
@@ -1221,6 +1219,7 @@ class SubscriptionsCog(commands.Cog):
                             player_map=player_map,
                             current_max_table=current_max_table,
                             new_player_count=player_count,
+                            days_until_close=days_until_close,
                         )
 
                         # Redistribute any treasure pods that were skipped
@@ -1229,10 +1228,10 @@ class SubscriptionsCog(commands.Cog):
                             guild_id=guild.id,
                             month=now_mk,
                             current_max_table=current_max_table,
+                            days_until_close=days_until_close,
                         )
 
                         # Check if recalculation needed (if nearing month end)
-                        days_until_close = (close_at - now).total_seconds() / 86400.0
                         if days_until_close <= 11 and days_until_close > 0:
                             await self._treasure_manager.check_and_recalculate_if_needed(
                                 guild_id=guild.id,
