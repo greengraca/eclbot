@@ -154,29 +154,17 @@ class TopdeckLeagueCog(commands.Cog):
             )
             return
 
-        # ---- Exclusions: Top 4 by points do NOT qualify for Most Games prize ----
-        # Use uid when available (preferred); fallback to name.
-        top4_by_points = sorted(
-            [r for r in rows if not r.dropped],
-            key=lambda r: (-r.pts, -r.games),
-        )[:4]
-
-        def _key(r: PlayerRow) -> str:
-            uid = (getattr(r, "uid", None) or "").strip()
-            return uid if uid else (r.name or "").strip().lower()
-
-        top4_keys = {_key(r) for r in top4_by_points if _key(r)}
-
-        # Eligible leaderboard: most games, excluding Top 4 by points
-        eligible = [r for r in sorted(rows, key=lambda r: (-r.games, -r.pts)) if _key(r) not in top4_keys]
-        top5 = eligible[:5]
+        top5 = sorted(rows, key=lambda r: (-r.games, -r.pts))[:5]
 
         ts_int = _ts(fetched_at)
 
         # ---- Public embed ----
         embed = discord.Embed(
             title="Most Games Played — Prize Chance Leaderboard",
-            description="Top 5 by total games played **excluding the current Top 4**.",
+            description=(
+                "Top 5 by total games played.\n"
+                "-# If a player advances to the finals, they forfeit their access to the raffle."
+            ),
         )
 
         if MOSTGAMES_PRIZE_IMAGE_URL:
@@ -185,7 +173,7 @@ class TopdeckLeagueCog(commands.Cog):
         if not top5:
             embed.add_field(
                 name="Leaderboard",
-                value="No eligible players found (everyone is in Top 4 by points or there is no data yet).",
+                value="No data yet.",
                 inline=False,
             )
         else:
