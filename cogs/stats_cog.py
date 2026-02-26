@@ -21,7 +21,7 @@ from discord import Option
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from utils.topdeck_identity import find_row_for_member
-from online_games_store import count_online_games_by_topdeck_uid_str
+from online_games_store import count_online_games_by_topdeck_uid_str, has_recent_game_by_topdeck_uid
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
@@ -326,6 +326,30 @@ class StatsCog(commands.Cog):
         else:
             online_lines.append("Top16 window (by pts, min games): —")
             
+        # ---- Recency warning for 10-19 online games ----
+        no_recency_threshold = int(getattr(cfg, "top16_min_online_games_no_recency", 20) or 20)
+        recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
+        if online_count is not None and min_online <= online_count < no_recency_threshold:
+            try:
+                y, m = mk.split("-")
+                recency_map = await has_recent_game_by_topdeck_uid(
+                    TOPDECK_BRACKET_ID, int(y), int(m), [uid],
+                    after_day=recency_after_day, online_only=True,
+                )
+                has_recent = recency_map.get(uid, False)
+            except Exception:
+                has_recent = None
+
+            if has_recent is False:
+                online_lines.append(
+                    f"🔴 **Warning:** No online game played after day **{recency_after_day}** — "
+                    f"required for eligibility with fewer than **{no_recency_threshold}** online games."
+                )
+            elif has_recent is True:
+                online_lines.append(
+                    f"Recency (game after day {recency_after_day}): ✅"
+                )
+
         online_lines.append(_most_games_contender_line(rows or [], row, top_n=5))
 
         emb.add_field(name=f"Eligibility ({mk})", value="\n".join(online_lines), inline=False)
