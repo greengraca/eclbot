@@ -64,6 +64,9 @@ persistent_lobbies = db["persistent_lobbies"]
 treasure_pod_schedule = db["treasure_pod_schedule"]
 treasure_pods = db["treasure_pods"]
 
+# SpellBot scan cache (incremental /synconline)
+spellbot_scan_cache = db["spellbot_scan_cache"]
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
@@ -279,6 +282,17 @@ async def ensure_indexes() -> None:
             IndexModel(
                 [("guild_id", ASCENDING), ("month", ASCENDING), ("season", ASCENDING), ("table", ASCENDING)],
                 name="by_guild_month_season_table",
+            ),
+        ]
+    )
+
+    # ---- SpellBot scan cache (incremental /synconline) ----
+    await spellbot_scan_cache.create_indexes(
+        [
+            IndexModel(
+                [("bracket_id", ASCENDING), ("month", ASCENDING)],
+                unique=True,
+                name="uniq_bracket_month",
             ),
         ]
     )

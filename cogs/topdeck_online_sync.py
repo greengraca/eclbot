@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 from utils.logger import log_sync, log_warn, log_debug
 from utils.mod_check import is_mod
 
-from db import online_games
+from db import online_games, spellbot_scan_cache
 from online_games_store import OnlineGameRecord, upsert_record
 
 from topdeck_fetch import (
@@ -238,10 +238,18 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
 # ---------- SpellBot helpers ----------
 
 
-async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReadyGame]:
+async def _scan_spellbot_ready_games(
+    guild: discord.Guild,
+    after_message_id: Optional[int] = None,
+) -> Tuple[List[SpellbotReadyGame], Optional[int]]:
     """
-    Scan SPELLBOT_LFG_CHANNEL_ID for 'Your game is ready!' embeds since
-    the first day of the current month.
+    Scan SPELLBOT_LFG_CHANNEL_ID for 'Your game is ready!' embeds.
+
+    If *after_message_id* is given, only fetches messages newer than that ID
+    (incremental scan).  Otherwise scans from the first day of the current month.
+
+    Returns ``(games, max_message_id)`` where *max_message_id* is the highest
+    message ID seen during this scan (used as the next checkpoint).
     """
     if not SPELLBOT_LFG_CHANNEL_ID:
         raise RuntimeError("SPELLBOT_LFG_CHANNEL_ID is not configured.")
@@ -253,22 +261,36 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
         )
 
     month_start = _month_start_utc()
-    _log(
-        f"[online-sync] {_now_iso()} Scanning SpellBot channel "
-        f"{SPELLBOT_LFG_CHANNEL_ID} for ready games since {month_start.isoformat()}."
-    )
+
+    if after_message_id is not None:
+        after_param: Any = discord.Object(id=after_message_id)
+        _log(
+            f"[online-sync] {_now_iso()} Incremental SpellBot scan in channel "
+            f"{SPELLBOT_LFG_CHANNEL_ID} (after message {after_message_id})."
+        )
+    else:
+        after_param = month_start
+        _log(
+            f"[online-sync] {_now_iso()} Full SpellBot scan in channel "
+            f"{SPELLBOT_LFG_CHANNEL_ID} since {month_start.isoformat()}."
+        )
 
     games: List[SpellbotReadyGame] = []
+    max_msg_id: Optional[int] = None
 
     allowed_bot_ids = {int(x) for x in (SPELLBOT_USER_ID, ECLBOT_USER_ID) if int(x)}
     author_counts: Dict[int, int] = {}
 
-    async for msg in channel.history(limit=None, after=month_start, oldest_first=False):
+    async for msg in channel.history(limit=None, after=after_param, oldest_first=False):
+        # Track the highest message ID for the scan checkpoint
+        if max_msg_id is None or msg.id > max_msg_id:
+            max_msg_id = msg.id
+
         # Safety: if the API ever returns older messages, stop as soon as we cross month_start.
         dt0 = msg.created_at
         if dt0.tzinfo is None:
             dt0 = dt0.replace(tzinfo=timezone.utc)
-        if dt0 < month_start:
+        if after_message_id is None and dt0 < month_start:
             break
 
         # Mentions are already resolved on the message payload; used to avoid extra HTTP fetches.
@@ -344,12 +366,12 @@ async def _scan_spellbot_ready_games(guild: discord.Guild) -> List[SpellbotReady
             f"[online-sync] Example SpellBot normalized handles for first ready game: {games[0].handles_norm}",
             level="debug",
         )
-    
+
     if author_counts:
         _log(f"[online-sync] Ready-message authors seen: {author_counts}")
 
 
-    return games
+    return games, max_msg_id
 
 
 # ---------- Matching ----------
@@ -590,6 +612,80 @@ async def _save_online_stats_to_db(new_payload: Dict[str, Any]) -> None:
 
 
 
+# ---------- SpellBot scan cache helpers ----------
+
+
+async def _load_scan_cache(
+    bracket_id: str, month: str
+) -> Tuple[List[SpellbotReadyGame], Optional[int]]:
+    """Load cached SpellBot games and the last-scanned message ID from MongoDB."""
+    doc = await spellbot_scan_cache.find_one(
+        {"bracket_id": bracket_id, "month": month}
+    )
+    if not doc:
+        return [], None
+
+    last_message_id: Optional[int] = doc.get("last_message_id")
+    cached_games: List[SpellbotReadyGame] = []
+    for g in doc.get("games", []):
+        try:
+            cached_games.append(
+                SpellbotReadyGame(
+                    message_id=int(g["message_id"]),
+                    channel_id=int(g["channel_id"]),
+                    ready_ts=float(g["ready_ts"]),
+                    player_ids=[int(x) for x in g["player_ids"]],
+                    handles_norm=list(g["handles_norm"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    _log(
+        f"[online-sync] Loaded scan cache for {bracket_id}/{month}: "
+        f"{len(cached_games)} cached games, last_message_id={last_message_id}."
+    )
+    return cached_games, last_message_id
+
+
+async def _save_scan_cache(
+    bracket_id: str,
+    month: str,
+    games: List[SpellbotReadyGame],
+    last_message_id: Optional[int],
+) -> None:
+    """Upsert the SpellBot scan cache document for a bracket/month."""
+    serialized = [
+        {
+            "message_id": g.message_id,
+            "channel_id": g.channel_id,
+            "ready_ts": g.ready_ts,
+            "player_ids": g.player_ids,
+            "handles_norm": g.handles_norm,
+        }
+        for g in games
+    ]
+    await spellbot_scan_cache.update_one(
+        {"bracket_id": bracket_id, "month": month},
+        {
+            "$set": {
+                "last_message_id": last_message_id,
+                "games": serialized,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$setOnInsert": {
+                "bracket_id": bracket_id,
+                "month": month,
+            },
+        },
+        upsert=True,
+    )
+    _log(
+        f"[online-sync] Saved scan cache for {bracket_id}/{month}: "
+        f"{len(games)} games, last_message_id={last_message_id}."
+    )
+
+
 class TopdeckOnlineSyncCog(commands.Cog):
     """
     Mod-only command to rebuild 'online game' stats for the current month.
@@ -672,8 +768,35 @@ class TopdeckOnlineSyncCog(commands.Cog):
         
         async with self._lock:
             try:
-                # 1) Scan SpellBot ready games in this guild
-                spellbot_games = await _scan_spellbot_ready_games(guild)
+                # 0) Load SpellBot scan cache for incremental scanning
+                cached_games, last_message_id = await _load_scan_cache(
+                    TOPDECK_BRACKET_ID, month_str
+                )
+
+                # 1) Scan SpellBot ready games (incremental if cache exists)
+                new_games, new_max_id = await _scan_spellbot_ready_games(
+                    guild, after_message_id=last_message_id
+                )
+
+                # Combine cached + new games, dedup by message_id
+                seen_ids: set[int] = set()
+                spellbot_games: List[SpellbotReadyGame] = []
+                for g in cached_games + new_games:
+                    if g.message_id not in seen_ids:
+                        seen_ids.add(g.message_id)
+                        spellbot_games.append(g)
+
+                # Determine the new checkpoint (highest message ID overall)
+                checkpoint_id = last_message_id
+                if new_max_id is not None:
+                    checkpoint_id = new_max_id
+                elif last_message_id is not None:
+                    checkpoint_id = last_message_id
+
+                _log(
+                    f"[online-sync] SpellBot games: {len(cached_games)} cached + "
+                    f"{len(new_games)} new = {len(spellbot_games)} total."
+                )
 
                 # 2) Fetch TopDeck matches for this month
                 topdeck_matches = await _fetch_topdeck_matches_for_month()
@@ -716,6 +839,11 @@ class TopdeckOnlineSyncCog(commands.Cog):
                     "per_player_online": per_player_online,
                 }
                 await _save_online_stats_to_db(payload)
+
+                # 6) Save SpellBot scan cache for next incremental run
+                await _save_scan_cache(
+                    TOPDECK_BRACKET_ID, month_str, spellbot_games, checkpoint_id
+                )
 
                 _log(
                     f"[online-sync] {_now_iso()} run_sync finished. "
@@ -780,8 +908,31 @@ class TopdeckOnlineSyncCog(commands.Cog):
             try:
                 guild = ctx.guild
 
-                # 1) Scan SpellBot ready games in this guild
-                spellbot_games = await _scan_spellbot_ready_games(guild)
+                # 0) Load SpellBot scan cache for incremental scanning
+                cached_games, last_message_id = await _load_scan_cache(
+                    TOPDECK_BRACKET_ID, month_str
+                )
+
+                # 1) Scan SpellBot ready games (incremental if cache exists)
+                new_games, new_max_id = await _scan_spellbot_ready_games(
+                    guild, after_message_id=last_message_id
+                )
+
+                # Combine cached + new games, dedup by message_id
+                seen_ids: set[int] = set()
+                spellbot_games: List[SpellbotReadyGame] = []
+                for g in cached_games + new_games:
+                    if g.message_id not in seen_ids:
+                        seen_ids.add(g.message_id)
+                        spellbot_games.append(g)
+
+                # Determine the new checkpoint
+                checkpoint_id = new_max_id if new_max_id is not None else last_message_id
+
+                _log(
+                    f"[online-sync] SpellBot games: {len(cached_games)} cached + "
+                    f"{len(new_games)} new = {len(spellbot_games)} total."
+                )
 
                 # 2) Fetch TopDeck matches for this month
                 topdeck_matches = await _fetch_topdeck_matches_for_month()
@@ -824,6 +975,11 @@ class TopdeckOnlineSyncCog(commands.Cog):
                     "per_player_online": per_player_online,
                 }
                 await _save_online_stats_to_db(payload)
+
+                # 6) Save SpellBot scan cache for next incremental run
+                await _save_scan_cache(
+                    TOPDECK_BRACKET_ID, month_str, spellbot_games, checkpoint_id
+                )
 
             except Exception as e:
                 _log(f"[online-sync] Error during sync: {type(e).__name__}: {e}")
