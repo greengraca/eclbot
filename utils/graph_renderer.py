@@ -47,23 +47,28 @@ def _save(fig) -> io.BytesIO:
     return buf
 
 
-def render_points_rank(
-    months: List[str],
+# ---------------------------------------------------------------------------
+# Day-by-day charts (current month)
+# ---------------------------------------------------------------------------
+
+def render_daily_points_rank(
+    days: List[int],
     points: List[float],
     ranks: List[int],
     player_name: str,
+    month_label: str,
 ) -> io.BytesIO:
-    """Dual-axis line chart: points (left, blue) and rank (right, orange inverted)."""
+    """Dual-axis line chart: points & rank by day within a month."""
     fig, ax1 = plt.subplots(figsize=(10, 5))
     _apply_dark_style(ax1, fig)
 
-    x = range(len(months))
+    x = range(len(days))
+    day_labels = [f"Day {d}" for d in days]
 
     # Points line (left Y)
     line1 = ax1.plot(x, points, color=ACCENT, marker="o", linewidth=2, markersize=6, label="Points")
     ax1.set_ylabel("Points", color=ACCENT, fontsize=11)
     ax1.tick_params(axis="y", labelcolor=ACCENT)
-    ax1.set_xlabel("")
 
     # Rank line (right Y, inverted)
     ax2 = ax1.twinx()
@@ -75,13 +80,42 @@ def render_points_rank(
     ax2.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     ax1.set_xticks(list(x))
-    ax1.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
+    ax1.set_xticklabels(day_labels, rotation=45, ha="right", fontsize=9, color=FG)
 
     lines = line1 + line2
     labels = [l.get_label() for l in lines]
     ax1.legend(lines, labels, loc="upper left", facecolor=BG, edgecolor=GRID, labelcolor=FG)
 
-    ax1.set_title(f"{player_name} \u2014 Points & Rank Progression", fontsize=13, color=FG, pad=12)
+    ax1.set_title(f"{player_name} \u2014 Points & Rank ({month_label})", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)
+
+
+def render_daily_winrate(
+    days: List[int],
+    win_pcts: List[float],
+    player_name: str,
+    month_label: str,
+) -> io.BytesIO:
+    """Line chart: cumulative win rate by day within a month."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    _apply_dark_style(ax, fig)
+
+    x = range(len(days))
+    pcts = [p * 100 for p in win_pcts]
+    day_labels = [f"Day {d}" for d in days]
+
+    ax.plot(x, pcts, color=ACCENT, marker="o", linewidth=2, markersize=6)
+    ax.fill_between(x, pcts, alpha=0.15, color=ACCENT)
+    ax.axhline(y=50, color=DRAW, linestyle="--", linewidth=1, alpha=0.7, label="50%")
+
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("Win Rate %", fontsize=11)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(day_labels, rotation=45, ha="right", fontsize=9, color=FG)
+
+    ax.legend(loc="upper right", facecolor=BG, edgecolor=GRID, labelcolor=FG)
+    ax.set_title(f"{player_name} \u2014 Win Rate ({month_label})", fontsize=13, color=FG, pad=12)
 
     return _save(fig)
 
@@ -114,33 +148,6 @@ def render_daily_activity(
 
     ax.legend(loc="upper right", facecolor=BG, edgecolor=GRID, labelcolor=FG)
     ax.set_title(f"{player_name} \u2014 Daily Activity ({month_label})", fontsize=13, color=FG, pad=12)
-
-    return _save(fig)
-
-
-def render_win_rate_trend(
-    months: List[str],
-    win_pcts: List[float],
-    player_name: str,
-) -> io.BytesIO:
-    """Line chart: win rate 0-100% with 50% reference line."""
-    fig, ax = plt.subplots(figsize=(10, 5))
-    _apply_dark_style(ax, fig)
-
-    x = range(len(months))
-    pcts = [p * 100 for p in win_pcts]
-
-    ax.plot(x, pcts, color=ACCENT, marker="o", linewidth=2, markersize=6)
-    ax.fill_between(x, pcts, alpha=0.15, color=ACCENT)
-    ax.axhline(y=50, color=DRAW, linestyle="--", linewidth=1, alpha=0.7, label="50%")
-
-    ax.set_ylim(0, 100)
-    ax.set_ylabel("Win Rate %", fontsize=11)
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
-
-    ax.legend(loc="upper right", facecolor=BG, edgecolor=GRID, labelcolor=FG)
-    ax.set_title(f"{player_name} \u2014 Win Rate Trend", fontsize=13, color=FG, pad=12)
 
     return _save(fig)
 
@@ -199,5 +206,72 @@ def render_season_record(
     ax.text(0, 0, f"{total}\ngames", ha="center", va="center", fontsize=18, fontweight="bold", color=FG)
 
     ax.set_title(f"{player_name} \u2014 Season Record ({month_label})", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)
+
+
+# ---------------------------------------------------------------------------
+# All-Time (month-by-month) charts
+# ---------------------------------------------------------------------------
+
+def render_points_rank_alltime(
+    months: List[str],
+    points: List[float],
+    ranks: List[int],
+    player_name: str,
+) -> io.BytesIO:
+    """Dual-axis line chart: points & rank month-by-month (all time)."""
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+    _apply_dark_style(ax1, fig)
+
+    x = range(len(months))
+
+    line1 = ax1.plot(x, points, color=ACCENT, marker="o", linewidth=2, markersize=6, label="Points")
+    ax1.set_ylabel("Points", color=ACCENT, fontsize=11)
+    ax1.tick_params(axis="y", labelcolor=ACCENT)
+
+    ax2 = ax1.twinx()
+    ax2.set_facecolor("none")
+    line2 = ax2.plot(x, ranks, color=RANK_COLOR, marker="s", linewidth=2, markersize=6, linestyle="--", label="Rank")
+    ax2.set_ylabel("Rank", color=RANK_COLOR, fontsize=11)
+    ax2.tick_params(axis="y", labelcolor=RANK_COLOR)
+    ax2.invert_yaxis()
+    ax2.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax1.set_xticks(list(x))
+    ax1.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
+
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc="upper left", facecolor=BG, edgecolor=GRID, labelcolor=FG)
+
+    ax1.set_title(f"{player_name} \u2014 All-Time Points & Rank", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)
+
+
+def render_winrate_alltime(
+    months: List[str],
+    win_pcts: List[float],
+    player_name: str,
+) -> io.BytesIO:
+    """Line chart: win rate month-by-month (all time)."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    _apply_dark_style(ax, fig)
+
+    x = range(len(months))
+    pcts = [p * 100 for p in win_pcts]
+
+    ax.plot(x, pcts, color=ACCENT, marker="o", linewidth=2, markersize=6)
+    ax.fill_between(x, pcts, alpha=0.15, color=ACCENT)
+    ax.axhline(y=50, color=DRAW, linestyle="--", linewidth=1, alpha=0.7, label="50%")
+
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("Win Rate %", fontsize=11)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
+
+    ax.legend(loc="upper right", facecolor=BG, edgecolor=GRID, labelcolor=FG)
+    ax.set_title(f"{player_name} \u2014 All-Time Win Rate", fontsize=13, color=FG, pad=12)
 
     return _save(fig)
