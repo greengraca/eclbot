@@ -802,3 +802,41 @@ async def get_daily_games(
     log_sync(f"[graphs] get_daily_games: total_pods={total_pods}, matched={matched_pods}, "
              f"days_with_games={len(daily)}")
     return daily
+
+
+def get_league_daily_activity(
+    matches: List[Match],
+) -> Dict[int, Dict[str, int]]:
+    """Bucket league-wide wins/losses/draws by day-of-month. Each match = 1 result.
+
+    A completed match produces either 1 win + 1 loss, or N draws (if _DRAW_).
+    Only completed matches are counted.
+    """
+    daily: Dict[int, Dict[str, int]] = {}
+    counted = 0
+
+    for m in matches:
+        if not _is_valid_completed_match(m):
+            continue
+
+        ts = _normalize_ts(m.start)
+        if ts is None:
+            continue
+
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(LISBON_TZ)
+        day = dt.day
+
+        if day not in daily:
+            daily[day] = {"wins": 0, "losses": 0, "draws": 0}
+
+        counted += 1
+
+        if m.winner == "_DRAW_":
+            daily[day]["draws"] += len(m.es)
+        elif m.winner is not None:
+            daily[day]["wins"] += 1
+            daily[day]["losses"] += len(m.es) - 1
+
+    log_sync(f"[graphs] get_league_daily_activity: {counted} completed matches, "
+             f"{len(daily)} days with games")
+    return daily

@@ -43,6 +43,7 @@ INITIAL_EXTENSIONS = [
     "cogs.debug_cog",
     "cogs.stats_cog",
     "cogs.graphs_cog",
+    "cogs.league_graphs_cog",
 ]
 
 _MONGO_BOOTSTRAPPED = False
