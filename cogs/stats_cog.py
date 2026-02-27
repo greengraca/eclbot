@@ -60,18 +60,21 @@ def _fmt_map(conf: str, key: str = "", detail: str = "") -> str:
 
 
 def _rank_of_row(rows: List[PlayerRow], target: PlayerRow) -> Optional[int]:
-    # Rank among non-dropped by points, then games.
-    active = [r for r in rows if not getattr(r, "dropped", False)]
-    active = sorted(active, key=lambda r: (-float(getattr(r, "pts", 0.0) or 0.0), -int(getattr(r, "games", 0) or 0)))
+    # Rank ALL players (including dropped) by pts → ow_pct → win_pct to match TopDeck.gg
+    ranked = sorted(rows, key=lambda r: (
+        -float(getattr(r, "pts", 0.0) or 0.0),
+        -float(getattr(r, "ow_pct", 0.0) or 0.0),
+        -float(getattr(r, "win_pct", 0.0) or 0.0),
+    ))
 
     tuid = (getattr(target, "uid", None) or "").strip()
     if tuid:
-        for i, r in enumerate(active, start=1):
+        for i, r in enumerate(ranked, start=1):
             if (getattr(r, "uid", None) or "").strip() == tuid:
                 return i
 
     # fallback: object identity
-    for i, r in enumerate(active, start=1):
+    for i, r in enumerate(ranked, start=1):
         if r is target:
             return i
     return None
