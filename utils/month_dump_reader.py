@@ -699,9 +699,9 @@ def compute_daily_progression(
         games = target_stats["games"]
         win_pct = (target_stats["wins"] / games) if games > 0 else 0.0
 
-        # Rank among players with games
+        # Rank ALL entrants (including 0-game) to match TopDeck.gg
         ranked = sorted(
-            [eid for eid in points if stats.get(eid, {}).get("games", 0) > 0],
+            points.keys(),
             key=lambda eid: (-points.get(eid, 0), -stats.get(eid, {}).get("games", 0)),
         )
         rank = None
