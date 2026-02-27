@@ -10,3 +10,4 @@ dnspython==2.7.0
 tzdata
 colorama
 cryptography
+matplotlib>=3.8

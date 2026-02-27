@@ -25,6 +25,7 @@ from topdeck_fetch import (
     _fetch_json,
     _get_firestore_doc_url,
     _parse_tournament_fields,
+    _extract_entrant_to_uid,
     _extract_matches_all_seasons,
     _is_in_progress_match,
     _is_valid_completed_match,
@@ -251,6 +252,7 @@ async def dump_topdeck_month_to_mongo(
         doc = await _fetch_json(session, doc_url, token=firebase_id_token)
 
     fields = _parse_tournament_fields(doc)
+    entrant_to_uid = _extract_entrant_to_uid(fields)
     matches: List[Match] = _extract_matches_all_seasons(fields)
 
     month_matches: List[Match] = []
@@ -292,6 +294,7 @@ async def dump_topdeck_month_to_mongo(
             "excluded_in_progress": excluded_in_progress,
             "excluded_invalid_completed": excluded_invalid_completed,
         },
+        "entrant_to_uid": {str(k): v for k, v in entrant_to_uid.items()},
         "players": players,
         "matches": [
             {

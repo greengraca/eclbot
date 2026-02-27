@@ -42,6 +42,7 @@ INITIAL_EXTENSIONS = [
     "cogs.topdeck_month_dump",
     "cogs.debug_cog",
     "cogs.stats_cog",
+    "cogs.graphs_cog",
 ]
 
 _MONGO_BOOTSTRAPPED = False
