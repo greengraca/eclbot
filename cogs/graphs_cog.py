@@ -29,6 +29,7 @@ from utils.logger import log_sync, log_warn
 from utils.month_dump_reader import (
     get_live_matches,
     get_player_history,
+    get_historical_months,
     get_daily_activity_from_matches,
     compute_daily_progression,
     _get_current_month_matches,
@@ -317,7 +318,10 @@ class GraphsCog(commands.Cog):
 
     async def _chart_points_rank_alltime(self, rows, row, uid, name, mk, ml):
         history = []
+        available_months = 0
         if uid:
+            all_months = await get_historical_months()
+            available_months = len(all_months)
             history = await get_player_history(uid, firebase_id_token=FIREBASE_ID_TOKEN)
 
         # Append current month from live data
@@ -343,7 +347,13 @@ class GraphsCog(commands.Cog):
                 "Historical data will appear after month dumps are saved."
             )
         else:
-            emb.description = f"Showing **{len(history)}** months of data"
+            desc = f"Showing **{len(history)}** months of data"
+            # historical history = len(history) - 1 (excluding current month)
+            historical_count = len(history) - 1
+            if available_months > 0 and historical_count < available_months:
+                desc += (f"\n*Note: data available for {available_months} months, "
+                         f"but only {historical_count} had records for this player.*")
+            emb.description = desc
         return buf, "points_rank_alltime.png", emb
 
     # ------------------------------------------------------------------
@@ -352,7 +362,10 @@ class GraphsCog(commands.Cog):
 
     async def _chart_winrate_alltime(self, row, uid, name, mk, ml):
         history = []
+        available_months = 0
         if uid:
+            all_months = await get_historical_months()
+            available_months = len(all_months)
             history = await get_player_history(uid, firebase_id_token=FIREBASE_ID_TOKEN)
 
         current = {
@@ -375,10 +388,15 @@ class GraphsCog(commands.Cog):
                 "Historical data will appear after month dumps are saved."
             )
         else:
-            emb.description = (
+            desc = (
                 f"Showing **{len(history)}** months \u2014 "
                 f"Current: **{current_pct:.1f}%**"
             )
+            historical_count = len(history) - 1
+            if available_months > 0 and historical_count < available_months:
+                desc += (f"\n*Note: data available for {available_months} months, "
+                         f"but only {historical_count} had records for this player.*")
+            emb.description = desc
         return buf, "win_rate_alltime.png", emb
 
 

@@ -3,13 +3,22 @@
 Reassembles chunked dumps from MongoDB and computes per-player stats
 across multiple months. Also provides current-month daily breakdowns
 using the live TopDeck match cache.
+
+Caching strategy (all module-level, bounded):
+  - _DUMP_CACHE: reassembled JSON payloads, keyed by (bracket_id, month, run_id),
+    max 12 entries, 1-hour TTL. Historical dumps are immutable once saved.
+  - _STANDINGS_CACHE: computed standings tuples, keyed by (bracket_id, month),
+    max 12 entries, 1-hour TTL.
+  - _E2U_MODULE_CACHE: entrant_to_uid API results, keyed by bracket_id,
+    2-hour TTL. No lock needed (single event loop).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections import defaultdict
+import time
+from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +39,28 @@ from topdeck_fetch import (
 )
 from utils.dates import LISBON_TZ, current_month_key
 from utils.logger import log_sync, log_warn
+
+
+# ---------------------------------------------------------------------------
+# Module-level caches
+# ---------------------------------------------------------------------------
+
+_DUMP_CACHE_MAX = 12
+_DUMP_CACHE_TTL = 3600  # 1 hour
+_DUMP_CACHE: OrderedDict[Tuple[str, str, str], Tuple[Dict[str, Any], float]] = OrderedDict()
+_DUMP_CACHE_LOCK = asyncio.Lock()
+
+_STANDINGS_CACHE_MAX = 12
+_STANDINGS_CACHE_TTL = 3600  # 1 hour
+# Value: (points, stats_without_opponents, win_pct, month_str, all_entrant_ids, timestamp)
+_STANDINGS_CACHE: OrderedDict[
+    Tuple[str, str],
+    Tuple[Dict[int, float], Dict[int, Dict[str, int]], Dict[int, float], str, set, float],
+] = OrderedDict()
+_STANDINGS_CACHE_LOCK = asyncio.Lock()
+
+_E2U_CACHE_TTL = 7200  # 2 hours
+_E2U_MODULE_CACHE: Dict[str, Tuple[Dict[int, str], float]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +92,7 @@ async def get_historical_months(
                     "latest_run_id": {"$first": "$_id"},
                     "run_id": {"$first": "$run_id"},
                     "created_at": {"$first": "$created_at"},
+                    "chunk_count": {"$first": "$chunk_count"},
                 }
             },
             {"$sort": {"_id.month": 1}},
@@ -72,6 +104,7 @@ async def get_historical_months(
                 "month": doc["_id"]["month"],
                 "run_doc_id": doc["latest_run_id"],
                 "run_id": doc.get("run_id"),
+                "chunk_count": doc.get("chunk_count"),
                 "source": "runs",
             })
         log_sync(f"[graphs] get_historical_months bracket={bracket_id!r}: "
@@ -126,6 +159,9 @@ async def get_historical_months(
 async def reassemble_month_dump(month_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Load chunks for a month and reassemble the full payload.
 
+    Uses a module-level LRU cache (max 12 entries, 1-hour TTL) since
+    historical dumps are immutable once saved.
+
     Supports both:
       - run_doc_id lookup (when discovered from runs collection)
       - bracket_id + month + run_id lookup (when discovered from chunks)
@@ -134,6 +170,22 @@ async def reassemble_month_dump(month_info: Dict[str, Any]) -> Optional[Dict[str
     run_id = month_info.get("run_id")
     bracket_id = month_info.get("bracket_id")
     month = month_info.get("month")
+    expected_chunks = month_info.get("chunk_count")
+
+    # Build cache key — use bracket_id + month + run_id for stable keying
+    cache_key = (bracket_id or "", month or "", str(run_id or run_doc_id or ""))
+
+    # Check cache
+    async with _DUMP_CACHE_LOCK:
+        if cache_key in _DUMP_CACHE:
+            payload, cached_at = _DUMP_CACHE[cache_key]
+            if time.monotonic() - cached_at < _DUMP_CACHE_TTL:
+                _DUMP_CACHE.move_to_end(cache_key)
+                log_sync(f"[graphs] reassemble_month_dump: cache HIT for "
+                         f"bracket={bracket_id} month={month}")
+                return payload
+            else:
+                del _DUMP_CACHE[cache_key]
 
     # Build query
     if run_doc_id is not None:
@@ -158,15 +210,107 @@ async def reassemble_month_dump(month_info: Dict[str, Any]) -> Optional[Dict[str
         log_warn(f"[graphs] reassemble_month_dump: no chunks for {desc}")
         return None
 
+    if expected_chunks is not None and len(chunks) != expected_chunks:
+        log_warn(f"[graphs] reassemble_month_dump: chunk count mismatch for {desc}: "
+                 f"expected={expected_chunks}, actual={len(chunks)}")
+
     try:
         payload = json.loads("".join(chunks))
         log_sync(f"[graphs] reassemble_month_dump: OK ({desc}), month={payload.get('month')}, "
                  f"matches={len(payload.get('matches', []))}, "
                  f"has_entrant_to_uid={'entrant_to_uid' in payload}")
-        return payload
     except (json.JSONDecodeError, TypeError) as e:
         log_warn(f"[graphs] reassemble_month_dump: JSON parse error for {desc}: {e}")
         return None
+
+    # Store in cache
+    async with _DUMP_CACHE_LOCK:
+        _DUMP_CACHE[cache_key] = (payload, time.monotonic())
+        _DUMP_CACHE.move_to_end(cache_key)
+        while len(_DUMP_CACHE) > _DUMP_CACHE_MAX:
+            _DUMP_CACHE.popitem(last=False)
+
+    return payload
+
+
+def _rebuild_matches_from_dump(dump: Dict[str, Any]) -> List[Match]:
+    """Rebuild Match objects from a dump payload."""
+    raw_matches = dump.get("matches", [])
+    matches: List[Match] = []
+    for rm in raw_matches:
+        matches.append(Match(
+            season=int(rm.get("season", 0)),
+            id=int(rm.get("table", 0)),
+            start=rm.get("start"),
+            end=rm.get("end"),
+            es=list(rm.get("es", [])),
+            winner=rm.get("winner"),
+            raw=rm.get("raw", {}),
+        ))
+    return matches
+
+
+def _gather_all_entrant_ids(e2u: Dict[str, str], matches: List[Match]) -> set:
+    """Gather all entrant IDs from entrant_to_uid mapping and matches."""
+    all_entrant_ids = set()
+    for eid_str in e2u:
+        all_entrant_ids.add(int(eid_str))
+    for m in matches:
+        for eid in m.es:
+            all_entrant_ids.add(eid)
+    return all_entrant_ids
+
+
+def _compute_standings_cacheable(
+    matches: List[Match], all_entrant_ids: set
+) -> Tuple[Dict[int, float], Dict[int, Dict[str, int]], Dict[int, float]]:
+    """Compute standings and return a cache-friendly tuple (no opponent sets)."""
+    points, stats, win_pct, _ = _compute_standings(matches, all_entrant_ids)
+    # Strip opponent sets to save memory in cache
+    stats_clean = {}
+    for eid, s in stats.items():
+        stats_clean[eid] = {
+            "games": s["games"],
+            "wins": s["wins"],
+            "draws": s["draws"],
+            "losses": s["losses"],
+        }
+    return points, stats_clean, win_pct
+
+
+def _extract_player_stats(
+    points: Dict[int, float],
+    stats: Dict[int, Dict[str, int]],
+    win_pct: Dict[int, float],
+    all_entrant_ids: set,
+    target_entrant: int,
+    month_str: str,
+) -> Dict[str, Any]:
+    """Extract a single player's stats from pre-computed standings."""
+    s = stats.get(target_entrant, {"games": 0, "wins": 0, "draws": 0, "losses": 0})
+    games = int(s.get("games", 0))
+
+    # Compute rank among players who have games, sorted by pts
+    ranked_with_games = sorted(
+        [eid for eid in all_entrant_ids if int(stats.get(eid, {}).get("games", 0)) > 0],
+        key=lambda eid: (-float(points.get(eid, 0)), -int(stats.get(eid, {}).get("games", 0))),
+    )
+    rank = None
+    for i, eid in enumerate(ranked_with_games, start=1):
+        if eid == target_entrant:
+            rank = i
+            break
+
+    return {
+        "month": month_str,
+        "pts": float(points.get(target_entrant, 0)),
+        "rank": rank,
+        "games": games,
+        "wins": int(s.get("wins", 0)),
+        "losses": int(s.get("losses", 0)),
+        "draws": int(s.get("draws", 0)),
+        "win_pct": float(win_pct.get(target_entrant, 0.0)),
+    }
 
 
 def compute_player_month_stats(dump: Dict[str, Any], target_uid: str) -> Optional[Dict[str, Any]]:
@@ -185,54 +329,38 @@ def compute_player_month_stats(dump: Dict[str, Any], target_uid: str) -> Optiona
     if target_entrant is None:
         return None
 
-    # Rebuild Match objects
-    raw_matches = dump.get("matches", [])
-    matches: List[Match] = []
-    for rm in raw_matches:
-        matches.append(Match(
-            season=int(rm.get("season", 0)),
-            id=int(rm.get("table", 0)),
-            start=rm.get("start"),
-            end=rm.get("end"),
-            es=list(rm.get("es", [])),
-            winner=rm.get("winner"),
-            raw=rm.get("raw", {}),
-        ))
+    matches = _rebuild_matches_from_dump(dump)
+    all_entrant_ids = _gather_all_entrant_ids(e2u, matches)
+    points, stats, win_pct = _compute_standings_cacheable(matches, all_entrant_ids)
 
-    # Gather all entrant IDs
-    all_entrant_ids = set()
-    for eid_str in e2u:
-        all_entrant_ids.add(int(eid_str))
-    for m in matches:
-        for eid in m.es:
-            all_entrant_ids.add(eid)
-
-    points, stats, win_pct, _ = _compute_standings(matches, all_entrant_ids)
-
-    s = stats.get(target_entrant, {"games": 0, "wins": 0, "draws": 0, "losses": 0})
-    games = int(s.get("games", 0))
-
-    # Compute rank among players who have games, sorted by pts
-    ranked_with_games = sorted(
-        [eid for eid in all_entrant_ids if int(stats.get(eid, {}).get("games", 0)) > 0],
-        key=lambda eid: (-float(points.get(eid, 0)), -int(stats.get(eid, {}).get("games", 0))),
+    return _extract_player_stats(
+        points, stats, win_pct, all_entrant_ids,
+        target_entrant, dump.get("month", ""),
     )
-    rank = None
-    for i, eid in enumerate(ranked_with_games, start=1):
-        if eid == target_entrant:
-            rank = i
+
+
+def _compute_player_month_stats_from_cached(
+    points: Dict[int, float],
+    stats: Dict[int, Dict[str, int]],
+    win_pct: Dict[int, float],
+    all_entrant_ids: set,
+    month_str: str,
+    e2u: Dict[str, str],
+    target_uid: str,
+) -> Optional[Dict[str, Any]]:
+    """Extract player stats from pre-computed (cached) standings."""
+    target_entrant = None
+    for eid_str, uid in e2u.items():
+        if uid == target_uid:
+            target_entrant = int(eid_str)
             break
 
-    return {
-        "month": dump.get("month", ""),
-        "pts": float(points.get(target_entrant, 0)),
-        "rank": rank,
-        "games": games,
-        "wins": int(s.get("wins", 0)),
-        "losses": int(s.get("losses", 0)),
-        "draws": int(s.get("draws", 0)),
-        "win_pct": float(win_pct.get(target_entrant, 0.0)),
-    }
+    if target_entrant is None:
+        return None
+
+    return _extract_player_stats(
+        points, stats, win_pct, all_entrant_ids, target_entrant, month_str,
+    )
 
 
 async def _fetch_entrant_to_uid_for_bracket(
@@ -258,6 +386,23 @@ async def _fetch_entrant_to_uid_for_bracket(
         return {}
 
 
+def _get_cached_e2u(bracket_id: str) -> Optional[Dict[int, str]]:
+    """Check module-level e2u cache. Returns mapping or None if miss/expired."""
+    entry = _E2U_MODULE_CACHE.get(bracket_id)
+    if entry is None:
+        return None
+    mapping, cached_at = entry
+    if time.monotonic() - cached_at >= _E2U_CACHE_TTL:
+        del _E2U_MODULE_CACHE[bracket_id]
+        return None
+    return mapping
+
+
+def _set_cached_e2u(bracket_id: str, mapping: Dict[int, str]) -> None:
+    """Store e2u mapping in module-level cache."""
+    _E2U_MODULE_CACHE[bracket_id] = (mapping, time.monotonic())
+
+
 async def get_player_history(
     target_uid: str,
     bracket_id: Optional[str] = None,
@@ -268,6 +413,9 @@ async def get_player_history(
 
     If bracket_id is None, searches across all brackets (the league
     bracket_id changes each season/month).
+
+    Returns a list of per-month stat dicts. Also logs a summary if any
+    months failed to load.
     """
     months = await get_historical_months(bracket_id)
     months = months[-max_months:]
@@ -276,34 +424,90 @@ async def get_player_history(
              f"processing {len(months)} months")
 
     sem = asyncio.Semaphore(3)
-    # Cache fetched entrant_to_uid per bracket_id to avoid duplicate API calls
-    _e2u_cache: Dict[str, Dict[int, str]] = {}
+    failed_months: List[str] = []
 
     async def _process_month(month_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         async with sem:
+            m_bracket = month_info.get("bracket_id", "")
+            m_month = month_info.get("month", "")
+
             dump = await reassemble_month_dump(month_info)
             if dump is None:
+                failed_months.append(m_month)
                 return None
 
-            # If dump is missing entrant_to_uid, try fetching from API
+            # If dump is missing entrant_to_uid, try module cache then API
             if not dump.get("entrant_to_uid"):
-                bid = dump.get("bracket_id") or month_info.get("bracket_id")
+                bid = dump.get("bracket_id") or m_bracket
                 if bid:
-                    if bid not in _e2u_cache:
-                        _e2u_cache[bid] = await _fetch_entrant_to_uid_for_bracket(
+                    cached_e2u = _get_cached_e2u(bid)
+                    if cached_e2u is not None:
+                        e2u = cached_e2u
+                        log_sync(f"[graphs] e2u module cache HIT for bracket={bid}")
+                    else:
+                        e2u = await _fetch_entrant_to_uid_for_bracket(
                             bid, firebase_id_token
                         )
-                    e2u = _e2u_cache[bid]
+                        if e2u:
+                            _set_cached_e2u(bid, e2u)
                     if e2u:
                         dump["entrant_to_uid"] = {str(k): v for k, v in e2u.items()}
 
-            return await asyncio.to_thread(compute_player_month_stats, dump, target_uid)
+            e2u = dump.get("entrant_to_uid")
+            if not e2u:
+                failed_months.append(m_month)
+                return None
+
+            # Check standings cache
+            standings_key = (m_bracket, m_month)
+            async with _STANDINGS_CACHE_LOCK:
+                if standings_key in _STANDINGS_CACHE:
+                    cached = _STANDINGS_CACHE[standings_key]
+                    pts, sts, wpct, month_str, all_eids, cached_at = cached
+                    if time.monotonic() - cached_at < _STANDINGS_CACHE_TTL:
+                        _STANDINGS_CACHE.move_to_end(standings_key)
+                        log_sync(f"[graphs] standings cache HIT for {standings_key}")
+                        return _compute_player_month_stats_from_cached(
+                            pts, sts, wpct, all_eids, month_str, e2u, target_uid,
+                        )
+                    else:
+                        del _STANDINGS_CACHE[standings_key]
+
+            # Compute standings (CPU-heavy)
+            def _compute():
+                matches = _rebuild_matches_from_dump(dump)
+                all_eids = _gather_all_entrant_ids(e2u, matches)
+                pts, sts, wpct = _compute_standings_cacheable(matches, all_eids)
+                return pts, sts, wpct, all_eids
+
+            pts, sts, wpct, all_eids = await asyncio.to_thread(_compute)
+
+            # Cache standings
+            month_str = dump.get("month", m_month)
+            async with _STANDINGS_CACHE_LOCK:
+                _STANDINGS_CACHE[standings_key] = (
+                    pts, sts, wpct, month_str, all_eids, time.monotonic(),
+                )
+                _STANDINGS_CACHE.move_to_end(standings_key)
+                while len(_STANDINGS_CACHE) > _STANDINGS_CACHE_MAX:
+                    _STANDINGS_CACHE.popitem(last=False)
+
+            return _compute_player_month_stats_from_cached(
+                pts, sts, wpct, all_eids, month_str, e2u, target_uid,
+            )
 
     tasks = [_process_month(m) for m in months]
     results = await asyncio.gather(*tasks)
 
     history = [r for r in results if r is not None]
-    log_sync(f"[graphs] get_player_history uid={target_uid}: got stats for {len(history)}/{len(months)} months")
+
+    if failed_months:
+        log_warn(f"[graphs] get_player_history uid={target_uid}: "
+                 f"{len(failed_months)} months failed to load: {failed_months}")
+
+    log_sync(f"[graphs] get_player_history uid={target_uid}: "
+             f"got stats for {len(history)}/{len(months)} months"
+             f"{f' ({len(failed_months)} failed)' if failed_months else ''}")
     return history
 
 
@@ -420,7 +624,9 @@ def compute_daily_progression(
     Returns a list of dicts sorted by day, each with:
         {day, pts, rank, games, wins, losses, draws, win_pct}
 
-    Processes matches chronologically, computing standings after each day.
+    Uses incremental computation: a single pass through matches accumulating
+    running totals, with snapshots at the end of each day. This is O(matches)
+    instead of the previous O(days * matches) approach.
     """
     # Group matches by Lisbon day
     day_to_matches: Dict[int, List[Match]] = defaultdict(list)
@@ -435,23 +641,68 @@ def compute_daily_progression(
         log_sync(f"[graphs] compute_daily_progression: no matches bucketed for entrant={target_entrant_id}")
         return []
 
-    # Process day by day, accumulating matches
+    # Initialize running state for all entrants
+    points: Dict[int, float] = {eid: float(START_POINTS) for eid in all_entrant_ids}
+    stats: Dict[int, Dict[str, int]] = {
+        eid: {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+        for eid in all_entrant_ids
+    }
+
     sorted_days = sorted(day_to_matches.keys())
-    cumulative_matches: List[Match] = []
     progression: List[Dict[str, Any]] = []
 
     for day in sorted_days:
-        cumulative_matches.extend(day_to_matches[day])
+        # Process each match in this day incrementally
+        for m in day_to_matches[day]:
+            if not _is_valid_completed_match(m):
+                continue
 
-        points, stats, win_pct, _ = _compute_standings(cumulative_matches, all_entrant_ids)
+            # Ensure all match entrants are registered
+            for eid in m.es:
+                if eid not in points:
+                    points[eid] = float(START_POINTS)
+                    stats[eid] = {"games": 0, "wins": 0, "draws": 0, "losses": 0}
 
-        s = stats.get(target_entrant_id, {"games": 0, "wins": 0, "draws": 0, "losses": 0})
-        games = int(s.get("games", 0))
+            # Float staking (same logic as _compute_standings)
+            stakes = [{"eid": eid, "stake": points[eid] * WAGER_RATE} for eid in m.es]
+            pot = sum(x["stake"] for x in stakes)
+
+            for s in stakes:
+                points[s["eid"]] -= s["stake"]
+
+            if m.winner == "_DRAW_":
+                share = pot / len(m.es)
+                for eid in m.es:
+                    points[eid] += share
+                    stats[eid]["games"] += 1
+                    stats[eid]["draws"] += 1
+            else:
+                try:
+                    winner_eid = int(m.winner)
+                except (TypeError, ValueError):
+                    # Reverse the stakes since we're skipping this match
+                    for s in stakes:
+                        points[s["eid"]] += s["stake"]
+                    continue
+
+                points[winner_eid] = points.get(winner_eid, START_POINTS) + pot
+
+                for eid in m.es:
+                    stats[eid]["games"] += 1
+                    if eid == winner_eid:
+                        stats[eid]["wins"] += 1
+                    else:
+                        stats[eid]["losses"] += 1
+
+        # Snapshot at end of day
+        target_stats = stats.get(target_entrant_id, {"games": 0, "wins": 0, "draws": 0, "losses": 0})
+        games = target_stats["games"]
+        win_pct = (target_stats["wins"] / games) if games > 0 else 0.0
 
         # Rank among players with games
         ranked = sorted(
-            [eid for eid in all_entrant_ids if int(stats.get(eid, {}).get("games", 0)) > 0],
-            key=lambda eid: (-float(points.get(eid, 0)), -int(stats.get(eid, {}).get("games", 0))),
+            [eid for eid in points if stats.get(eid, {}).get("games", 0) > 0],
+            key=lambda eid: (-points.get(eid, 0), -stats.get(eid, {}).get("games", 0)),
         )
         rank = None
         for i, eid in enumerate(ranked, start=1):
@@ -464,10 +715,10 @@ def compute_daily_progression(
             "pts": float(points.get(target_entrant_id, START_POINTS)),
             "rank": rank,
             "games": games,
-            "wins": int(s.get("wins", 0)),
-            "losses": int(s.get("losses", 0)),
-            "draws": int(s.get("draws", 0)),
-            "win_pct": float(win_pct.get(target_entrant_id, 0.0)),
+            "wins": target_stats["wins"],
+            "losses": target_stats["losses"],
+            "draws": target_stats["draws"],
+            "win_pct": win_pct,
         })
 
     log_sync(f"[graphs] compute_daily_progression: entrant={target_entrant_id}, "
