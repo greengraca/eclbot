@@ -318,7 +318,7 @@ class GraphsCog(commands.Cog):
     async def _chart_points_rank_alltime(self, rows, row, uid, name, mk, ml):
         history = []
         if uid:
-            history = await get_player_history(uid)
+            history = await get_player_history(uid, firebase_id_token=FIREBASE_ID_TOKEN)
 
         # Append current month from live data
         rank = _rank_of_row(rows, row)
@@ -353,7 +353,7 @@ class GraphsCog(commands.Cog):
     async def _chart_winrate_alltime(self, row, uid, name, mk, ml):
         history = []
         if uid:
-            history = await get_player_history(uid)
+            history = await get_player_history(uid, firebase_id_token=FIREBASE_ID_TOKEN)
 
         current = {
             "month": mk,

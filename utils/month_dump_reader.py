@@ -22,6 +22,11 @@ from topdeck_fetch import (
     _is_valid_completed_match,
     get_cached_matches,
     _fetch_league_data_full,
+    _get_shared_session,
+    _fetch_json,
+    _get_firestore_doc_url,
+    _parse_tournament_fields,
+    _extract_entrant_to_uid,
 )
 from utils.dates import LISBON_TZ, current_month_key
 from utils.logger import log_sync, log_warn
@@ -230,10 +235,34 @@ def compute_player_month_stats(dump: Dict[str, Any], target_uid: str) -> Optiona
     }
 
 
+async def _fetch_entrant_to_uid_for_bracket(
+    bracket_id: str,
+    firebase_id_token: Optional[str] = None,
+) -> Dict[int, str]:
+    """Fetch entrant_to_uid mapping from Firestore for a given bracket.
+
+    Used as a fallback when historical dumps are missing the mapping.
+    """
+    try:
+        doc_url = _get_firestore_doc_url(bracket_id)
+        session = _get_shared_session()
+        doc = await _fetch_json(session, doc_url, token=firebase_id_token)
+        fields = _parse_tournament_fields(doc)
+        e2u = _extract_entrant_to_uid(fields)
+        log_sync(f"[graphs] _fetch_entrant_to_uid_for_bracket: bracket={bracket_id}, "
+                 f"got {len(e2u)} mappings")
+        return e2u
+    except Exception as e:
+        log_warn(f"[graphs] _fetch_entrant_to_uid_for_bracket: bracket={bracket_id}: "
+                 f"{type(e).__name__}: {e}")
+        return {}
+
+
 async def get_player_history(
     target_uid: str,
     bracket_id: Optional[str] = None,
     max_months: int = 12,
+    firebase_id_token: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Get per-month stats for a player across historical dumps.
 
@@ -247,12 +276,27 @@ async def get_player_history(
              f"processing {len(months)} months")
 
     sem = asyncio.Semaphore(3)
+    # Cache fetched entrant_to_uid per bracket_id to avoid duplicate API calls
+    _e2u_cache: Dict[str, Dict[int, str]] = {}
 
     async def _process_month(month_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         async with sem:
             dump = await reassemble_month_dump(month_info)
             if dump is None:
                 return None
+
+            # If dump is missing entrant_to_uid, try fetching from API
+            if not dump.get("entrant_to_uid"):
+                bid = dump.get("bracket_id") or month_info.get("bracket_id")
+                if bid:
+                    if bid not in _e2u_cache:
+                        _e2u_cache[bid] = await _fetch_entrant_to_uid_for_bracket(
+                            bid, firebase_id_token
+                        )
+                    e2u = _e2u_cache[bid]
+                    if e2u:
+                        dump["entrant_to_uid"] = {str(k): v for k, v in e2u.items()}
+
             return await asyncio.to_thread(compute_player_month_stats, dump, target_uid)
 
     tasks = [_process_month(m) for m in months]
