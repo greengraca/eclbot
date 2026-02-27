@@ -24,6 +24,7 @@ from utils.logger import log_sync, log_warn
 from utils.month_dump_reader import (
     get_live_matches,
     get_league_daily_activity,
+    get_league_monthly_aggregates,
     _get_current_month_matches,
 )
 from utils.graph_renderer import (
@@ -31,6 +32,9 @@ from utils.graph_renderer import (
     render_league_standings,
     render_league_points_distribution,
     render_league_games_distribution,
+    render_league_activity_alltime,
+    render_league_participation_alltime,
+    render_league_points_alltime,
 )
 
 
@@ -39,6 +43,9 @@ LEAGUE_CHART_CHOICES = [
     discord.OptionChoice("Standings Top 16", "standings"),
     discord.OptionChoice("Points Distribution", "points_dist"),
     discord.OptionChoice("Games Distribution", "games_dist"),
+    discord.OptionChoice("All-Time Activity", "activity_alltime"),
+    discord.OptionChoice("All-Time Participation", "participation_alltime"),
+    discord.OptionChoice("All-Time Points", "points_alltime"),
 ]
 
 
@@ -85,6 +92,12 @@ class LeagueGraphsCog(commands.Cog):
                 buf, filename, emb = await self._chart_points_distribution(ml)
             elif chart == "games_dist":
                 buf, filename, emb = await self._chart_games_distribution(ml)
+            elif chart == "activity_alltime":
+                buf, filename, emb = await self._chart_activity_alltime()
+            elif chart == "participation_alltime":
+                buf, filename, emb = await self._chart_participation_alltime()
+            elif chart == "points_alltime":
+                buf, filename, emb = await self._chart_points_alltime()
             else:
                 await safe_ctx_followup(ctx, "Unknown chart type.", ephemeral=True)
                 return
@@ -105,7 +118,8 @@ class LeagueGraphsCog(commands.Cog):
         if thumb_url.startswith(("http://", "https://")):
             emb.set_thumbnail(url=thumb_url)
 
-        emb.set_footer(text=f"ECL \u2022 {mk} \u2022 /leaguegraphs")
+        footer_label = "All Time" if chart.endswith("_alltime") else mk
+        emb.set_footer(text=f"ECL \u2022 {footer_label} \u2022 /leaguegraphs")
 
         await safe_ctx_followup(ctx, embed=emb, file=discord.File(buf, filename=filename))
 
@@ -126,7 +140,9 @@ class LeagueGraphsCog(commands.Cog):
 
     async def _chart_league_activity(self, mk, ml):
         matches, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+        log_sync(f"[leaguegraphs] league_activity: got {len(matches)} total matches from live data")
         month_matches, _, _ = _get_current_month_matches(matches, entrant_to_uid)
+        log_sync(f"[leaguegraphs] league_activity: filtered to {len(month_matches)} for current month ({mk})")
 
         daily = get_league_daily_activity(month_matches)
 
@@ -236,6 +252,87 @@ class LeagueGraphsCog(commands.Cog):
             f"Range: **{min(games_list)}** \u2013 **{max(games_list)}**"
         )
         return buf, "games_distribution.png", emb
+
+
+    # ------------------------------------------------------------------
+    # All-Time helpers
+    # ------------------------------------------------------------------
+
+    async def _fetch_aggregates(self):
+        """Fetch monthly aggregates, raise on empty."""
+        aggs = await get_league_monthly_aggregates(
+            bracket_id=None,
+            firebase_id_token=FIREBASE_ID_TOKEN,
+        )
+        if not aggs:
+            raise ValueError("No historical data available.")
+        return aggs
+
+    # ------------------------------------------------------------------
+    # Chart: All-Time Activity (bar)
+    # ------------------------------------------------------------------
+
+    async def _chart_activity_alltime(self):
+        aggs = await self._fetch_aggregates()
+
+        months = [a["month"] for a in aggs]
+        month_labels = [fmt_month_label(m) for m in months]
+        games = [a["total_games"] for a in aggs]
+
+        buf = await asyncio.to_thread(render_league_activity_alltime, month_labels, games)
+
+        total = sum(games)
+        emb = discord.Embed(title="\U0001f4c8 League Activity \u2014 All Time")
+        emb.description = (
+            f"**{total}** total games across **{len(aggs)}** months\n"
+            f"Peak: **{max(games)}** games ({month_labels[games.index(max(games))]})"
+        )
+        return buf, "league_activity_alltime.png", emb
+
+    # ------------------------------------------------------------------
+    # Chart: All-Time Participation (bar)
+    # ------------------------------------------------------------------
+
+    async def _chart_participation_alltime(self):
+        aggs = await self._fetch_aggregates()
+
+        months = [a["month"] for a in aggs]
+        month_labels = [fmt_month_label(m) for m in months]
+        players = [a["active_players"] for a in aggs]
+
+        buf = await asyncio.to_thread(render_league_participation_alltime, month_labels, players)
+
+        emb = discord.Embed(title="\U0001f465 Participation \u2014 All Time")
+        emb.description = (
+            f"Active players per month across **{len(aggs)}** months\n"
+            f"Peak: **{max(players)}** players ({month_labels[players.index(max(players))]})"
+        )
+        return buf, "league_participation_alltime.png", emb
+
+    # ------------------------------------------------------------------
+    # Chart: All-Time Points (line with shaded range)
+    # ------------------------------------------------------------------
+
+    async def _chart_points_alltime(self):
+        aggs = await self._fetch_aggregates()
+
+        months = [a["month"] for a in aggs]
+        month_labels = [fmt_month_label(m) for m in months]
+        avg_pts = [a["avg_pts"] for a in aggs]
+        min_pts = [a["min_pts"] for a in aggs]
+        max_pts = [a["max_pts"] for a in aggs]
+
+        buf = await asyncio.to_thread(
+            render_league_points_alltime, month_labels, avg_pts, min_pts, max_pts
+        )
+
+        emb = discord.Embed(title="\U0001f4ca Points Spread \u2014 All Time")
+        emb.description = (
+            f"Average, min & max points across **{len(aggs)}** months\n"
+            f"Latest avg: **{avg_pts[-1]:.0f}** pts "
+            f"(range: {min_pts[-1]:.0f}\u2013{max_pts[-1]:.0f})"
+        )
+        return buf, "league_points_alltime.png", emb
 
 
 def setup(bot: commands.Bot):

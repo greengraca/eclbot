@@ -372,3 +372,77 @@ def render_league_games_distribution(
     ax.set_title(f"ECL Games Distribution ({month_label})", fontsize=13, color=FG, pad=12)
 
     return _save(fig)
+
+
+# ---------------------------------------------------------------------------
+# League-wide all-time charts (/leaguegraphs all-time)
+# ---------------------------------------------------------------------------
+
+def render_league_activity_alltime(
+    months: List[str],
+    games_per_month: List[int],
+) -> io.BytesIO:
+    """Bar chart: total games per month across all historical months."""
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _apply_dark_style(ax, fig)
+
+    x = range(len(months))
+    ax.bar(x, games_per_month, color=ACCENT, width=0.7, alpha=0.9)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
+    ax.set_xlabel("Month", fontsize=11)
+    ax.set_ylabel("Total Games", fontsize=11)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax.set_title("ECL League Activity \u2014 All Time", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)
+
+
+def render_league_participation_alltime(
+    months: List[str],
+    player_counts: List[int],
+) -> io.BytesIO:
+    """Bar chart: active player count per month."""
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _apply_dark_style(ax, fig)
+
+    x = range(len(months))
+    ax.bar(x, player_counts, color=WIN, width=0.7, alpha=0.9)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
+    ax.set_xlabel("Month", fontsize=11)
+    ax.set_ylabel("Active Players", fontsize=11)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax.set_title("ECL Participation \u2014 All Time", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)
+
+
+def render_league_points_alltime(
+    months: List[str],
+    avg_pts: List[float],
+    min_pts: List[float],
+    max_pts: List[float],
+) -> io.BytesIO:
+    """Line chart with shaded min/max range: average points per month."""
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _apply_dark_style(ax, fig)
+
+    x = list(range(len(months)))
+
+    ax.fill_between(x, min_pts, max_pts, alpha=0.15, color=ACCENT, label="Min\u2013Max range")
+    ax.plot(x, avg_pts, color=ACCENT, marker="o", linewidth=2, markersize=6, label="Avg Points")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=9, color=FG)
+    ax.set_xlabel("Month", fontsize=11)
+    ax.set_ylabel("Points", fontsize=11)
+
+    ax.legend(loc="upper left", facecolor=BG, edgecolor=GRID, labelcolor=FG)
+    ax.set_title("ECL Points Spread \u2014 All Time", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)

@@ -804,6 +804,142 @@ async def get_daily_games(
     return daily
 
 
+async def get_league_monthly_aggregates(
+    bracket_id: Optional[str] = None,
+    firebase_id_token: Optional[str] = None,
+    max_months: int = 12,
+) -> List[Dict[str, Any]]:
+    """Compute per-month league-wide stats across historical dumps + current month.
+
+    Returns a list of dicts sorted by month, each with:
+        {month, total_games, active_players, avg_pts, min_pts, max_pts,
+         total_wins, total_losses, total_draws}
+    """
+    from topdeck_fetch import get_league_rows_cached
+    from utils.settings import TOPDECK_BRACKET_ID
+
+    months_info = await get_historical_months(bracket_id)
+    months_info = months_info[-max_months:]
+
+    log_sync(f"[leaguegraphs] get_league_monthly_aggregates: "
+             f"processing {len(months_info)} historical months")
+
+    sem = asyncio.Semaphore(3)
+    failed: List[str] = []
+
+    async def _process_month(month_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        async with sem:
+            m_bracket = month_info.get("bracket_id", "")
+            m_month = month_info.get("month", "")
+
+            dump = await reassemble_month_dump(month_info)
+            if dump is None:
+                failed.append(m_month)
+                return None
+
+            e2u = dump.get("entrant_to_uid")
+            if not e2u:
+                bid = dump.get("bracket_id") or m_bracket
+                if bid:
+                    cached_e2u = _get_cached_e2u(bid)
+                    if cached_e2u is not None:
+                        e2u_map = cached_e2u
+                    else:
+                        e2u_map = await _fetch_entrant_to_uid_for_bracket(
+                            bid, firebase_id_token
+                        )
+                        if e2u_map:
+                            _set_cached_e2u(bid, e2u_map)
+                    if e2u_map:
+                        e2u = {str(k): v for k, v in e2u_map.items()}
+                        dump["entrant_to_uid"] = e2u
+
+            if not e2u:
+                failed.append(m_month)
+                return None
+
+            def _compute():
+                matches = _rebuild_matches_from_dump(dump)
+                all_eids = _gather_all_entrant_ids(e2u, matches)
+                pts, sts, wpct = _compute_standings_cacheable(matches, all_eids)
+                return matches, pts, sts, all_eids
+
+            matches, pts, sts, all_eids = await asyncio.to_thread(_compute)
+
+            # Aggregate stats
+            active = [eid for eid in all_eids if sts.get(eid, {}).get("games", 0) > 0]
+            active_pts = [pts.get(eid, 0.0) for eid in active] if active else [0.0]
+            total_wins = sum(sts.get(eid, {}).get("wins", 0) for eid in all_eids)
+            total_losses = sum(sts.get(eid, {}).get("losses", 0) for eid in all_eids)
+            total_draws = sum(sts.get(eid, {}).get("draws", 0) for eid in all_eids)
+            total_games = total_wins + total_losses + total_draws
+
+            return {
+                "month": dump.get("month", m_month),
+                "total_games": total_games,
+                "active_players": len(active),
+                "avg_pts": sum(active_pts) / len(active_pts) if active_pts else 0.0,
+                "min_pts": min(active_pts) if active_pts else 0.0,
+                "max_pts": max(active_pts) if active_pts else 0.0,
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "total_draws": total_draws,
+            }
+
+    tasks = [_process_month(m) for m in months_info]
+    results = await asyncio.gather(*tasks)
+
+    aggregates = [r for r in results if r is not None]
+
+    # Append current month from live data
+    live_bracket = TOPDECK_BRACKET_ID
+    if live_bracket:
+        try:
+            matches, e2u = await get_live_matches(live_bracket, firebase_id_token)
+            month_matches, _, _ = _get_current_month_matches(matches, e2u)
+
+            if month_matches:
+                all_eids = _gather_all_entrant_ids(
+                    {str(k): v for k, v in e2u.items()}, month_matches
+                )
+
+                def _compute_current():
+                    return _compute_standings_cacheable(month_matches, all_eids)
+
+                pts, sts, wpct = await asyncio.to_thread(_compute_current)
+
+                active = [eid for eid in all_eids if sts.get(eid, {}).get("games", 0) > 0]
+                active_pts = [pts.get(eid, 0.0) for eid in active] if active else [0.0]
+                total_wins = sum(sts.get(eid, {}).get("wins", 0) for eid in all_eids)
+                total_losses = sum(sts.get(eid, {}).get("losses", 0) for eid in all_eids)
+                total_draws = sum(sts.get(eid, {}).get("draws", 0) for eid in all_eids)
+                total_games = total_wins + total_losses + total_draws
+
+                mk = current_month_key()
+                aggregates.append({
+                    "month": mk,
+                    "total_games": total_games,
+                    "active_players": len(active),
+                    "avg_pts": sum(active_pts) / len(active_pts) if active_pts else 0.0,
+                    "min_pts": min(active_pts) if active_pts else 0.0,
+                    "max_pts": max(active_pts) if active_pts else 0.0,
+                    "total_wins": total_wins,
+                    "total_losses": total_losses,
+                    "total_draws": total_draws,
+                })
+        except Exception as e:
+            log_warn(f"[leaguegraphs] get_league_monthly_aggregates: "
+                     f"error appending current month: {type(e).__name__}: {e}")
+
+    if failed:
+        log_warn(f"[leaguegraphs] get_league_monthly_aggregates: "
+                 f"{len(failed)} months failed: {failed}")
+
+    log_sync(f"[leaguegraphs] get_league_monthly_aggregates: "
+             f"got {len(aggregates)} months total")
+    return aggregates
+
+
 def get_league_daily_activity(
     matches: List[Match],
 ) -> Dict[int, Dict[str, int]]:
