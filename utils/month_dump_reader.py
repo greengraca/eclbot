@@ -31,51 +31,136 @@ from utils.logger import log_sync, log_warn
 # Historical dump helpers
 # ---------------------------------------------------------------------------
 
-async def get_historical_months(bracket_id: str) -> List[Dict[str, Any]]:
-    """Return distinct (bracket_id, month) pairs with latest run, sorted ascending."""
+async def get_historical_months(
+    bracket_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return distinct (bracket_id, month) pairs with latest run, sorted ascending.
+
+    If bracket_id is None, searches across ALL brackets (needed because the
+    league bracket_id changes each month/season).
+
+    Tries topdeck_month_dump_runs first. If that collection is empty,
+    falls back to discovering months directly from topdeck_month_dump_chunks.
+    """
+    match_filter = {"bracket_id": bracket_id} if bracket_id else {}
+
+    # --- Try runs collection first (preferred: has metadata) ---
+    runs_count = await topdeck_month_dump_runs.count_documents(match_filter)
+    if runs_count > 0:
+        pipeline = [
+            *([ {"$match": match_filter} ] if match_filter else []),
+            {"$sort": {"created_at": -1}},
+            {
+                "$group": {
+                    "_id": {"bracket_id": "$bracket_id", "month": "$month"},
+                    "latest_run_id": {"$first": "$_id"},
+                    "run_id": {"$first": "$run_id"},
+                    "created_at": {"$first": "$created_at"},
+                }
+            },
+            {"$sort": {"_id.month": 1}},
+        ]
+        results = []
+        async for doc in topdeck_month_dump_runs.aggregate(pipeline):
+            results.append({
+                "bracket_id": doc["_id"]["bracket_id"],
+                "month": doc["_id"]["month"],
+                "run_doc_id": doc["latest_run_id"],
+                "run_id": doc.get("run_id"),
+                "source": "runs",
+            })
+        log_sync(f"[graphs] get_historical_months bracket={bracket_id!r}: "
+                 f"found {len(results)} months from runs collection")
+        return results
+
+    # --- Fallback: discover months from chunks collection directly ---
+    chunks_count = await topdeck_month_dump_chunks.count_documents(match_filter)
+    if chunks_count == 0:
+        sample = await topdeck_month_dump_chunks.find_one({}, {"bracket_id": 1})
+        sample_bid = sample.get("bracket_id", "???") if sample else "(empty collection)"
+        log_warn(f"[graphs] get_historical_months: 0 docs in both runs and chunks "
+                 f"for bracket={bracket_id!r} (sample chunk bracket_id={sample_bid!r})")
+        return []
+
+    log_sync(f"[graphs] get_historical_months: runs empty, falling back to chunks "
+             f"({chunks_count} chunk docs for bracket={bracket_id!r})")
+
     pipeline = [
-        {"$match": {"bracket_id": bracket_id}},
+        *([ {"$match": match_filter} ] if match_filter else []),
         {"$sort": {"created_at": -1}},
         {
             "$group": {
-                "_id": {"bracket_id": "$bracket_id", "month": "$month"},
-                "latest_run_id": {"$first": "$_id"},
+                "_id": {"bracket_id": "$bracket_id", "month": "$month", "run_id": "$run_id"},
+                "created_at": {"$first": "$created_at"},
+            }
+        },
+        {"$sort": {"created_at": -1}},
+        {
+            "$group": {
+                "_id": {"bracket_id": "$_id.bracket_id", "month": "$_id.month"},
+                "run_id": {"$first": "$_id.run_id"},
                 "created_at": {"$first": "$created_at"},
             }
         },
         {"$sort": {"_id.month": 1}},
     ]
     results = []
-    async for doc in topdeck_month_dump_runs.aggregate(pipeline):
+    async for doc in topdeck_month_dump_chunks.aggregate(pipeline):
         results.append({
             "bracket_id": doc["_id"]["bracket_id"],
             "month": doc["_id"]["month"],
-            "run_doc_id": doc["latest_run_id"],
-            "created_at": doc["created_at"],
+            "run_id": doc.get("run_id"),
+            "run_doc_id": None,  # no runs doc available
+            "source": "chunks",
         })
-    log_sync(f"[graphs] get_historical_months bracket={bracket_id}: found {len(results)} months")
+    log_sync(f"[graphs] get_historical_months bracket={bracket_id!r}: "
+             f"found {len(results)} months from chunks fallback")
     return results
 
 
-async def reassemble_month_dump(run_doc_id) -> Optional[Dict[str, Any]]:
-    """Load chunks for a run and reassemble the full payload."""
+async def reassemble_month_dump(month_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Load chunks for a month and reassemble the full payload.
+
+    Supports both:
+      - run_doc_id lookup (when discovered from runs collection)
+      - bracket_id + month + run_id lookup (when discovered from chunks)
+    """
+    run_doc_id = month_info.get("run_doc_id")
+    run_id = month_info.get("run_id")
+    bracket_id = month_info.get("bracket_id")
+    month = month_info.get("month")
+
+    # Build query
+    if run_doc_id is not None:
+        query = {"run_doc_id": run_doc_id}
+        desc = f"run_doc_id={run_doc_id}"
+    elif run_id and bracket_id and month:
+        query = {"bracket_id": bracket_id, "month": month, "run_id": run_id}
+        desc = f"bracket={bracket_id} month={month} run_id={run_id}"
+    elif bracket_id and month:
+        # Last resort: get latest chunks for this bracket+month
+        query = {"bracket_id": bracket_id, "month": month}
+        desc = f"bracket={bracket_id} month={month} (latest)"
+    else:
+        log_warn(f"[graphs] reassemble_month_dump: insufficient info: {month_info}")
+        return None
+
     chunks = []
-    async for chunk in topdeck_month_dump_chunks.find(
-        {"run_doc_id": run_doc_id}
-    ).sort("chunk_index", 1):
+    async for chunk in topdeck_month_dump_chunks.find(query).sort("chunk_index", 1):
         chunks.append(chunk["data"])
 
     if not chunks:
-        log_warn(f"[graphs] reassemble_month_dump: no chunks for run_doc_id={run_doc_id}")
+        log_warn(f"[graphs] reassemble_month_dump: no chunks for {desc}")
         return None
 
     try:
         payload = json.loads("".join(chunks))
-        log_sync(f"[graphs] reassemble_month_dump: OK, month={payload.get('month')}, "
-                 f"matches={len(payload.get('matches', []))}")
+        log_sync(f"[graphs] reassemble_month_dump: OK ({desc}), month={payload.get('month')}, "
+                 f"matches={len(payload.get('matches', []))}, "
+                 f"has_entrant_to_uid={'entrant_to_uid' in payload}")
         return payload
     except (json.JSONDecodeError, TypeError) as e:
-        log_warn(f"[graphs] reassemble_month_dump: JSON parse error: {e}")
+        log_warn(f"[graphs] reassemble_month_dump: JSON parse error for {desc}: {e}")
         return None
 
 
@@ -147,20 +232,25 @@ def compute_player_month_stats(dump: Dict[str, Any], target_uid: str) -> Optiona
 
 async def get_player_history(
     target_uid: str,
-    bracket_id: str,
+    bracket_id: Optional[str] = None,
     max_months: int = 12,
 ) -> List[Dict[str, Any]]:
-    """Get per-month stats for a player across historical dumps."""
+    """Get per-month stats for a player across historical dumps.
+
+    If bracket_id is None, searches across all brackets (the league
+    bracket_id changes each season/month).
+    """
     months = await get_historical_months(bracket_id)
     months = months[-max_months:]
 
-    log_sync(f"[graphs] get_player_history uid={target_uid}: processing {len(months)} months")
+    log_sync(f"[graphs] get_player_history uid={target_uid} bracket={bracket_id!r}: "
+             f"processing {len(months)} months")
 
     sem = asyncio.Semaphore(3)
 
     async def _process_month(month_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         async with sem:
-            dump = await reassemble_month_dump(month_info["run_doc_id"])
+            dump = await reassemble_month_dump(month_info)
             if dump is None:
                 return None
             return await asyncio.to_thread(compute_player_month_stats, dump, target_uid)
