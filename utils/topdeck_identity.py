@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar, Any
 
 import discord
 
-from topdeck_fetch import normalize_topdeck_discord
+from topdeck_fetch import normalize_topdeck_discord, extract_discord_from_name
 
 
 T = TypeVar("T")
@@ -182,24 +182,31 @@ def resolve_row_discord_id(row: Any, index: MemberIndex) -> Resolution:
             detail="extracted from row.discord",
         )
 
-    # 2) Handle match (unique only)
+    # 2) Handle match (unique only) — try row.discord, then "Name | handle" from row.name
+    handle_candidates: List[Tuple[str, str]] = []
     h = normalize_topdeck_discord(row_discord)
     if h:
-        ids = index.handle_to_ids.get(h, set())
+        handle_candidates.append((h, "row.discord"))
+    h2 = extract_discord_from_name(row_name)
+    if h2 and h2 != h:
+        handle_candidates.append((h2, "row.name pipe"))
+
+    for hc, origin in handle_candidates:
+        ids = index.handle_to_ids.get(hc, set())
         uid = _unique_id(ids)
         if uid is not None:
             return Resolution(
                 discord_id=int(uid),
                 confidence=CONF_HANDLE,
-                matched_key=h,
-                detail="unique handle match from row.discord",
+                matched_key=hc,
+                detail=f"unique handle match from {origin}",
             )
         if len(ids) > 1:
             return Resolution(
                 discord_id=None,
                 confidence=CONF_AMBIG_HANDLE,
-                matched_key=h,
-                detail=f"handle matches {len(ids)} members",
+                matched_key=hc,
+                detail=f"handle matches {len(ids)} members ({origin})",
             )
 
     # 3) Name match (unique only) — last resort
@@ -259,9 +266,12 @@ def find_row_for_member(rows: Iterable[Any], member: discord.Member) -> Optional
     handle_to_rows: Dict[str, List[Any]] = {}
     for r in rows:
         h = normalize_topdeck_discord(getattr(r, "discord", "") or "")
-        if not h:
-            continue
-        handle_to_rows.setdefault(h, []).append(r)
+        if h:
+            handle_to_rows.setdefault(h, []).append(r)
+        # Also index by handle extracted from "Name | handle" format
+        h2 = extract_discord_from_name(getattr(r, "name", "") or "")
+        if h2 and h2 != h:
+            handle_to_rows.setdefault(h2, []).append(r)
 
     for h in member_handle_candidates(member):
         rs = handle_to_rows.get(h, [])

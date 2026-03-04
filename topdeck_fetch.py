@@ -262,6 +262,20 @@ def normalize_topdeck_discord(discord_raw: str) -> str:
     return _norm_handle_basic(s)
 
 
+def extract_discord_from_name(name: str) -> str:
+    """Extract discord handle from 'Real Name | discord_handle' TopDeck name format.
+
+    Returns the normalized handle part after '|', or '' if not present.
+    """
+    if not name or "|" not in name:
+        return ""
+    _, _, after = name.partition("|")
+    handle = after.strip()
+    if not handle:
+        return ""
+    return _norm_handle_basic(handle)
+
+
 
 def _compute_standings(
     matches: Iterable[Match],
@@ -568,7 +582,11 @@ async def get_in_progress_pods(
 
             d_raw = (pdata.get("discord") if isinstance(pdata, dict) else "") or ""
             discords.append(str(d_raw))
-            discords_norm.append(normalize_topdeck_discord(str(d_raw)))
+            d_norm = normalize_topdeck_discord(str(d_raw))
+            # Fallback: extract handle from "Name | handle" format
+            if not d_norm:
+                d_norm = extract_discord_from_name(str(name))
+            discords_norm.append(d_norm)
 
         pods.append(
             InProgressPod(
@@ -798,20 +816,31 @@ def get_cached_matches(
 def build_handle_to_best(rows: List[PlayerRow]) -> Dict[str, Tuple[float, int]]:
     """Build a mapping: normalized discord handle -> (points, games).
 
+    Handles are sourced from row.discord and also from the 'Name | handle'
+    format in row.name (common in ECL TopDeck entries).
+
     If a handle appears multiple times, prefer the row with:
       1) higher games, then
       2) higher points.
     """
     out: Dict[str, Tuple[float, int]] = {}
     for row in rows:
-        handle = normalize_topdeck_discord(getattr(row, 'discord', None))
-        if not handle:
-            continue
         pts = float(getattr(row, 'pts', 0.0) or 0.0)
         games = int(getattr(row, 'games', 0) or 0)
-        existing = out.get(handle)
-        if existing is None or games > existing[1] or (games == existing[1] and pts > existing[0]):
-            out[handle] = (pts, games)
+
+        handles: List[str] = []
+        h = normalize_topdeck_discord(getattr(row, 'discord', None))
+        if h:
+            handles.append(h)
+        # Fallback: extract handle from "Name | discord_handle" in row.name
+        h2 = extract_discord_from_name(getattr(row, 'name', '') or '')
+        if h2 and h2 not in handles:
+            handles.append(h2)
+
+        for handle in handles:
+            existing = out.get(handle)
+            if existing is None or games > existing[1] or (games == existing[1] and pts > existing[0]):
+                out[handle] = (pts, games)
     return out
 
 

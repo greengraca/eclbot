@@ -553,6 +553,14 @@ class ECLTimerCog(commands.Cog):
                     await vc.move_to(target_ch)
             return guild.voice_client
 
+        # Stale voice client exists but is not connected — clean it up first
+        if vc:
+            log_sync(
+                f"[voice] Stale voice client in guild {guild.id} "
+                f"(connected={vc.is_connected()}); hard-resetting before reconnect"
+            )
+            await self._hard_reset_voice(guild)
+
         log_sync(
             f"[voice] Connecting new VC in guild {guild.id} "
             f"to channel {target_ch.id}"
@@ -631,9 +639,9 @@ class ECLTimerCog(commands.Cog):
                     f"guild={guild.id}, channel_id={channel_id}"
                 )
                 ok = False
-            except discord.errors.ConnectionClosed:
+            except (discord.errors.ConnectionClosed, discord.errors.ClientException):
                 log_warn(
-                    "[voice] ConnectionClosed during playback; "
+                    "[voice] ConnectionClosed/ClientException during playback; "
                     "hard-resetting and retrying once"
                 )
                 await self._hard_reset_voice(guild)

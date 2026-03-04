@@ -23,6 +23,7 @@ from topdeck_fetch import (
     _parse_tournament_fields,
     _extract_entrant_to_uid,
     _extract_matches_all_seasons,
+    extract_discord_from_name,
 )
 
 from utils.settings import GUILD_ID
@@ -209,7 +210,12 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
 
             pdata = player_map.get(str(uid)) or {}
             disc_raw = str(pdata.get("discord") or "").strip()
-            discords_norm.append(_extract_topdeck_handle(disc_raw))
+            d_norm = _extract_topdeck_handle(disc_raw)
+            # Fallback: extract handle from "Name | handle" format
+            if not d_norm:
+                name_raw = str(pdata.get("name") or "") if isinstance(pdata, dict) else ""
+                d_norm = extract_discord_from_name(name_raw)
+            discords_norm.append(d_norm)
 
         infos.append(
             TopdeckMatchInfo(
