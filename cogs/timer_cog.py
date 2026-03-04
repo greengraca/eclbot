@@ -607,12 +607,22 @@ class ECLTimerCog(commands.Cog):
                     log_warn("[voice] Failed to obtain VoiceClient")
                     return False
 
+                # Verify connection is actually live after (possibly slow) connect
+                if not vc.is_connected():
+                    log_warn(
+                        "[voice] VoiceClient returned but not connected; "
+                        "raising ClientException for retry"
+                    )
+                    raise discord.errors.ClientException("Not connected after ensure_connected")
+
                 log_sync(
                     f"[voice] Starting playback in guild {guild.id}, "
                     f"channel {ch.id}, file={source_path}"
                 )
                 try:
                     task = vc.play(_ffmpeg_src(source_path, FFMPEG_EXE), wait_finish=True)
+                except discord.errors.ClientException:
+                    raise  # Let outer handler retry with hard-reset
                 except Exception as e:
                     log_error(f"[voice] vc.play() raised: {e}")
                     return False
