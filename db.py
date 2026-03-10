@@ -67,6 +67,9 @@ treasure_pods = db["treasure_pods"]
 # SpellBot scan cache (incremental /synconline)
 spellbot_scan_cache = db["spellbot_scan_cache"]
 
+# User preferences (timezone, etc.)
+user_preferences = db["user_preferences"]
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
@@ -282,6 +285,17 @@ async def ensure_indexes() -> None:
             IndexModel(
                 [("guild_id", ASCENDING), ("month", ASCENDING), ("season", ASCENDING), ("table", ASCENDING)],
                 name="by_guild_month_season_table",
+            ),
+        ]
+    )
+
+    # ---- User preferences (timezone, etc.) ----
+    await user_preferences.create_indexes(
+        [
+            IndexModel(
+                [("user_id", ASCENDING)],
+                unique=True,
+                name="uniq_user_id",
             ),
         ]
     )

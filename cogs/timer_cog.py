@@ -553,14 +553,6 @@ class ECLTimerCog(commands.Cog):
                     await vc.move_to(target_ch)
             return guild.voice_client
 
-        # Stale voice client exists but is not connected — clean it up first
-        if vc:
-            log_sync(
-                f"[voice] Stale voice client in guild {guild.id} "
-                f"(connected={vc.is_connected()}); hard-resetting before reconnect"
-            )
-            await self._hard_reset_voice(guild)
-
         log_sync(
             f"[voice] Connecting new VC in guild {guild.id} "
             f"to channel {target_ch.id}"
@@ -607,22 +599,12 @@ class ECLTimerCog(commands.Cog):
                     log_warn("[voice] Failed to obtain VoiceClient")
                     return False
 
-                # Verify connection is actually live after (possibly slow) connect
-                if not vc.is_connected():
-                    log_warn(
-                        "[voice] VoiceClient returned but not connected; "
-                        "raising ClientException for retry"
-                    )
-                    raise discord.errors.ClientException("Not connected after ensure_connected")
-
                 log_sync(
                     f"[voice] Starting playback in guild {guild.id}, "
                     f"channel {ch.id}, file={source_path}"
                 )
                 try:
                     task = vc.play(_ffmpeg_src(source_path, FFMPEG_EXE), wait_finish=True)
-                except discord.errors.ClientException:
-                    raise  # Let outer handler retry with hard-reset
                 except Exception as e:
                     log_error(f"[voice] vc.play() raised: {e}")
                     return False
@@ -649,9 +631,9 @@ class ECLTimerCog(commands.Cog):
                     f"guild={guild.id}, channel_id={channel_id}"
                 )
                 ok = False
-            except (discord.errors.ConnectionClosed, discord.errors.ClientException):
+            except discord.errors.ConnectionClosed:
                 log_warn(
-                    "[voice] ConnectionClosed/ClientException during playback; "
+                    "[voice] ConnectionClosed during playback; "
                     "hard-resetting and retrying once"
                 )
                 await self._hard_reset_voice(guild)
