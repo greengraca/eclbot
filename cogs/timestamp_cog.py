@@ -124,7 +124,6 @@ class TimezoneSelectView(discord.ui.View):
 def _format_timestamp_message(unix_ts: int) -> str:
     return (
         f"<t:{unix_ts}:F>\n"
-        f"<t:{unix_ts}:f>\n"
         f"<t:{unix_ts}:R>"
     )
 
