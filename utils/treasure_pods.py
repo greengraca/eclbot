@@ -33,7 +33,7 @@ TREASURE_POD_SECRET = os.getenv("TREASURE_POD_SECRET", "").strip()
 
 # Games per player estimate (based on historical data)
 # December: 540/240 = 2.25, January: 315/96 = 3.28
-GAMES_PER_PLAYER_ESTIMATE = float(os.getenv("TREASURE_GAMES_PER_PLAYER", "2.75"))
+GAMES_PER_PLAYER_ESTIMATE = float(os.getenv("TREASURE_GAMES_PER_PLAYER", "3.5"))
 
 # Number of treasure pods per month (legacy fallback)
 TREASURE_PODS_PER_MONTH = int(os.getenv("TREASURE_PODS_PER_MONTH", "5"))
