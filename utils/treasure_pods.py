@@ -165,10 +165,11 @@ def generate_treasure_table_numbers(
     exclude: Optional[set] = None,
 ) -> List[int]:
     """
-    Generate treasure table numbers spread across the estimated total.
+    Generate treasure table numbers using ideal spacing + jitter.
 
-    First ~28% of tables have LESS weight (at most 1 treasure).
-    Remaining treasures spread across rest of the month.
+    Pods are evenly spread across [MIN_TABLE_OFFSET, 80% of estimated_total]
+    with random jitter (±1/3 of the spacing) so positions aren't predictable.
+    The last 20% is left empty — recalculation from draws fills the tail.
 
     ``exclude`` contains table numbers already claimed by other types.
     """
@@ -178,50 +179,33 @@ def generate_treasure_table_numbers(
     if exclude is None:
         exclude = set()
 
-    low_weight_cutoff = max(MIN_TABLE_OFFSET + 10, int(estimated_total / 3.5))
+    # Cap at 92% — leave last 8% for draw recalculations
+    range_start = MIN_TABLE_OFFSET
+    range_end = int(estimated_total * 0.92)
+    total_range = range_end - range_start
+
+    if total_range < count * 5:
+        total_range = count * 5
+        range_end = range_start + total_range
+
+    # Ideal spacing between pods
+    step = total_range / (count + 1)
+    jitter = step / 3
 
     table_numbers: List[int] = []
+    for i in range(1, count + 1):
+        ideal = range_start + step * i
+        low = max(range_start, int(ideal - jitter))
+        high = min(range_end, int(ideal + jitter))
 
-    # 50% chance of 1 treasure in early zone, 50% chance of 0
-    early_zone_count = 1 if random.random() < 0.5 else 0
-    late_zone_count = count - early_zone_count
-
-    if early_zone_count > 0:
-        early_start = MIN_TABLE_OFFSET
-        early_end = low_weight_cutoff
+        candidate = random.randint(low, high)
+        # Avoid collisions with excluded tables and already-placed pods
         for _ in range(50):
-            candidate = random.randint(early_start, early_end)
-            if candidate not in exclude:
-                table_numbers.append(candidate)
+            candidate = random.randint(low, high)
+            if candidate not in exclude and candidate not in table_numbers:
                 break
-        else:
-            # Fallback: pick anything in range
-            table_numbers.append(random.randint(early_start, early_end))
 
-    if late_zone_count > 0:
-        late_start = low_weight_cutoff + 1
-        late_end = estimated_total
-        late_range = late_end - late_start
-
-        if late_range < late_zone_count * 5:
-            late_range = max(late_zone_count * 5, late_range)
-
-        bucket_size = late_range // late_zone_count
-        if bucket_size < 5:
-            bucket_size = 5
-
-        for i in range(late_zone_count):
-            bucket_start = late_start + (i * bucket_size)
-            bucket_end = bucket_start + bucket_size - 1
-
-            if i == late_zone_count - 1:
-                bucket_end = estimated_total
-
-            for _ in range(50):
-                candidate = random.randint(bucket_start, bucket_end)
-                if candidate not in exclude and candidate not in table_numbers:
-                    break
-            table_numbers.append(candidate)
+        table_numbers.append(candidate)
 
     return sorted(table_numbers)
 
