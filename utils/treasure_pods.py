@@ -210,6 +210,31 @@ def generate_treasure_table_numbers(
     return sorted(table_numbers)
 
 
+def _generate_random_tables(
+    estimated_total: int,
+    count: int,
+    exclude: Optional[set] = None,
+) -> List[int]:
+    """Generate fully random table numbers within [MIN_TABLE_OFFSET, 92% of total]."""
+    if exclude is None:
+        exclude = set()
+    range_start = MIN_TABLE_OFFSET
+    range_end = int(max(estimated_total, 50) * 0.92)
+
+    tables: List[int] = []
+    for _ in range(count):
+        for _ in range(200):
+            candidate = random.randint(range_start, range_end)
+            if candidate not in exclude and candidate not in tables:
+                tables.append(candidate)
+                break
+    return sorted(tables)
+
+
+# Pod types that use fully random placement instead of even spacing
+_RANDOM_PLACEMENT_TYPES = {"card_prize"}
+
+
 def generate_all_treasure_tables(
     estimated_total: int,
     pod_types: List[Dict[str, Any]],
@@ -221,7 +246,10 @@ def generate_all_treasure_tables(
     for pt in pod_types:
         type_id = pt["type"]
         count = int(pt.get("count", 1))
-        tables = generate_treasure_table_numbers(estimated_total, count, exclude=exclude)
+        if type_id in _RANDOM_PLACEMENT_TYPES:
+            tables = _generate_random_tables(estimated_total, count, exclude=exclude)
+        else:
+            tables = generate_treasure_table_numbers(estimated_total, count, exclude=exclude)
         result[type_id] = tables
         exclude.update(tables)
 
