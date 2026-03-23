@@ -288,17 +288,15 @@ def render_league_activity(
     draws: List[int],
     month_label: str,
 ) -> io.BytesIO:
-    """Stacked bar chart: league-wide wins/losses/draws by day."""
+    """Stacked bar chart: league-wide games by day (decisive vs draws)."""
     fig, ax = plt.subplots(figsize=(12, 5))
     _apply_dark_style(ax, fig)
 
     x = range(len(days))
     bar_width = 0.7
 
-    ax.bar(x, wins, bar_width, label="Wins", color=WIN)
-    ax.bar(x, losses, bar_width, bottom=wins, label="Losses", color=LOSS)
-    bottoms = [w + l for w, l in zip(wins, losses)]
-    ax.bar(x, draws, bar_width, bottom=bottoms, label="Draws", color=DRAW)
+    ax.bar(x, wins, bar_width, label="Decisive", color=WIN)
+    ax.bar(x, draws, bar_width, bottom=wins, label="Draws", color=DRAW)
 
     ax.set_xticks(list(x))
     ax.set_xticklabels([str(d) for d in days], fontsize=9, color=FG)

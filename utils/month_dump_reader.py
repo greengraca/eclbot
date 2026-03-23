@@ -866,13 +866,12 @@ async def get_league_monthly_aggregates(
 
             matches, pts, sts, all_eids = await asyncio.to_thread(_compute)
 
-            # Aggregate stats
+            # Aggregate stats — count matches (games), not per-player results
             active = [eid for eid in all_eids if sts.get(eid, {}).get("games", 0) > 0]
             active_pts = [pts.get(eid, 0.0) for eid in active] if active else [0.0]
-            total_wins = sum(sts.get(eid, {}).get("wins", 0) for eid in all_eids)
-            total_losses = sum(sts.get(eid, {}).get("losses", 0) for eid in all_eids)
-            total_draws = sum(sts.get(eid, {}).get("draws", 0) for eid in all_eids)
-            total_games = total_wins + total_losses + total_draws
+            decisive = sum(1 for m in matches if _is_valid_completed_match(m) and m.winner != "_DRAW_")
+            draws = sum(1 for m in matches if _is_valid_completed_match(m) and m.winner == "_DRAW_")
+            total_games = decisive + draws
 
             return {
                 "month": dump.get("month", m_month),
@@ -881,9 +880,9 @@ async def get_league_monthly_aggregates(
                 "avg_pts": sum(active_pts) / len(active_pts) if active_pts else 0.0,
                 "min_pts": min(active_pts) if active_pts else 0.0,
                 "max_pts": max(active_pts) if active_pts else 0.0,
-                "total_wins": total_wins,
-                "total_losses": total_losses,
-                "total_draws": total_draws,
+                "total_wins": decisive,
+                "total_losses": 0,
+                "total_draws": draws,
             }
 
     tasks = [_process_month(m) for m in months_info]
@@ -910,10 +909,9 @@ async def get_league_monthly_aggregates(
 
                 active = [eid for eid in all_eids if sts.get(eid, {}).get("games", 0) > 0]
                 active_pts = [pts.get(eid, 0.0) for eid in active] if active else [0.0]
-                total_wins = sum(sts.get(eid, {}).get("wins", 0) for eid in all_eids)
-                total_losses = sum(sts.get(eid, {}).get("losses", 0) for eid in all_eids)
-                total_draws = sum(sts.get(eid, {}).get("draws", 0) for eid in all_eids)
-                total_games = total_wins + total_losses + total_draws
+                decisive = sum(1 for m in month_matches if _is_valid_completed_match(m) and m.winner != "_DRAW_")
+                draws = sum(1 for m in month_matches if _is_valid_completed_match(m) and m.winner == "_DRAW_")
+                total_games = decisive + draws
 
                 mk = current_month_key()
                 aggregates.append({
@@ -923,9 +921,9 @@ async def get_league_monthly_aggregates(
                     "avg_pts": sum(active_pts) / len(active_pts) if active_pts else 0.0,
                     "min_pts": min(active_pts) if active_pts else 0.0,
                     "max_pts": max(active_pts) if active_pts else 0.0,
-                    "total_wins": total_wins,
-                    "total_losses": total_losses,
-                    "total_draws": total_draws,
+                    "total_wins": decisive,
+                    "total_losses": 0,
+                    "total_draws": draws,
                 })
         except Exception as e:
             log_warn(f"[leaguegraphs] get_league_monthly_aggregates: "
@@ -943,9 +941,9 @@ async def get_league_monthly_aggregates(
 def get_league_daily_activity(
     matches: List[Match],
 ) -> Dict[int, Dict[str, int]]:
-    """Bucket league-wide wins/losses/draws by day-of-month. Each match = 1 result.
+    """Bucket league-wide game outcomes by day-of-month. Each match = 1 game.
 
-    A completed match produces either 1 win + 1 loss, or N draws (if _DRAW_).
+    A completed match is counted as 1 win, 1 loss, or 1 draw (per game, not per player).
     Only completed matches are counted.
     """
     daily: Dict[int, Dict[str, int]] = {}
@@ -968,10 +966,10 @@ def get_league_daily_activity(
         counted += 1
 
         if m.winner == "_DRAW_":
-            daily[day]["draws"] += len(m.es)
+            daily[day]["draws"] += 1
         elif m.winner is not None:
+            # One game = 1 win (the winner's game) — count the game once
             daily[day]["wins"] += 1
-            daily[day]["losses"] += len(m.es) - 1
 
     log_sync(f"[graphs] get_league_daily_activity: {counted} completed matches, "
              f"{len(daily)} days with games")

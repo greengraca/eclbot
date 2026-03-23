@@ -157,12 +157,11 @@ class LeagueGraphsCog(commands.Cog):
 
         buf = await asyncio.to_thread(render_league_activity, days, wins, losses, draws, ml)
 
-        total = sum(wins) + sum(losses) + sum(draws)
+        total = sum(wins) + sum(draws)
         active_days = sum(1 for d in days if (daily.get(d, {}).get("wins", 0)
-                                               + daily.get(d, {}).get("losses", 0)
                                                + daily.get(d, {}).get("draws", 0)) > 0)
         emb = discord.Embed(title=f"\U0001f4c5 League Activity \u2014 {ml}")
-        emb.description = f"**{total}** total results across **{active_days}** active days"
+        emb.description = f"**{total}** games across **{active_days}** active days"
         return buf, "league_activity.png", emb
 
     # ------------------------------------------------------------------
