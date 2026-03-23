@@ -485,3 +485,92 @@ def render_turn_order_winrates(
     ax.set_title(title, fontsize=13, color=FG, pad=12)
 
     return _save(fig)
+
+
+def render_player_stats_card(
+    name: str,
+    discord_handle: str,
+    rank: int,
+    total_players: int,
+    wins: int,
+    losses: int,
+    draws: int,
+    pts: int,
+    win_pct: float,
+    ow_pct: float,
+    seat_stats: dict,
+) -> io.BytesIO:
+    """Render a dark-themed player stats card image."""
+    CARD_BG = "#1E1F22"
+    SECTION_BG = "#2B2D31"
+    TEXT_PRIMARY = "#FFFFFF"
+    TEXT_SECONDARY = "#B5BAC1"
+    BORDER = "#3F4147"
+
+    fig = plt.figure(figsize=(6, 5.5))
+    fig.patch.set_facecolor(CARD_BG)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.axis("off")
+    ax.set_facecolor(CARD_BG)
+
+    # ── Header: Name + Handle ──
+    ax.text(50, 95, name, fontsize=16, fontweight="bold", color=TEXT_PRIMARY,
+            ha="center", va="top")
+    if discord_handle:
+        ax.text(50, 90, discord_handle, fontsize=10, color=TEXT_SECONDARY,
+                ha="center", va="top")
+
+    # ── Standing + Record boxes ──
+    for (x, label, value) in [
+        (25, "TOURNAMENT STANDING", f"#{rank} / {total_players}"),
+        (75, "RECORD", f"{wins}-{losses}-{draws}"),
+    ]:
+        rect = plt.Rectangle((x - 22, 72), 44, 14, facecolor=SECTION_BG,
+                              edgecolor=BORDER, linewidth=0.8, clip_on=False)
+        ax.add_patch(rect)
+        ax.text(x, 84, label, fontsize=7, color=TEXT_SECONDARY, ha="center", va="center")
+        ax.text(x, 77, value, fontsize=14, fontweight="bold", color=TEXT_PRIMARY,
+                ha="center", va="center")
+
+    # ── Tournament Stats section ──
+    ax.text(5, 67, "Tournament Stats", fontsize=11, fontweight="bold", color=TEXT_PRIMARY, va="top")
+    stats_rect = plt.Rectangle((3, 49), 94, 16, facecolor=SECTION_BG,
+                                edgecolor=BORDER, linewidth=0.8)
+    ax.add_patch(stats_rect)
+
+    stat_rows = [
+        ("Pts:", f"{pts:,}"),
+        ("Win%:", f"{win_pct * 100:.2f}%"),
+        ("OW%:", f"{ow_pct * 100:.2f}%"),
+    ]
+    for i, (label, value) in enumerate(stat_rows):
+        y = 62 - i * 4.5
+        ax.text(6, y, label, fontsize=9, color=TEXT_SECONDARY, va="center")
+        ax.text(94, y, value, fontsize=9, color=TEXT_PRIMARY, ha="right", va="center")
+
+    # ── Seat Position Distribution ──
+    ax.text(5, 44, "Seat Position Distribution", fontsize=11, fontweight="bold",
+            color=TEXT_PRIMARY, va="top")
+    seat_rect = plt.Rectangle((3, 9), 94, 33, facecolor=SECTION_BG,
+                               edgecolor=BORDER, linewidth=0.8)
+    ax.add_patch(seat_rect)
+
+    total_g = seat_stats.get("total_games", 0)
+    for i in range(4):
+        s = seat_stats.get(i, {"games": 0, "wins": 0, "win_rate": 0.0, "seat_pct": 0.0})
+        y = 38 - i * 6.5
+        label = f"Seat {i+1}:"
+        pct = s["seat_pct"] * 100
+        wr = s["win_rate"] * 100
+        value = f"{pct:.1f}% ({s['games']} games) - {wr:.1f}% WR"
+        ax.text(6, y, label, fontsize=9, color=TEXT_SECONDARY, va="center")
+        ax.text(94, y, value, fontsize=9, color=TEXT_PRIMARY, ha="right", va="center")
+
+    # Total games row
+    ax.text(6, 12, "Total Games:", fontsize=9, color=TEXT_SECONDARY, va="center")
+    ax.text(94, 12, str(total_g), fontsize=9, fontweight="bold", color=TEXT_PRIMARY,
+            ha="right", va="center")
+
+    return _save(fig)

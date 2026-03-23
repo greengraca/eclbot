@@ -976,6 +976,56 @@ def get_league_daily_activity(
     return daily
 
 
+def compute_player_seat_stats(
+    matches: List[Match],
+    target_entrant_ids: set,
+) -> Dict[int, Dict[str, Any]]:
+    """Compute per-seat stats for specific entrant IDs.
+
+    Returns {seat_index: {games, wins, rate}} for seats 0-3.
+    Only considers season 1, 4-player, non-muted, completed matches.
+    """
+    seats: Dict[int, Dict[str, int]] = {i: {"games": 0, "wins": 0} for i in range(4)}
+    total_games = 0
+
+    for m in matches:
+        if m.season != 1 or len(m.es) != 4:
+            continue
+        if not _is_valid_completed_match(m):
+            continue
+
+        # Check if target is in this match
+        participant_eids = set(m.es) & target_entrant_ids
+        if not participant_eids:
+            continue
+
+        is_draw = m.winner == "_DRAW_"
+        try:
+            winner_eid = None if is_draw else int(m.winner)
+        except (TypeError, ValueError):
+            continue
+
+        for eid in participant_eids:
+            seat_idx = m.es.index(eid)
+            seats[seat_idx]["games"] += 1
+            if not is_draw and winner_eid == eid:
+                seats[seat_idx]["wins"] += 1
+            total_games += 1
+
+    result = {}
+    for i in range(4):
+        g = seats[i]["games"]
+        w = seats[i]["wins"]
+        result[i] = {
+            "games": g,
+            "wins": w,
+            "win_rate": (w / g) if g > 0 else 0.0,
+            "seat_pct": (g / total_games) if total_games > 0 else 0.0,
+        }
+    result["total_games"] = total_games
+    return result
+
+
 def compute_turn_order_stats(
     matches: List[Match],
 ) -> Dict[str, Any]:

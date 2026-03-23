@@ -25,6 +25,8 @@ from online_games_store import count_online_games_by_topdeck_uid_str, has_recent
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.month_dump_reader import get_live_matches, compute_player_seat_stats, _get_current_month_matches
+from utils.graph_renderer import render_player_stats_card
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
 from utils.mod_check import is_mod
 
@@ -388,6 +390,55 @@ class StatsCog(commands.Cog):
             emb.add_field(name="\U0001f512 Access", value="\n".join(mod_lines), inline=False)
 
         await safe_ctx_followup(ctx, embed=emb, ephemeral=True)
+
+        # ---- Public stats card image ----
+        try:
+            import asyncio
+
+            matches_data, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+            month_matches, _, _ = _get_current_month_matches(matches_data, entrant_to_uid)
+
+            # Gather all entrant IDs for this player's UID
+            target_eids = set()
+            if uid:
+                for eid_str, u in entrant_to_uid.items():
+                    if u == uid:
+                        try:
+                            target_eids.add(int(eid_str))
+                        except (ValueError, TypeError):
+                            pass
+            if row and row.entrant_id and row.entrant_id not in target_eids:
+                target_eids.add(row.entrant_id)
+
+            seat_stats = compute_player_seat_stats(month_matches, target_eids) if target_eids else {}
+
+            total_active = len([r for r in (rows or []) if not getattr(r, "dropped", False)])
+            ow_pct_val = float(getattr(row, "ow_pct", 0.0) or 0.0)
+            discord_handle = getattr(row, "discord", "") or ""
+
+            buf = await asyncio.to_thread(
+                render_player_stats_card,
+                name=name,
+                discord_handle=discord_handle,
+                rank=rank or 0,
+                total_players=total_active,
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                pts=pts,
+                win_pct=win_pct,
+                ow_pct=ow_pct_val,
+                seat_stats=seat_stats,
+            )
+
+            channel = ctx.channel
+            if channel and hasattr(channel, "send"):
+                await channel.send(
+                    file=discord.File(buf, filename="stats_card.png"),
+                )
+        except Exception as e:
+            from utils.logger import log_warn
+            log_warn(f"[stats] Failed to send public stats card: {type(e).__name__}: {e}")
 
 
 def setup(bot: commands.Bot):
