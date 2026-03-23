@@ -162,7 +162,7 @@ class ECLTimerCog(commands.Cog):
                 total_duration = durations.get("main", 0) + durations.get("extra", 0)
                 expires_at = start_time_utc + timedelta(seconds=total_duration + 60)  # +1 min buffer
             elif status == "paused" and remaining:
-                total_remaining = remaining.get("extra", 0)  # extra is total remaining
+                total_remaining = remaining.get("main", 0) + remaining.get("extra", 0)
                 expires_at = now_utc() + timedelta(seconds=total_remaining + 3600)  # +1 hour for paused
             else:
                 expires_at = now_utc() + timedelta(hours=2)
@@ -624,20 +624,11 @@ class ECLTimerCog(commands.Cog):
         await asyncio.sleep(max(0.0, delay_sec))
         if timer_id not in self.active_timers:
             return
-        guild_id = None
-        for gid in self._voice_locks:
-            guild_id = gid
-            break
-        if guild_id is None:
-            for g in self.bot.guilds:
-                ch = g.get_channel(voice_channel_id)
-                if ch:
-                    await self._play(g, audio_path, channel_id=voice_channel_id, leave_after=True)
-                    return
-            return
-        guild = self.bot.get_guild(guild_id)
-        if guild:
-            await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
+        for g in self.bot.guilds:
+            ch = g.get_channel(voice_channel_id)
+            if ch:
+                await self._play(g, audio_path, channel_id=voice_channel_id, leave_after=True)
+                return
 
     async def _final_audio(
         self,
@@ -760,7 +751,7 @@ class ECLTimerCog(commands.Cog):
 
             # Wait for draw event or interval
             draw_event = data.get("draw_event")
-            if draw_event:
+            if draw_event and not draw_event.is_set():
                 try:
                     await asyncio.wait_for(draw_event.wait(), timeout=interval)
                 except asyncio.TimeoutError:
@@ -1207,7 +1198,7 @@ class ECLTimerCog(commands.Cog):
         remaining = {
             "main": max(durations["main"] - elapsed, 0.0),
             "easter_egg": max(durations["easter_egg"] - elapsed, 0.0),
-            "extra": max(durations["extra"] - elapsed + durations["main"], 0.0),
+            "extra": max(durations["extra"] - elapsed, 0.0),
         }
 
         # delete old timer msg (can be slow)
@@ -1222,7 +1213,7 @@ class ECLTimerCog(commands.Cog):
             log_warn(f"[pausetimer] Error deleting original timer message: {e}")
 
         remaining_main_val = float(remaining["main"])
-        remaining_total_val = float(remaining["extra"])  # "extra" is total remaining
+        remaining_total_val = remaining_main_val + float(remaining["extra"])
 
         MAIN_TOTAL = TIMER_MINUTES * 60.0
         EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
@@ -1260,12 +1251,14 @@ class ECLTimerCog(commands.Cog):
             "game_number": game_number,
         }
 
+        # Update timer_messages to point to the new pause message
+        self.timer_messages[timer_id] = (ctx.channel.id, pause_msg.id)
+
         # Persist paused state to DB
-        ch_id, m_id = self.timer_messages.get(timer_id, (ctx.channel.id, pause_msg.id))
         await self._save_timer_to_db(
             timer_id=timer_id,
             guild_id=ctx.guild.id,
-            channel_id=ch_id,
+            channel_id=ctx.channel.id,
             voice_channel_id=timer_data.get("voice_channel_id", 0),
             message_id=pause_msg.id,
             status="paused",
@@ -1393,9 +1386,10 @@ class ECLTimerCog(commands.Cog):
             self.timer_tasks[timer_id].append(asyncio.create_task(
                 self._audio_at(main, turns_audio, timer_id, paused.get("voice_channel_id", 0))
             ))
-        # 4. Final audio
+        # 4. Final audio (delay = main + extra = total remaining)
+        total_remaining = main + extra
         self.timer_tasks[timer_id].append(asyncio.create_task(
-            self._final_audio(extra, final_audio, timer_id, paused.get("voice_channel_id", 0), draw_event)
+            self._final_audio(total_remaining, final_audio, timer_id, paused.get("voice_channel_id", 0), draw_event)
         ))
 
         MAIN_TOTAL = TIMER_MINUTES * 60.0
@@ -1403,7 +1397,7 @@ class ECLTimerCog(commands.Cog):
 
         phase = "running" if main > 0 else "extra"
         end_ts_main = ts(now_utc() + timedelta(seconds=main))
-        end_ts_final = ts(now_utc() + timedelta(seconds=extra))
+        end_ts_final = ts(now_utc() + timedelta(seconds=total_remaining))
 
         embed = _build_timer_embed(
             game_number=game_number,
@@ -1411,7 +1405,7 @@ class ECLTimerCog(commands.Cog):
             main_total=MAIN_TOTAL,
             extra_total=EXTRA_TOTAL,
             remaining_main=main,
-            remaining_total=extra,
+            remaining_total=total_remaining,
             end_ts_main=end_ts_main,
             end_ts_final=end_ts_final,
             player_ids=player_ids,
@@ -1421,9 +1415,8 @@ class ECLTimerCog(commands.Cog):
         self.timer_messages[timer_id] = (ctx.channel.id, msg.id)
 
         # Persist
-        main_remaining_sec = paused["remaining"]["main"]
-        total_remaining_sec = paused["remaining"]["extra"]
-        extra_only_sec = max(0, total_remaining_sec - main_remaining_sec)
+        main_remaining_sec = main
+        extra_only_sec = extra
 
         await self._save_timer_to_db(
             timer_id=timer_id,
@@ -1480,21 +1473,22 @@ class ECLTimerCog(commands.Cog):
             )
             return
 
-        MAIN_TOTAL = TIMER_MINUTES * 60.0
-        EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
         now = now_utc()
 
         # ---------- active timer ----------
         if timer_id in self.active_timers:
             data = self.active_timers[timer_id]
+            dur = data["durations"]
+            main_total = dur["main"]
+            extra_total = dur["extra"]
 
             elapsed = (now - data["start_time"]).total_seconds()
-            remaining_main = max(MAIN_TOTAL - elapsed, 0.0)
-            remaining_total = max(MAIN_TOTAL + EXTRA_TOTAL - elapsed, 0.0)
+            remaining_main = max(main_total - elapsed, 0.0)
+            remaining_total = max(main_total + extra_total - elapsed, 0.0)
 
             bar = _build_progress_bar(
-                MAIN_TOTAL,
-                EXTRA_TOTAL,
+                main_total,
+                extra_total,
                 remaining_main,
                 remaining_total,
             )
@@ -1526,8 +1520,11 @@ class ECLTimerCog(commands.Cog):
             remaining = data["remaining"]
 
             remaining_main = float(remaining.get("main", 0.0))
-            # we stored 'extra' as time until final (main+extra) from now
-            remaining_total = float(remaining.get("extra", 0.0))
+            remaining_extra = float(remaining.get("extra", 0.0))
+            remaining_total = remaining_main + remaining_extra
+
+            MAIN_TOTAL = TIMER_MINUTES * 60.0
+            EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
 
             bar = _build_progress_bar(
                 MAIN_TOTAL,
