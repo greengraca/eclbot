@@ -70,6 +70,7 @@ from .subscriptions.embeds import _get_color, _apply_thumbnail
 
 
 TOURNAMENT_UPDATES_CHANNEL_ID = int(os.getenv("TOURNAMENT_UPDATES_CHANNEL_ID", "1439720684170248293"))
+BOT_COMMANDS_CHANNEL_ID = int(os.getenv("BOT_COMMANDS_CHANNEL_ID", "1437911411325141114"))
 
 
 
@@ -1214,7 +1215,7 @@ class SubscriptionsCog(commands.Cog):
 
                         async def _announce_winner(*, table, pod, winner_discord_handle, winner_topdeck_uid, winner_entrant_id):
                             """Send a winner announcement to the updates channel."""
-                            ch = guild.get_channel(TOURNAMENT_UPDATES_CHANNEL_ID)
+                            ch = guild.get_channel(BOT_COMMANDS_CHANNEL_ID)
                             if not ch or not isinstance(ch, discord.TextChannel):
                                 return
                             # Resolve mention
