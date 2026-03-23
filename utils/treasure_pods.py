@@ -812,6 +812,7 @@ class TreasurePodManager:
         current_max_table: int = 0,
         new_player_count: Optional[int] = None,
         days_until_close: float = 30.0,
+        on_winner=None,
     ) -> Dict[str, int]:
         """
         Check pending treasure pods against TopDeck match results.
@@ -885,5 +886,17 @@ class TreasurePodManager:
                 )
                 results["won"] += 1
                 log_ok(f"[treasure] Treasure pod table #{table} WON by {winner_discord or winner_uid or winner_entrant_id}")
+
+                if on_winner:
+                    try:
+                        await on_winner(
+                            table=table,
+                            pod=pod,
+                            winner_discord_handle=winner_discord,
+                            winner_topdeck_uid=winner_uid,
+                            winner_entrant_id=winner_entrant_id,
+                        )
+                    except Exception as e:
+                        log_warn(f"[treasure] on_winner callback error for table #{table}: {e}")
 
         return results

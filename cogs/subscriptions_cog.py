@@ -31,7 +31,7 @@ from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
 from utils.treasure_pods import TreasurePodManager
 
 from cogs.lfg_cog import LFG_ELO_MIN_DAY
-from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id
+from utils.topdeck_identity import MemberIndex, build_member_index, resolve_row_discord_id, extract_discord_id
 
 from utils.settings import (
     GUILD_ID,
@@ -1211,6 +1211,21 @@ class SubscriptionsCog(commands.Cog):
                         
                         # Check pending treasure pod results (win/draw)
                         days_until_close = (close_at - now).total_seconds() / 86400.0
+
+                        async def _announce_winner(*, table, pod, winner_discord_handle, winner_topdeck_uid, winner_entrant_id):
+                            """Send a winner announcement to the updates channel."""
+                            ch = guild.get_channel(TOURNAMENT_UPDATES_CHANNEL_ID)
+                            if not ch or not isinstance(ch, discord.TextChannel):
+                                return
+                            # Resolve mention
+                            did = extract_discord_id(winner_discord_handle or "") if winner_discord_handle else None
+                            mention = f"<@{did}>" if did else (winner_discord_handle or winner_topdeck_uid or str(winner_entrant_id))
+                            pod_title = pod.get("pod_title", "Treasure Pod")
+                            await ch.send(
+                                f"**{pod_title}** — Congrats {mention} for winning pod #{table}! "
+                                f"Claim your prize by opening a ticket in <#1444483718067519649>."
+                            )
+
                         await self._treasure_manager.check_pending_results(
                             guild_id=guild.id,
                             month=now_mk,
@@ -1220,6 +1235,7 @@ class SubscriptionsCog(commands.Cog):
                             current_max_table=current_max_table,
                             new_player_count=player_count,
                             days_until_close=days_until_close,
+                            on_winner=_announce_winner,
                         )
 
                         # Redistribute any treasure pods that were skipped
