@@ -328,7 +328,7 @@ class ECLTimerCog(commands.Cog):
                 "game_number": int(doc.get("game_number", 0)),
             }
             if message_id:
-                self.timer_messages[timer_id] = (channel_id, int(message_id))
+                self.timer_messages[timer_id] = (channel_id, int(message_id), None)
             log_sync(f"[timer] Rehydrated paused timer {timer_id}")
             return True
 
@@ -372,7 +372,8 @@ class ECLTimerCog(commands.Cog):
             "draw_event": draw_event,
         }
         if message_id:
-            self.timer_messages[timer_id] = (channel_id, int(message_id))
+            mentions = " ".join(f"<@{uid}>" for uid in player_ids) if player_ids else None
+            self.timer_messages[timer_id] = (channel_id, int(message_id), mentions)
 
         self.timer_tasks[timer_id] = []
 
@@ -737,7 +738,7 @@ class ECLTimerCog(commands.Cog):
                 log_warn(f"[timer/loop] No message tracked for {timer_id}, exiting loop")
                 return
 
-            ch_id, m_id = msg_info
+            ch_id, m_id, cached_content = msg_info
             try:
                 ch = self.bot.get_channel(ch_id)
                 if ch is None:
@@ -745,8 +746,8 @@ class ECLTimerCog(commands.Cog):
                     self._cleanup_timer_structs(timer_id)
                     await self._delete_timer_from_db(timer_id)
                     return
-                msg = await ch.fetch_message(m_id)
-                await msg.edit(embed=embed, content=msg.content)
+                msg = ch.get_partial_message(m_id)
+                await msg.edit(embed=embed, content=cached_content)
             except discord.NotFound:
                 log_warn(f"[timer/loop] Message deleted externally for {timer_id}, cleaning up")
                 self._cleanup_timer_structs(timer_id)
@@ -761,8 +762,7 @@ class ECLTimerCog(commands.Cog):
                 try:
                     ch = self.bot.get_channel(ch_id)
                     if ch:
-                        msg = await ch.fetch_message(m_id)
-                        await msg.delete()
+                        await ch.get_partial_message(m_id).delete()
                 except Exception:
                     pass
                 self._cleanup_timer_structs(timer_id)
@@ -894,7 +894,7 @@ class ECLTimerCog(commands.Cog):
             ephemeral=False,
         )
 
-        self.timer_messages[timer_id] = (sent.channel.id, sent.id)
+        self.timer_messages[timer_id] = (sent.channel.id, sent.id, mentions)
 
         draw_event = asyncio.Event()
 
@@ -1279,8 +1279,8 @@ class ECLTimerCog(commands.Cog):
             "game_number": game_number,
         }
 
-        # Update timer_messages to point to the new pause message
-        self.timer_messages[timer_id] = (ctx.channel.id, pause_msg.id)
+        # Update timer_messages to point to the new pause message (no content on pause)
+        self.timer_messages[timer_id] = (ctx.channel.id, pause_msg.id, None)
 
         # Persist paused state to DB
         await self._save_timer_to_db(
@@ -1448,7 +1448,7 @@ class ECLTimerCog(commands.Cog):
         )
 
         msg = await safe_ctx_followup(ctx, embed=embed)
-        self.timer_messages[timer_id] = (ctx.channel.id, msg.id)
+        self.timer_messages[timer_id] = (ctx.channel.id, msg.id, None)
 
         # Persist
         main_remaining_sec = main
