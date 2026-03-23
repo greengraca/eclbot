@@ -171,3 +171,113 @@ def build_progress_bar(
     filled_extra = "█" * extra_fill + "░" * (extra_slots - extra_fill)
 
     return f"[{filled_main}|{filled_extra}]"
+
+
+# ---------------- timer embed ----------------
+
+# Phase colors
+_PHASE_COLORS = {
+    "running": 0x3498DB,  # blue
+    "extra": 0xE67E22,    # orange
+    "draw": 0xE74C3C,     # red
+    "paused": 0x95A5A6,   # gray
+}
+
+
+def build_timer_embed(
+    game_number: int,
+    phase: str,
+    main_total: float,
+    extra_total: float,
+    remaining_main: float,
+    remaining_total: float,
+    end_ts_main: int,
+    end_ts_final: int,
+    player_ids: list[int],
+) -> discord.Embed:
+    """
+    Build a Discord embed for the timer message.
+
+    phase: "running" | "extra" | "draw" | "paused"
+    All time values in seconds.
+    end_ts_main / end_ts_final: Unix timestamps for Discord <t:...:R> tags.
+    player_ids: user IDs for mentions; empty = omit Players field.
+    """
+    color = _PHASE_COLORS.get(phase, 0x95A5A6)
+
+    # Title
+    titles = {
+        "running": f"⏱️ ECL Game {game_number} — Timer Running",
+        "extra": f"⏱️ ECL Game {game_number} — Extra Time!",
+        "draw": f"⏱️ ECL Game {game_number} — Game Over",
+        "paused": f"⏸️ ECL Game {game_number} — Paused",
+    }
+    title = titles.get(phase, f"⏱️ ECL Game {game_number}")
+
+    embed = discord.Embed(title=title, color=color)
+
+    # Players field (not on draw phase)
+    if player_ids and phase != "draw":
+        mentions = " · ".join(f"<@{uid}>" for uid in player_ids)
+        embed.add_field(name="🎮 Players", value=mentions, inline=False)
+
+    # Progress bar
+    bar = build_progress_bar(main_total, extra_total, remaining_main, remaining_total)
+
+    # Time display + description based on phase
+    if phase == "running":
+        mins = remaining_main / 60.0
+        m, s = int(mins), int((remaining_main % 60))
+        embed.add_field(
+            name="Main Time",
+            value=f"**{m}:{s:02d}** remaining",
+            inline=False,
+        )
+        embed.description = f"```{bar}```"
+        embed.set_footer(
+            text=f"⏰ Main ends <t:{end_ts_main}:R> · Draw at <t:{end_ts_final}:R>"
+        )
+
+    elif phase == "extra":
+        extra_remaining = remaining_total
+        mins = extra_remaining / 60.0
+        m, s = int(mins), int((extra_remaining % 60))
+        extra_minutes = int(extra_total / 60)
+        embed.add_field(
+            name="Extra Time",
+            value=f"**{m}:{s:02d}** remaining",
+            inline=False,
+        )
+        embed.description = (
+            f"Time is over. You have **{extra_minutes} minutes** to finish "
+            f"the active player turn. Good luck!\n```{bar}```"
+        )
+        embed.set_footer(text=f"⏰ Draw at <t:{end_ts_final}:R>")
+
+    elif phase == "draw":
+        embed.description = (
+            f"```{bar}```\n"
+            "If no one won until now, the game is a draw. Well Played."
+        )
+
+    elif phase == "paused":
+        if remaining_main > 0:
+            mins = remaining_main / 60.0
+            m, s = int(mins), int((remaining_main % 60))
+            embed.add_field(
+                name="Main Time",
+                value=f"**{m}:{s:02d}** remaining",
+                inline=False,
+            )
+        else:
+            extra_remaining = remaining_total
+            mins = extra_remaining / 60.0
+            m, s = int(mins), int((extra_remaining % 60))
+            embed.add_field(
+                name="Extra Time",
+                value=f"**{m}:{s:02d}** remaining",
+                inline=False,
+            )
+        embed.description = f"```{bar}```\nUse `/resumetimer` to continue."
+
+    return embed

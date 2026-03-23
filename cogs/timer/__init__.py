@@ -14,6 +14,7 @@ from .helpers import (
     ffmpeg_src,
     non_bot_members,
     build_progress_bar,
+    build_timer_embed,
     VOICE_CONNECT_TIMEOUT,
 )
 from .views import ReplaceTimerView
@@ -33,6 +34,7 @@ __all__ = [
     "ffmpeg_src",
     "non_bot_members",
     "build_progress_bar",
+    "build_timer_embed",
     "VOICE_CONNECT_TIMEOUT",
     # Views
     "ReplaceTimerView",
