@@ -11,13 +11,6 @@ import discord
 from discord.ext import commands
 from discord import Option
 
-from online_games_store import OnlineGameRecord, get_record, upsert_record
-
-from topdeck_fetch import (
-    get_in_progress_pods,
-    InProgressPod,
-)
-
 from utils.interactions import safe_ctx_defer, safe_ctx_respond, safe_ctx_followup
 from utils.persistence import (
     save_timer as db_save_timer,
@@ -315,8 +308,10 @@ class ECLTimerCog(commands.Cog):
                 "audio": audio,
                 "voice_channel_id": voice_channel_id,
                 "ignore_autostop": ignore_autostop,
-                "pause_message": None,  # Can't restore Discord message objects
-                "ctx": None,  # Can't restore ctx
+                "pause_message": None,
+                "ctx": None,
+                "player_mention_ids": [int(x) for x in (doc.get("player_mention_ids") or [])],
+                "game_number": int(doc.get("game_number", 0)),
             }
             if message_id:
                 self.timer_messages[timer_id] = (channel_id, int(message_id))
@@ -330,26 +325,25 @@ class ECLTimerCog(commands.Cog):
             await self._delete_timer_from_db(timer_id)
             return False
 
-        # Motor/PyMongo often returns UTC datetimes as offset-naive.
-        # Normalize to tz-aware UTC so math vs now_utc() never crashes.
         if start_time_utc.tzinfo is None:
             start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
         else:
             start_time_utc = start_time_utc.astimezone(timezone.utc)
 
-        # Calculate remaining time
         elapsed = (now_utc() - start_time_utc).total_seconds()
         main_remaining = max(0, durations["main"] - elapsed)
         total_remaining = max(0, durations["main"] + durations["extra"] - elapsed)
         easter_egg_remaining = max(0, durations["easter_egg"] - elapsed)
 
-        # If timer has fully expired, clean up
         if total_remaining <= 0:
             log_sync(f"[timer] Rehydrate: timer {timer_id} has expired, cleaning up", level="warn")
             await self._delete_timer_from_db(timer_id)
             return False
 
-        # Store in active_timers
+        player_ids = [int(x) for x in (doc.get("player_mention_ids") or [])]
+        game_number = int(doc.get("game_number", 0))
+        draw_event = asyncio.Event()
+
         self.active_timers[timer_id] = {
             "start_time": start_time_utc,
             "durations": durations,
@@ -357,159 +351,38 @@ class ECLTimerCog(commands.Cog):
             "audio": audio,
             "voice_channel_id": voice_channel_id,
             "ignore_autostop": ignore_autostop,
+            "player_mention_ids": player_ids,
+            "game_number": game_number,
+            "phase_override": None,
+            "draw_event": draw_event,
         }
         if message_id:
             self.timer_messages[timer_id] = (channel_id, int(message_id))
 
-        # Initialize task list
         self.timer_tasks[timer_id] = []
 
-        # Schedule remaining events
-        # We need to calculate what events are still pending
-        main_seconds = durations["main"]
-        extra_seconds = durations["extra"]
-        easter_egg_delay = durations["easter_egg"]
-
-        # Event 1: Easter egg (10 min warning)
+        # 1. Embed update loop
+        self.timer_tasks[timer_id].append(asyncio.create_task(
+            self._embed_update_loop(timer_id, game_number)
+        ))
+        # 2. Easter egg audio
         if easter_egg_remaining > 0:
             self.timer_tasks[timer_id].append(asyncio.create_task(
-                self._rehydrated_play_voice(
-                    guild,
-                    audio["easter_egg"],
-                    easter_egg_remaining,
-                    voice_channel_id,
-                    timer_id,
-                )
+                self._audio_at(easter_egg_remaining, audio["easter_egg"], timer_id, voice_channel_id)
             ))
-
-        # Event 2: Main time end (turns message + audio)
+        # 3. Main-end audio
         if main_remaining > 0:
             self.timer_tasks[timer_id].append(asyncio.create_task(
-                self._rehydrated_timer_end(
-                    guild,
-                    channel,
-                    main_remaining,
-                    messages["turns"],
-                    audio["turns"],
-                    timer_id,
-                    voice_channel_id,
-                )
+                self._audio_at(main_remaining, audio["turns"], timer_id, voice_channel_id)
             ))
-        elif main_remaining <= 0 and total_remaining > 0:
-            # Main time passed but extra time remains - don't re-send turns message
-            pass
-
-        # Event 3: Final (extra time end)
+        # 4. Final audio
         if total_remaining > 0:
             self.timer_tasks[timer_id].append(asyncio.create_task(
-                self._rehydrated_final_timer_end(
-                    guild,
-                    channel,
-                    total_remaining,
-                    messages["final"],
-                    audio["final"],
-                    timer_id,
-                    voice_channel_id,
-                )
+                self._final_audio(total_remaining, audio["final"], timer_id, voice_channel_id, draw_event)
             ))
 
-        log_sync(f"[timer] Rehydrated active timer {timer_id} with {len(self.timer_tasks[timer_id])} remaining events")
+        log_sync(f"[timer] Rehydrated active timer {timer_id} with {len(self.timer_tasks[timer_id])} tasks")
         return True
-
-    async def _rehydrated_play_voice(
-        self,
-        guild: discord.Guild,
-        audio_path: str,
-        delay_seconds: float,
-        voice_channel_id: int,
-        timer_id: str,
-    ) -> None:
-        """Play voice file after delay (rehydrated timer)."""
-        await asyncio.sleep(max(0, delay_seconds))
-        if timer_id not in self.active_timers:
-            return
-        await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
-
-    async def _rehydrated_timer_end(
-        self,
-        guild: discord.Guild,
-        channel: discord.abc.Messageable,
-        delay_seconds: float,
-        message: str,
-        audio_path: str,
-        timer_id: str,
-        voice_channel_id: int,
-    ) -> None:
-        """Handle main timer end (rehydrated timer)."""
-        await asyncio.sleep(max(0, delay_seconds))
-        if timer_id not in self.active_timers:
-            return
-
-        # Edit or send message
-        if timer_id in self.timer_messages:
-            ch_id, m_id = self.timer_messages[timer_id]
-            ch = self.bot.get_channel(ch_id)
-            if ch:
-                try:
-                    msg = await ch.fetch_message(m_id)
-                    await msg.edit(content=message)
-                except Exception as e:
-                    log_warn(f"[timer] Rehydrated: failed to edit message: {e}")
-        else:
-            try:
-                msg = await channel.send(message)
-                self.timer_messages[timer_id] = (channel.id, msg.id)
-            except Exception as e:
-                log_warn(f"[timer] Rehydrated: failed to send message: {e}")
-
-        # Play audio
-        await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
-
-    async def _rehydrated_final_timer_end(
-        self,
-        guild: discord.Guild,
-        channel: discord.abc.Messageable,
-        delay_seconds: float,
-        message: str,
-        audio_path: str,
-        timer_id: str,
-        voice_channel_id: int,
-    ) -> None:
-        """Handle final timer end (rehydrated timer)."""
-        await asyncio.sleep(max(0, delay_seconds))
-        if timer_id not in self.active_timers:
-            return
-
-        # Edit or send message
-        msg_obj = None
-        if timer_id in self.timer_messages:
-            ch_id, m_id = self.timer_messages[timer_id]
-            ch = self.bot.get_channel(ch_id)
-            if ch:
-                try:
-                    msg_obj = await ch.fetch_message(m_id)
-                    await msg_obj.edit(content=message)
-                except Exception:
-                    pass
-        
-        if msg_obj is None:
-            try:
-                msg_obj = await channel.send(message)
-            except Exception:
-                pass
-
-        # Play audio
-        await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
-
-        # Delete message after 1 minute
-        if msg_obj:
-            await asyncio.sleep(60)
-            with contextlib.suppress(Exception):
-                await msg_obj.delete()
-
-        # Final cleanup
-        self._cleanup_timer_structs(timer_id)
-        await self._delete_timer_from_db(timer_id)
 
     # ---------- mod helpers ----------
 
