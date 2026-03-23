@@ -1,6 +1,5 @@
 # spelltable_client.py
 import os
-import logging
 import asyncio
 import re
 import unicodedata
@@ -8,7 +7,7 @@ from typing import Optional
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from utils.logger import log_ok, log_warn
 
 # ---------- Config from env ----------
 
@@ -106,14 +105,10 @@ async def create_spelltable_game(
                 # Log status + body on non-200 for debugging
                 if resp.status_code >= 400:
                     body_snippet = resp.text[:500]
-                    logger.warning(
-                        "SpellTable proxy non-200 response "
-                        "(attempt %s/%s): %s %s | body=%r",
-                        attempt + 1,
-                        RETRY_ATTEMPTS,
-                        resp.status_code,
-                        resp.reason_phrase,
-                        body_snippet,
+                    log_warn(
+                        f"[spelltable] proxy non-200 response "
+                        f"(attempt {attempt + 1}/{RETRY_ATTEMPTS}): "
+                        f"{resp.status_code} {resp.reason_phrase} | body={body_snippet!r}"
                     )
                     resp.raise_for_status()
 
@@ -131,22 +126,11 @@ async def create_spelltable_game(
                         f"SpellTable proxy response missing 'link': {data!r}"
                     )
 
-                logger.info(
-                    "SpellTable proxy created game successfully: name=%r slug=%r link=%r",
-                    game_name,
-                    safe_name,
-                    link,
-                )
+                log_ok(f"[spelltable] created game: name={game_name!r} slug={safe_name!r} link={link!r}")
                 return link
 
             except Exception as exc:
-                logger.warning(
-                    "SpellTable proxy create failed (attempt %s/%s): %s",
-                    attempt + 1,
-                    RETRY_ATTEMPTS,
-                    exc,
-                    exc_info=True,
-                )
+                log_warn(f"[spelltable] create failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {exc}")
                 if attempt == RETRY_ATTEMPTS - 1:
                     raise SpellTableAuthError(
                         "Failed to create SpellTable game via proxy after several attempts."

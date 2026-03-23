@@ -42,7 +42,9 @@ class SpellBotWatchCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._seen_ready_messages: Set[int] = set()
+        # Bounded deque to avoid unbounded memory growth on long-running dynos
+        from collections import deque
+        self._seen_ready_messages: deque = deque(maxlen=5000)
 
         # print(
         #     "[spellbot-watch] Cog loaded with config: "
@@ -293,7 +295,7 @@ class SpellBotWatchCog(commands.Cog):
                 f"_maybe_log_ready_message: message_id={msg.id} already logged, skipping."
             )
             return
-        self._seen_ready_messages.add(msg.id)
+        self._seen_ready_messages.append(msg.id)
 
         link = self._extract_spelltable_link(embed)
         channel_name = (
