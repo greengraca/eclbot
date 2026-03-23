@@ -805,7 +805,7 @@ class ECLTimerCog(commands.Cog):
         await self._cancel_tasks(timer_id)
 
         if timer_id in self.timer_messages:
-            ch_id, m_id = self.timer_messages[timer_id]
+            ch_id, m_id, _ = self.timer_messages[timer_id]
             ch = self.bot.get_channel(ch_id)
             if ch:
                 try:
@@ -1220,15 +1220,17 @@ class ECLTimerCog(commands.Cog):
         elapsed = (now_utc() - timer_data["start_time"]).total_seconds()
         durations = timer_data["durations"]
 
+        remaining_main = max(durations["main"] - elapsed, 0.0)
+        remaining_total = max(durations["main"] + durations["extra"] - elapsed, 0.0)
         remaining = {
-            "main": max(durations["main"] - elapsed, 0.0),
+            "main": remaining_main,
             "easter_egg": max(durations["easter_egg"] - elapsed, 0.0),
-            "extra": max(durations["extra"] - elapsed, 0.0),
+            "extra": remaining_total - remaining_main,
         }
 
         # delete old timer msg (can be slow)
         try:
-            ch_id, m_id = self.timer_messages.get(timer_id, (None, None))
+            ch_id, m_id, _ = self.timer_messages.get(timer_id, (None, None, None))
             if ch_id and m_id:
                 ch = self.bot.get_channel(ch_id)
                 if ch:
