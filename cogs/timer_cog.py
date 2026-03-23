@@ -734,104 +734,162 @@ class ECLTimerCog(commands.Cog):
 
     # TopDeck online tagging now handled by self.topdeck_tagger (see timer/topdeck.py)
 
-    # ---------- core actions ----------
+    # ---------- audio-only tasks ----------
 
-    async def timer_end(
+    async def _audio_at(
         self,
-        ctx: discord.ApplicationContext,
-        minutes: float,
-        message: str,
-        voice_file_path: Optional[str] = None,
-        *,
-        timer_id: Optional[str] = None,
-        edit: bool = False,
-        delete_after: Optional[float] = None,  # minutes
-        final_cleanup: bool = False,
-    ):
-        delay_sec = max(0.0, minutes) * 60
-        log_sync(
-            f"[timer_end] Scheduled fire: timer_id={timer_id}, minutes={minutes}, "
-            f"delay_sec={delay_sec}, voice_file_path={voice_file_path}, edit={edit}, "
-            f"final_cleanup={final_cleanup}"
-        )
-        await asyncio.sleep(delay_sec)
+        delay_sec: float,
+        audio_path: str,
+        timer_id: str,
+        voice_channel_id: int,
+    ) -> None:
+        """Sleep then play audio. No message editing."""
+        await asyncio.sleep(max(0.0, delay_sec))
+        if timer_id not in self.active_timers:
+            return
+        guild_id = None
+        for gid in self._voice_locks:
+            guild_id = gid
+            break
+        if guild_id is None:
+            for g in self.bot.guilds:
+                ch = g.get_channel(voice_channel_id)
+                if ch:
+                    await self._play(g, audio_path, channel_id=voice_channel_id, leave_after=True)
+                    return
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild:
+            await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
 
-        channel = ctx.channel
-        msg_obj: Optional[discord.Message] = None
+    async def _final_audio(
+        self,
+        delay_sec: float,
+        audio_path: str,
+        timer_id: str,
+        voice_channel_id: int,
+        draw_event: asyncio.Event,
+    ) -> None:
+        """Sleep, play draw audio, then signal the embed loop to show draw phase."""
+        await asyncio.sleep(max(0.0, delay_sec))
+        if timer_id not in self.active_timers:
+            return
 
-        if edit and timer_id and timer_id in self.timer_messages:
-            ch_id, m_id = self.timer_messages[timer_id]
-            ch = self.bot.get_channel(ch_id) or channel
-            try:
-                msg_obj = await ch.fetch_message(m_id)
-                await msg_obj.edit(content=message)
-            except Exception as e:
-                log_warn(f"[timer_end] Failed to edit message: {e}")
-        else:
-            try:
-                msg_obj = await channel.send(message)
-                if timer_id:
-                    self.timer_messages[timer_id] = (channel.id, msg_obj.id)
-            except Exception as e:
-                log_warn(f"[timer_end] Failed to send message: {e}")
+        # Play final audio
+        guild = None
+        for g in self.bot.guilds:
+            ch = g.get_channel(voice_channel_id)
+            if ch:
+                guild = g
+                break
+        if guild:
+            await self._play(guild, audio_path, channel_id=voice_channel_id, leave_after=True)
 
-        vcid: Optional[int] = None
-        if timer_id and timer_id in self.active_timers:
-            vcid = self.active_timers[timer_id].get("voice_channel_id")
-        if (
-            vcid is None
-            and ctx.guild
-            and ctx.guild.voice_client
-            and ctx.guild.voice_client.channel
-        ):
-            vcid = ctx.guild.voice_client.channel.id  # type: ignore[assignment]
+        # Signal the embed loop
+        data = self.active_timers.get(timer_id)
+        if data:
+            data["phase_override"] = "draw"
+        draw_event.set()
 
-        if voice_file_path and ctx.guild:
-            await self._play(
-                ctx.guild, voice_file_path, channel_id=vcid, leave_after=True
+    # ---------- embed update loop ----------
+
+    async def _embed_update_loop(
+        self,
+        timer_id: str,
+        game_number: int,
+    ) -> None:
+        """Periodically update the timer embed. Sole owner of message editing."""
+        interval = max(30.0, TIMER_UPDATE_INTERVAL_MINUTES * 60.0)
+
+        while True:
+            # Exit if timer was stopped/cancelled
+            if timer_id not in self.active_timers:
+                return
+
+            data = self.active_timers[timer_id]
+            now = now_utc()
+            elapsed = (now - data["start_time"]).total_seconds()
+            durations = data["durations"]
+
+            main_total = durations["main"]
+            extra_total = durations["extra"]
+            remaining_main = max(0.0, main_total - elapsed)
+            remaining_total = max(0.0, main_total + extra_total - elapsed)
+
+            end_ts_main = ts(data["start_time"] + timedelta(seconds=main_total))
+            end_ts_final = ts(data["start_time"] + timedelta(seconds=main_total + extra_total))
+
+            # Determine phase
+            if data.get("phase_override") == "draw":
+                phase = "draw"
+            elif remaining_main > 0:
+                phase = "running"
+            elif remaining_total > 0:
+                phase = "extra"
+            else:
+                phase = "draw"
+
+            player_ids = data.get("player_mention_ids", [])
+
+            embed = _build_timer_embed(
+                game_number=game_number,
+                phase=phase,
+                main_total=main_total,
+                extra_total=extra_total,
+                remaining_main=remaining_main,
+                remaining_total=remaining_total,
+                end_ts_main=end_ts_main,
+                end_ts_final=end_ts_final,
+                player_ids=player_ids,
             )
 
-        if delete_after is not None and msg_obj is not None:
-            await asyncio.sleep(max(0.0, delete_after) * 60)
-            with contextlib.suppress(Exception):
-                await msg_obj.delete()
+            # Fetch and edit the message
+            msg_info = self.timer_messages.get(timer_id)
+            if not msg_info:
+                log_warn(f"[timer/loop] No message tracked for {timer_id}, exiting loop")
+                return
 
-        if final_cleanup and timer_id:
-            log_sync(f"[timer_end] Final stage complete, cleaning up timer_id={timer_id}")
-            self._cleanup_timer_structs(timer_id)
-            # Delete from DB
-            await self._delete_timer_from_db(timer_id)
+            ch_id, m_id = msg_info
+            try:
+                ch = self.bot.get_channel(ch_id)
+                if ch is None:
+                    log_warn(f"[timer/loop] Channel {ch_id} not found, cleaning up {timer_id}")
+                    self._cleanup_timer_structs(timer_id)
+                    await self._delete_timer_from_db(timer_id)
+                    return
+                msg = await ch.fetch_message(m_id)
+                await msg.edit(embed=embed, content=msg.content)
+            except discord.NotFound:
+                log_warn(f"[timer/loop] Message deleted externally for {timer_id}, cleaning up")
+                self._cleanup_timer_structs(timer_id)
+                await self._delete_timer_from_db(timer_id)
+                return
+            except Exception as e:
+                log_warn(f"[timer/loop] Failed to edit message for {timer_id}: {type(e).__name__}: {e}")
 
-    async def play_voice_file(
-        self,
-        ctx: discord.ApplicationContext,
-        voice_file_path: str,
-        delay_seconds: float,
-        *,
-        timer_id: Optional[str] = None,
-    ):
-        delay = max(0.0, delay_seconds)
-        log_sync(
-            f"[play_voice_file] Scheduled: timer_id={timer_id}, "
-            f"delay_seconds={delay}, path={voice_file_path}"
-        )
-        await asyncio.sleep(delay)
+            # Draw phase: final edit done, wait 1 min, delete, cleanup
+            if phase == "draw":
+                await asyncio.sleep(60)
+                try:
+                    ch = self.bot.get_channel(ch_id)
+                    if ch:
+                        msg = await ch.fetch_message(m_id)
+                        await msg.delete()
+                except Exception:
+                    pass
+                self._cleanup_timer_structs(timer_id)
+                await self._delete_timer_from_db(timer_id)
+                return
 
-        vcid: Optional[int] = None
-        if timer_id and timer_id in self.active_timers:
-            vcid = self.active_timers[timer_id].get("voice_channel_id")
-        if (
-            vcid is None
-            and ctx.guild
-            and ctx.guild.voice_client
-            and ctx.guild.voice_client.channel
-        ):
-            vcid = ctx.guild.voice_client.channel.id  # type: ignore[assignment]
-
-        if ctx.guild:
-            await self._play(
-                ctx.guild, voice_file_path, channel_id=vcid, leave_after=True
-            )
+            # Wait for draw event or interval
+            draw_event = data.get("draw_event")
+            if draw_event:
+                try:
+                    await asyncio.wait_for(draw_event.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass  # normal tick
+            else:
+                await asyncio.sleep(interval)
 
     async def _cancel_tasks(self, timer_id: str):
         for task in self.timer_tasks.get(timer_id, []):
