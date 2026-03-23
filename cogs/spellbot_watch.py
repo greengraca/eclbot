@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow, WAGER_RATE
-from utils.topdeck_identity import find_row_for_member
+from utils.topdeck_identity import find_row_for_member, build_row_index, find_row_in_index
 from utils.interactions import resolve_member
 from utils.logger import log_sync, log_ok, log_warn, log_debug
 from utils.settings import GUILD_ID
@@ -194,9 +194,10 @@ class SpellBotWatchCog(commands.Cog):
                 f"(fetched_at={fetched_at.isoformat()})."
             )
 
+            row_idx = build_row_index(rows)
             matched_rows: List[PlayerRow] = []
             for m in members:
-                match = find_row_for_member(rows, m)
+                match = find_row_in_index(row_idx, m)
                 if not match:
                     self._debug(
                         f"_handle_high_stakes: no TopDeck row for member {m} ({m.id}), aborting."

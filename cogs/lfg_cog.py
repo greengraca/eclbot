@@ -23,7 +23,7 @@ from utils.interactions import (
 
 from .lfg.models import LFGLobby, now_utc
 from .lfg.state import LobbyStore
-from .lfg.views import LFGJoinView, PersistentLFGView
+from .lfg.views import LFGJoinView
 from .lfg.embeds import (
     build_lobby_embed,
     build_ready_embed,
@@ -121,12 +121,6 @@ class LFGCog(commands.Cog):
         self._rehydrated = False
         self._persistent_view_registered = False
 
-        # NOTE: Do NOT instantiate discord.ui.View objects before the event loop is running.
-        # main.py loads extensions before bot.run(), so creating a View in __init__ will crash
-        # with: RuntimeError: no running event loop.
-        # We create/register this in on_ready() instead.
-        self._persistent_view: Optional[PersistentLFGView] = None
-
     # ---------- Persistence helpers ----------
 
     async def _save_lobby_to_db(self, lobby: LFGLobby) -> None:
@@ -178,12 +172,9 @@ class LFGCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         """Rehydrate lobbies from MongoDB after bot restart."""
-        # Register persistent view (must happen after event loop starts)
+        # Mark persistent view registration (views are re-attached per lobby during rehydration)
         if not self._persistent_view_registered:
             self._persistent_view_registered = True
-            self._persistent_view = PersistentLFGView(self)
-            self.bot.add_view(self._persistent_view)
-            log_sync("[lfg] persistent views registered")
 
         if self._rehydrated:
             return

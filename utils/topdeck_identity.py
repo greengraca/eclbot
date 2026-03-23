@@ -247,34 +247,59 @@ def resolve_row_discord_id(row: Any, index: MemberIndex) -> Resolution:
     )
 
 
-def find_row_for_member(rows: Iterable[Any], member: discord.Member) -> Optional[RowMatch]:
-    """Resolve a Discord member to a TopDeck row. ID first, then unique handle/name."""
-    target_id = int(member.id)
+@dataclass
+class RowIndex:
+    """Pre-built lookup tables for fast TopDeck row lookups."""
+    id_to_row: Dict[int, Any]
+    handle_to_rows: Dict[str, List[Any]]
+    name_to_rows: Dict[str, List[Any]]
 
-    # 1) Strong: ID match against row.discord
-    for r in rows:
-        did = extract_discord_id(getattr(r, "discord", "") or "")
-        if did == target_id:
-            return RowMatch(
-                row=r,
-                confidence=CONF_DISCORD_ID,
-                matched_key=str(target_id),
-                detail="matched by discord id in row.discord",
-            )
 
-    # 2) Handle match (unique row only)
+def build_row_index(rows: Iterable[Any]) -> RowIndex:
+    """Build a lookup index from TopDeck rows. Call once, then use find_row_in_index per member."""
+    id_to_row: Dict[int, Any] = {}
     handle_to_rows: Dict[str, List[Any]] = {}
+    name_to_rows: Dict[str, List[Any]] = {}
+
     for r in rows:
+        # ID index
+        did = extract_discord_id(getattr(r, "discord", "") or "")
+        if did and did not in id_to_row:
+            id_to_row[did] = r
+
+        # Handle index
         h = normalize_topdeck_discord(getattr(r, "discord", "") or "")
         if h:
             handle_to_rows.setdefault(h, []).append(r)
-        # Also index by handle extracted from "Name | handle" format
         h2 = extract_discord_from_name(getattr(r, "name", "") or "")
         if h2 and h2 != h:
             handle_to_rows.setdefault(h2, []).append(r)
 
+        # Name index
+        nk = norm_name(getattr(r, "name", "") or "")
+        if nk:
+            name_to_rows.setdefault(nk, []).append(r)
+
+    return RowIndex(id_to_row=id_to_row, handle_to_rows=handle_to_rows, name_to_rows=name_to_rows)
+
+
+def find_row_in_index(index: RowIndex, member: discord.Member) -> Optional[RowMatch]:
+    """O(1) lookup of a Discord member in a pre-built RowIndex."""
+    target_id = int(member.id)
+
+    # 1) Strong: ID match
+    r = index.id_to_row.get(target_id)
+    if r is not None:
+        return RowMatch(
+            row=r,
+            confidence=CONF_DISCORD_ID,
+            matched_key=str(target_id),
+            detail="matched by discord id in row.discord",
+        )
+
+    # 2) Handle match (unique row only)
     for h in member_handle_candidates(member):
-        rs = handle_to_rows.get(h, [])
+        rs = index.handle_to_rows.get(h, [])
         if len(rs) == 1:
             return RowMatch(
                 row=rs[0],
@@ -284,15 +309,8 @@ def find_row_for_member(rows: Iterable[Any], member: discord.Member) -> Optional
             )
 
     # 3) Name match (unique row only)
-    name_to_rows: Dict[str, List[Any]] = {}
-    for r in rows:
-        nk = norm_name(getattr(r, "name", "") or "")
-        if not nk:
-            continue
-        name_to_rows.setdefault(nk, []).append(r)
-
     for nk in _member_name_candidates(member):
-        rs = name_to_rows.get(nk, [])
+        rs = index.name_to_rows.get(nk, [])
         if len(rs) == 1:
             return RowMatch(
                 row=rs[0],
@@ -302,3 +320,11 @@ def find_row_for_member(rows: Iterable[Any], member: discord.Member) -> Optional
             )
 
     return None
+
+
+def find_row_for_member(rows: Iterable[Any], member: discord.Member) -> Optional[RowMatch]:
+    """Resolve a Discord member to a TopDeck row. Convenience wrapper — builds index each call.
+
+    For batch lookups, use build_row_index() + find_row_in_index() instead.
+    """
+    return find_row_in_index(build_row_index(rows), member)

@@ -905,112 +905,26 @@ class TopdeckOnlineSyncCog(commands.Cog):
             )
             return
 
-        month_str = _month_start_utc().strftime("%Y-%m")
-        _log(f"[online-sync] {_now_iso()} /synconline started for month {month_str}.")
-
         await ctx.defer(ephemeral=True)
 
-        async with self._lock:
-            try:
-                guild = ctx.guild
+        result = await self.run_sync(ctx.guild)
 
-                # 0) Load SpellBot scan cache for incremental scanning
-                cached_games, last_message_id = await _load_scan_cache(
-                    TOPDECK_BRACKET_ID, month_str
-                )
+        if not result.get("success"):
+            await ctx.followup.send(
+                "Something went wrong while rebuilding online-game stats. "
+                "Check the bot logs for details.",
+                ephemeral=True,
+            )
+            return
 
-                # 1) Scan SpellBot ready games (incremental if cache exists)
-                new_games, new_max_id = await _scan_spellbot_ready_games(
-                    guild, after_message_id=last_message_id
-                )
-
-                # Combine cached + new games, dedup by message_id
-                seen_ids: set[int] = set()
-                spellbot_games: List[SpellbotReadyGame] = []
-                for g in cached_games + new_games:
-                    if g.message_id not in seen_ids:
-                        seen_ids.add(g.message_id)
-                        spellbot_games.append(g)
-
-                # Determine the new checkpoint
-                checkpoint_id = new_max_id if new_max_id is not None else last_message_id
-
-                _log(
-                    f"[online-sync] SpellBot games: {len(cached_games)} cached + "
-                    f"{len(new_games)} new = {len(spellbot_games)} total."
-                )
-
-                # 2) Fetch TopDeck matches for this month
-                topdeck_matches = await _fetch_topdeck_matches_for_month()
-
-                # 3) Mark which TopDeck matches are online (handles + time)
-                match_online, per_player_online = _match_spellbot_to_topdeck(
-                    spellbot_games,
-                    topdeck_matches,
-                )
-
-                # 4) Build entries for ALL TopDeck matches
-                entries: List[Dict[str, Any]] = []
-                online_count = 0
-                for mi in topdeck_matches:
-                    key = (mi.season, mi.table)
-                    online = bool(match_online.get(key, False))
-                    if online:
-                        online_count += 1
-
-                    entries.append(
-                        {
-                            "season": mi.season,
-                            "table": mi.table,
-                            "topdeck_match_key": f"S{mi.season}:T{mi.table}",
-                            "start_ts": mi.start_ts,
-                            "player_entrants": mi.entrant_ids,
-                            "player_uids": mi.uids,
-                            "online": online,
-                        }
-                    )
-
-                # 5) Save JSON (merged with existing/timer-written data)
-                payload = {
-                    "bracket_id": TOPDECK_BRACKET_ID,
-                    "guild_id": guild.id,
-                    "month": month_str,
-                    "built_at": int(datetime.now(timezone.utc).timestamp()),
-                    "spellbot_lfg_channel_id": SPELLBOT_LFG_CHANNEL_ID,
-                    "matches": entries,
-                    "per_player_online": per_player_online,
-                }
-                await _save_online_stats_to_db(payload)
-
-                # 6) Save SpellBot scan cache for next incremental run
-                await _save_scan_cache(
-                    TOPDECK_BRACKET_ID, month_str, spellbot_games, checkpoint_id
-                )
-
-            except Exception as e:
-                _log(f"[online-sync] Error during sync: {type(e).__name__}: {e}")
-                await ctx.followup.send(
-                    "Something went wrong while rebuilding online-game stats. "
-                    "Check the bot logs for details.",
-                    ephemeral=True,
-                )
-                return
-
-        _log(
-            f"[online-sync] {_now_iso()} /synconline finished. "
-            f"SpellBot ready games: {len(spellbot_games)}, "
-            f"TopDeck matches: {len(topdeck_matches)}, "
-            f"Online TopDeck games: {online_count}, "
-            f"Players with ≥1 online game: {len(per_player_online)}."
-        )
-
+        month_str = _month_start_utc().strftime("%Y-%m")
         await ctx.followup.send(
             (
                 f"Online-game stats rebuilt for **{month_str}**.\n"
-                f"SpellBot ready games found: **{len(spellbot_games)}**\n"
-                f"TopDeck matches this month: **{len(topdeck_matches)}**\n"
-                f"Matched *online* TopDeck games (by players + time): **{online_count}**\n"
-                f"Players with ≥1 online game: **{len(per_player_online)}**\n\n"
+                f"SpellBot ready games found: **{result.get('spellbot_games', 0)}**\n"
+                f"TopDeck matches this month: **{result.get('topdeck_matches', 0)}**\n"
+                f"Matched *online* TopDeck games (by players + time): **{result.get('online_count', 0)}**\n"
+                f"Players with ≥1 online game: **{result.get('players_with_online', 0)}**\n\n"
                 "Data saved to MongoDB (collection: online_games)."
             ),
             ephemeral=True,
