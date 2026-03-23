@@ -306,13 +306,17 @@ class TopDeckTagger:
         ctx: discord.ApplicationContext,
         voice_channel: discord.VoiceChannel,
         non_bot_members: List[discord.Member],
-    ) -> None:
-        """Match VC to a TopDeck pod and mark it as online. Warn in chat if no match."""
+    ) -> List[discord.Member]:
+        """Match VC to a TopDeck pod and mark it as online. Warn in chat if no match.
+
+        Returns the list of discord.Member objects that matched the pod
+        (only pod players, not spectators/judges). Empty list if no match.
+        """
         guild = ctx.guild
         if guild is None:
-            return
+            return []
         if not self.bracket_id:
-            return
+            return []
 
         try:
             match = await self.match_vc_to_pod(voice_channel, non_bot_members)
@@ -321,10 +325,9 @@ class TopDeckTagger:
                 "[timer/topdeck] Error while matching VC to TopDeck pods: "
                 f"{type(e).__name__}: {e}"
             )
-            return
+            return []
 
         if match is None:
-            # No match → warn chat (public)
             try:
                 await ctx.channel.send(
                     "⚠️ I couldn't find a matching **TopDeck game in progress** "
@@ -336,9 +339,21 @@ class TopDeckTagger:
                     "[timer/topdeck] Failed to send 'no TopDeck match' warning: "
                     f"{type(e).__name__}: {e}"
                 )
-            return
+            return []
 
         await self.mark_match_online(guild, match)
-        
+
         # Check for Treasure Pod
         await self.check_treasure_pod(guild, match, ctx.channel, vc_members=non_bot_members)
+
+        # Build matched member list
+        pod_handles = {h for h in (getattr(match, "entrant_discords_norm", []) or []) if h}
+        matched_members: List[discord.Member] = []
+        for m in non_bot_members:
+            if m.bot:
+                continue
+            member_handles = norm_member_handles(m)
+            if member_handles & pod_handles:
+                matched_members.append(m)
+
+        return matched_members
