@@ -4,12 +4,11 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from colorama import just_fix_windows_console
 
-from utils.logger import log_sync, log_ok, log_warn, log_error
-from utils.settings import GUILD_ID
-
-
 just_fix_windows_console()
 load_dotenv()
+
+from utils.logger import log_sync, log_ok, log_warn, log_error
+from utils.settings import GUILD_ID
 
 # Mongo bootstrap (Motor)
 try:
