@@ -42,6 +42,7 @@ from .timer import (
     ffmpeg_src as _ffmpeg_src,
     non_bot_members as _non_bot_members,
     build_progress_bar as _build_progress_bar,
+    build_timer_embed as _build_timer_embed,
     VOICE_CONNECT_TIMEOUT,
     ReplaceTimerView,
     TopDeckTagger,
@@ -61,6 +62,9 @@ EXTRA_TURNS_MINUTES: float = _env_float("EXTRA_TURNS_MINUTES", 15.0)
 
 # offset: minutes BEFORE main time end when it should play
 OFFSET_MINUTES: float = _env_float("OFFSET_MINUTES", 10.0)
+
+# How often the embed updates (minutes)
+TIMER_UPDATE_INTERVAL_MINUTES: float = _env_float("TIMER_UPDATE_INTERVAL_MINUTES", 5.0)
 
 # Audio file paths (override via env if needed)
 TIMER_START_AUDIO: str = os.getenv("TIMER_START_AUDIO", "./timer/timer80.mp3")
