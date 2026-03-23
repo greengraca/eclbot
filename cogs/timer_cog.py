@@ -218,28 +218,24 @@ class ECLTimerCog(commands.Cog):
                 log_sync("[timer] No active timers to rehydrate")
                 return
 
-            # Keep only the highest-seq timer per voice channel (discard stale duplicates)
+            # Keep only the most recently updated timer per voice channel (discard stale duplicates)
             best_per_vc: Dict[int, Dict] = {}
             for doc in docs:
                 vc = int(doc.get("voice_channel_id", 0))
-                tid = doc.get("timer_id", "")
-                parts = tid.split("_")
-                seq = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0
                 prev = best_per_vc.get(vc)
                 if prev is None:
                     best_per_vc[vc] = doc
                 else:
-                    prev_tid = prev.get("timer_id", "")
-                    prev_parts = prev_tid.split("_")
-                    prev_seq = int(prev_parts[1]) if len(prev_parts) == 2 and prev_parts[1].isdigit() else 0
-                    if seq > prev_seq:
-                        # Delete the older one from DB
-                        await self._delete_timer_from_db(prev_tid)
-                        log_sync(f"[timer] Deleted stale duplicate timer {prev_tid} (superseded by {tid})")
+                    # Compare by updated_at (most recent wins)
+                    doc_ts = doc.get("updated_at") or doc.get("created_at")
+                    prev_ts = prev.get("updated_at") or prev.get("created_at")
+                    if doc_ts and prev_ts and doc_ts > prev_ts:
+                        await self._delete_timer_from_db(prev.get("timer_id", ""))
+                        log_sync(f"[timer] Deleted stale duplicate {prev.get('timer_id')} (superseded by {doc.get('timer_id')})")
                         best_per_vc[vc] = doc
                     else:
-                        await self._delete_timer_from_db(tid)
-                        log_sync(f"[timer] Deleted stale duplicate timer {tid} (superseded by {prev_tid})")
+                        await self._delete_timer_from_db(doc.get("timer_id", ""))
+                        log_sync(f"[timer] Deleted stale duplicate {doc.get('timer_id')} (superseded by {prev.get('timer_id')})")
 
             valid_docs = list(best_per_vc.values())
             log_sync(f"[timer] Rehydrating {len(valid_docs)} timers from DB...")
