@@ -218,10 +218,34 @@ class ECLTimerCog(commands.Cog):
                 log_sync("[timer] No active timers to rehydrate")
                 return
 
-            log_sync(f"[timer] Rehydrating {len(docs)} timers from DB...")
+            # Keep only the highest-seq timer per voice channel (discard stale duplicates)
+            best_per_vc: Dict[int, Dict] = {}
+            for doc in docs:
+                vc = int(doc.get("voice_channel_id", 0))
+                tid = doc.get("timer_id", "")
+                parts = tid.split("_")
+                seq = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0
+                prev = best_per_vc.get(vc)
+                if prev is None:
+                    best_per_vc[vc] = doc
+                else:
+                    prev_tid = prev.get("timer_id", "")
+                    prev_parts = prev_tid.split("_")
+                    prev_seq = int(prev_parts[1]) if len(prev_parts) == 2 and prev_parts[1].isdigit() else 0
+                    if seq > prev_seq:
+                        # Delete the older one from DB
+                        await self._delete_timer_from_db(prev_tid)
+                        log_sync(f"[timer] Deleted stale duplicate timer {prev_tid} (superseded by {tid})")
+                        best_per_vc[vc] = doc
+                    else:
+                        await self._delete_timer_from_db(tid)
+                        log_sync(f"[timer] Deleted stale duplicate timer {tid} (superseded by {prev_tid})")
+
+            valid_docs = list(best_per_vc.values())
+            log_sync(f"[timer] Rehydrating {len(valid_docs)} timers from DB...")
             rehydrated_count = 0
 
-            for doc in docs:
+            for doc in valid_docs:
                 try:
                     rehydrated = await self._rehydrate_timer(doc)
                     if rehydrated:
