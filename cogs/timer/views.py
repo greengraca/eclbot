@@ -70,6 +70,7 @@ class ReplaceTimerView(discord.ui.View):
             self.voice_channel,
             game_number=self.game_number,
             ignore_autostop=ignore_autostop,
+            matched_players=[],
         )
         self.stop()
 

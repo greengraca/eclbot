@@ -159,6 +159,8 @@ class ECLTimerCog(commands.Cog):
         ignore_autostop: bool,
         messages: Dict[str, str],
         audio: Dict[str, str],
+        player_mention_ids: Optional[List[int]] = None,
+        game_number: int = 0,
     ) -> None:
         """Persist timer state to MongoDB."""
         try:
@@ -185,6 +187,8 @@ class ECLTimerCog(commands.Cog):
                 ignore_autostop=ignore_autostop,
                 messages=messages,
                 audio=audio,
+                player_mention_ids=player_mention_ids,
+                game_number=game_number,
                 expires_at=expires_at,
             )
         except Exception as e:
@@ -922,7 +926,10 @@ class ECLTimerCog(commands.Cog):
             if ch:
                 try:
                     msg = await ch.fetch_message(m_id)
-                    await msg.edit(content=f"Timer was stopped {reason_text}")
+                    await msg.edit(
+                        content=f"Timer was stopped {reason_text}",
+                        embed=None,
+                    )
 
                     async def _del(m: discord.Message):
                         await asyncio.sleep(60)
@@ -949,6 +956,7 @@ class ECLTimerCog(commands.Cog):
         *,
         game_number: int,
         ignore_autostop: bool = False,
+        matched_players: Optional[List[discord.Member]] = None,
     ):
         guild = ctx.guild
         if guild is None:
@@ -966,7 +974,6 @@ class ECLTimerCog(commands.Cog):
         seq = self.voice_channel_timers[vc_id]
         timer_id = make_timer_id(vc_id, seq)
 
-        # Always create fresh list for this timer_id (prevents KeyError race)
         self.timer_tasks[timer_id] = []
 
         log_sync(f"[timer] Using timer_id={timer_id}")
@@ -975,31 +982,40 @@ class ECLTimerCog(commands.Cog):
         to_end_delay_sec = max(0.0, (main_minutes - offset) * 60.0)
         extra_seconds = max(0.0, extra_minutes * 60.0)
 
-        log_sync(
-            f"[timer] Calculated to_end_delay_sec={to_end_delay_sec} "
-            f"({(main_minutes - offset):.2f} minutes from start)"
+        start_time = now_utc()
+        end_ts_main = ts(start_time + timedelta(seconds=main_seconds))
+        end_ts_final = ts(start_time + timedelta(seconds=main_seconds + extra_seconds))
+
+        player_ids = [m.id for m in (matched_players or [])]
+
+        # Build initial embed
+        embed = _build_timer_embed(
+            game_number=game_number,
+            phase="running",
+            main_total=main_seconds,
+            extra_total=extra_seconds,
+            remaining_main=main_seconds,
+            remaining_total=main_seconds + extra_seconds,
+            end_ts_main=end_ts_main,
+            end_ts_final=end_ts_final,
+            player_ids=player_ids,
         )
 
-        end_time_main = now_utc() + timedelta(minutes=main_minutes)
-        end_ts_main = ts(end_time_main)
-        final_time = end_time_main + timedelta(minutes=extra_minutes)
-
-        turns_msg = (
-            f"Time is over. You have **{int(extra_minutes)} minutes** to reach a "
-            f"conclusion. Good luck! - <t:{ts(final_time)}:R>."
-        )
-        final_msg = "If no one won until now, the game is a draw. Well Played."
+        # Content with mentions for ping
+        mentions = " ".join(f"<@{uid}>" for uid in player_ids) if player_ids else None
 
         sent = await safe_ctx_followup(ctx,
-            f"Timer for **{voice_channel.name}** (Game in room {game_number}) will start now and end "
-            f"<t:{end_ts_main}:R>. Play to win and to your outs.",
-            ephemeral=False,  # force public
+            content=mentions,
+            embed=embed,
+            ephemeral=False,
         )
 
         self.timer_messages[timer_id] = (sent.channel.id, sent.id)
 
+        draw_event = asyncio.Event()
+
         self.active_timers[timer_id] = {
-            "start_time": now_utc(),
+            "start_time": start_time,
             "durations": {
                 "main": main_seconds,
                 "easter_egg": to_end_delay_sec,
@@ -1009,61 +1025,55 @@ class ECLTimerCog(commands.Cog):
             "voice_channel_id": voice_channel.id,
             "ignore_autostop": bool(ignore_autostop),
             "messages": {
-                "turns": turns_msg,
-                "final": final_msg,
+                "turns": "",
+                "final": "",
             },
             "audio": {
                 "turns": EXTRA_TIME_AUDIO,
                 "final": FINAL_DRAW_AUDIO,
                 "easter_egg": TEN_TO_END_AUDIO,
             },
+            "player_mention_ids": player_ids,
+            "game_number": game_number,
+            "phase_override": None,
+            "draw_event": draw_event,
         }
 
-        # Schedule tasks BEFORE awaiting voice playback (prevents autostop race KeyError)
-        # main end -> extra time msg + audio
+        # Schedule 4 tasks: embed loop + 3 audio-only
+        # 1. Embed update loop
         self.timer_tasks[timer_id].append(
             asyncio.create_task(
-                self.timer_end(
-                    ctx,
-                    main_minutes,
-                    turns_msg,
-                    EXTRA_TIME_AUDIO,
-                    timer_id=timer_id,
-                    edit=True,
-                )
+                self._embed_update_loop(timer_id, game_number)
             )
         )
-        # offset before end
+        # 2. Easter egg audio (10 min warning)
         self.timer_tasks[timer_id].append(
             asyncio.create_task(
-                self.play_voice_file(
-                    ctx,
-                    TEN_TO_END_AUDIO,
-                    to_end_delay_sec,
-                    timer_id=timer_id,
-                )
+                self._audio_at(to_end_delay_sec, TEN_TO_END_AUDIO, timer_id, voice_channel.id)
             )
         )
-        # final draw
+        # 3. Main-end audio
         self.timer_tasks[timer_id].append(
             asyncio.create_task(
-                self.timer_end(
-                    ctx,
-                    main_minutes + extra_minutes,
-                    final_msg,
+                self._audio_at(main_seconds, EXTRA_TIME_AUDIO, timer_id, voice_channel.id)
+            )
+        )
+        # 4. Final draw audio + signal
+        self.timer_tasks[timer_id].append(
+            asyncio.create_task(
+                self._final_audio(
+                    main_seconds + extra_seconds,
                     FINAL_DRAW_AUDIO,
-                    timer_id=timer_id,
-                    edit=True,
-                    delete_after=1,
-                    final_cleanup=True,
+                    timer_id,
+                    voice_channel.id,
+                    draw_event,
                 )
             )
         )
 
         log_sync(
             f"[timer] Scheduled tasks for timer_id={timer_id}: "
-            f"{len(self.timer_tasks[timer_id])} tasks, "
-            f"delay_sec={to_end_delay_sec}"
+            f"{len(self.timer_tasks[timer_id])} tasks"
         )
 
         # Persist timer to DB
@@ -1074,15 +1084,17 @@ class ECLTimerCog(commands.Cog):
             voice_channel_id=voice_channel.id,
             message_id=sent.id,
             status="active",
-            start_time_utc=self.active_timers[timer_id]["start_time"],
+            start_time_utc=start_time,
             durations=self.active_timers[timer_id]["durations"],
             remaining=None,
             ignore_autostop=bool(ignore_autostop),
             messages=self.active_timers[timer_id]["messages"],
             audio=self.active_timers[timer_id]["audio"],
+            player_mention_ids=player_ids,
+            game_number=game_number,
         )
 
-        # intro audio
+        # Intro audio (non-blocking for the timer tasks)
         ok = await self._play(
             guild,
             TIMER_START_AUDIO,
@@ -1090,12 +1102,10 @@ class ECLTimerCog(commands.Cog):
             leave_after=True,
         )
 
-        # If we got auto-stopped / replaced while playing intro, just stop here.
         if timer_id not in self.active_timers:
             return
 
         if not ok:
-            # We continue with the text timers, but tell the caller audio failed.
             await safe_ctx_followup(ctx,
                 f"Started timer for **{voice_channel.name}**, but I couldn't "
                 f"connect to voice in time. Text timers will still run, but "
@@ -1190,8 +1200,9 @@ class ECLTimerCog(commands.Cog):
         await safe_ctx_defer(ctx, ephemeral=False, label="timer")  # non-ephemeral; followups will be public
 
         # Try to tag this pod as an online TopDeck game (or warn if not found)
+        matched_players: List[discord.Member] = []
         try:
-            await self.topdeck_tagger.tag_online_game_for_timer(ctx, voice_channel, non_bot)
+            matched_players = await self.topdeck_tagger.tag_online_game_for_timer(ctx, voice_channel, non_bot)
         except Exception as e:
             log_warn(
                 "[timer/topdeck] Unexpected error in tag_online_game_for_timer: "
@@ -1199,7 +1210,12 @@ class ECLTimerCog(commands.Cog):
             )
 
         # start timer (schedules tasks + plays audio)
-        await self._start_timer(ctx, voice_channel, game_number=game, ignore_autostop=ignore_autostop)
+        await self._start_timer(
+            ctx, voice_channel,
+            game_number=game,
+            ignore_autostop=ignore_autostop,
+            matched_players=matched_players,
+        )
 
     @commands.slash_command(
         name="endtimer",
