@@ -191,6 +191,9 @@ class TimestampCog(commands.Cog):
 
         user_id = ctx.author.id
 
+        # Load saved preference once (used for both tz fallback and first-time check)
+        saved_pref = await db.user_preferences.find_one({"user_id": user_id})
+
         # Resolve timezone
         if timezone:
             # Explicit timezone provided → map label to zone id
@@ -199,9 +202,7 @@ class TimestampCog(commands.Cog):
                 await ctx.respond("Unknown timezone selection.", ephemeral=True)
                 return
         else:
-            # Try loading saved preference
-            pref = await db.user_preferences.find_one({"user_id": user_id})
-            zone_id = pref["timezone"] if pref else None
+            zone_id = saved_pref["timezone"] if saved_pref else None
 
         if not zone_id:
             # First-time user, no timezone provided
@@ -215,8 +216,6 @@ class TimestampCog(commands.Cog):
         unix_ts = _build_unix_ts(day, time, month, year, zone_id)
 
         # Check if this is a first-time timezone setup (explicit tz + no saved pref)
-        saved_pref = await db.user_preferences.find_one({"user_id": user_id})
-
         if timezone and not saved_pref:
             # First-time: confirm timezone with the user
             now_in_tz = datetime.now(ZoneInfo(zone_id))

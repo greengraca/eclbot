@@ -55,7 +55,6 @@ from utils.persistence import (
     save_lobby as db_save_lobby,
     delete_lobby as db_delete_lobby,
     get_all_active_lobbies as db_get_all_active_lobbies,
-    get_max_lobby_id as db_get_max_lobby_id,
     cleanup_expired_lobbies as db_cleanup_expired_lobbies,
     update_lobby_expires_at as db_update_lobby_expires_at,
 )
