@@ -10,6 +10,22 @@ import discord
 from utils.logger import log_warn
 
 
+# ---------------- game color ----------------
+
+def game_color(game_number: int) -> int:
+    """Deterministic embed color for a game/VC number.
+
+    Uses evenly-spaced hues on the HSL wheel (saturation 70%, lightness 55%)
+    so every VC gets a visually distinct, consistent color across all embeds.
+    Works for any number of games — no hardcoded palette.
+    """
+    import colorsys
+    # Golden-angle spacing gives good visual separation even for adjacent numbers
+    hue = ((game_number * 137.508) % 360) / 360.0
+    r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.70)
+    return (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)
+
+
 # ---------------- env helpers ----------------
 
 def env_float(name: str, default: float) -> float:
@@ -176,14 +192,6 @@ def build_progress_bar(
 # ---------------- timer embed ----------------
 
 # Phase colors
-_PHASE_COLORS = {
-    "running": 0x3498DB,  # blue
-    "extra": 0xE67E22,    # orange
-    "draw": 0xE74C3C,     # red
-    "paused": 0x95A5A6,   # gray
-}
-
-
 def build_timer_embed(
     game_number: int,
     phase: str,
@@ -203,7 +211,7 @@ def build_timer_embed(
     end_ts_main / end_ts_final: Unix timestamps for Discord <t:...:R> tags.
     player_ids: user IDs for mentions; empty = omit Players field.
     """
-    color = _PHASE_COLORS.get(phase, 0x95A5A6)
+    color = game_color(game_number)
 
     # Title
     titles = {

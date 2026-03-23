@@ -36,6 +36,7 @@ from .timer import (
     non_bot_members as _non_bot_members,
     build_progress_bar as _build_progress_bar,
     build_timer_embed as _build_timer_embed,
+    game_color as _game_color,
     VOICE_CONNECT_TIMEOUT,
     ReplaceTimerView,
     TopDeckTagger,
@@ -1090,7 +1091,7 @@ class ECLTimerCog(commands.Cog):
         # Try to tag this pod as an online TopDeck game (or warn if not found)
         matched_players: List[discord.Member] = []
         try:
-            matched_players = await self.topdeck_tagger.tag_online_game_for_timer(ctx, voice_channel, non_bot)
+            matched_players = await self.topdeck_tagger.tag_online_game_for_timer(ctx, voice_channel, non_bot, game_number=game)
         except Exception as e:
             log_warn(
                 "[timer/topdeck] Unexpected error in tag_online_game_for_timer: "
@@ -1527,12 +1528,13 @@ class ECLTimerCog(commands.Cog):
 
             game_number = data.get("game_number", game)
 
+            color = _game_color(game_number)
             if remaining_main > 0:
                 m, s = int(remaining_main // 60), int(remaining_main % 60)
                 embed = discord.Embed(
                     title=f"⏱️ ECL Game {game_number} — Running",
                     description=f"```{bar}```",
-                    color=0x2ECC71,
+                    color=color,
                 )
                 embed.add_field(name="Main Time", value=f"**{m}:{s:02d}** remaining", inline=False)
             elif remaining_total > 0:
@@ -1540,14 +1542,14 @@ class ECLTimerCog(commands.Cog):
                 embed = discord.Embed(
                     title=f"⏱️ ECL Game {game_number} — Extra Time",
                     description=f"```{bar}```",
-                    color=0xF39C12,
+                    color=color,
                 )
                 embed.add_field(name="Extra Time", value=f"**{m}:{s:02d}** remaining", inline=False)
             else:
                 embed = discord.Embed(
                     title=f"⏱️ ECL Game {game_number} — Game Over",
                     description=f"```{bar}```",
-                    color=0xE74C3C,
+                    color=color,
                 )
 
             await safe_ctx_respond(ctx, embed=embed, ephemeral=True)
@@ -1573,7 +1575,7 @@ class ECLTimerCog(commands.Cog):
             embed = discord.Embed(
                 title=f"⏸️ ECL Game {game_number} — Paused",
                 description=f"```{bar}```",
-                color=0x95A5A6,
+                color=_game_color(game_number),
             )
             if remaining_main > 0:
                 m, s = int(remaining_main // 60), int(remaining_main % 60)

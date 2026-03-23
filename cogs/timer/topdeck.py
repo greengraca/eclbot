@@ -20,7 +20,7 @@ from utils.logger import log_sync, log_ok, log_warn, log_debug
 from utils.treasure_pods import TreasurePodManager
 from utils.dates import month_key
 
-from .helpers import norm_member_handles, month_start_utc
+from .helpers import norm_member_handles, month_start_utc, game_color
 
 if TYPE_CHECKING:
     from ..timer_cog import ECLTimerCog
@@ -221,6 +221,7 @@ class TopDeckTagger:
         match: InProgressPod,
         channel: discord.TextChannel,
         vc_members: Optional[List[discord.Member]] = None,
+        game_number: int = 0,
     ) -> Optional[dict]:
         """
         Check if this match is a Treasure Pod.
@@ -286,7 +287,7 @@ class TopDeckTagger:
                 embed = discord.Embed(
                     title=f"🎁 {pod_title}",
                     description=pod_description,
-                    color=0xFFD700,  # Gold
+                    color=game_color(game_number) if game_number else 0xFFD700,
                 )
                 embed.add_field(name="Pod Number", value=str(table), inline=True)
                 if pod_image_url:
@@ -306,6 +307,7 @@ class TopDeckTagger:
         ctx: discord.ApplicationContext,
         voice_channel: discord.VoiceChannel,
         non_bot_members: List[discord.Member],
+        game_number: int = 0,
     ) -> List[discord.Member]:
         """Match VC to a TopDeck pod and mark it as online. Warn in chat if no match.
 
@@ -344,7 +346,7 @@ class TopDeckTagger:
         await self.mark_match_online(guild, match)
 
         # Check for Treasure Pod
-        await self.check_treasure_pod(guild, match, ctx.channel, vc_members=non_bot_members)
+        await self.check_treasure_pod(guild, match, ctx.channel, vc_members=non_bot_members, game_number=game_number)
 
         # Build matched member list
         pod_handles = {h for h in (getattr(match, "entrant_discords_norm", []) or []) if h}

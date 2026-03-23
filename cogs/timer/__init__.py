@@ -15,6 +15,7 @@ from .helpers import (
     non_bot_members,
     build_progress_bar,
     build_timer_embed,
+    game_color,
     VOICE_CONNECT_TIMEOUT,
 )
 from .views import ReplaceTimerView
@@ -35,6 +36,7 @@ __all__ = [
     "non_bot_members",
     "build_progress_bar",
     "build_timer_embed",
+    "game_color",
     "VOICE_CONNECT_TIMEOUT",
     # Views
     "ReplaceTimerView",
