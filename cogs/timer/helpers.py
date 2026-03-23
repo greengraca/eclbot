@@ -219,7 +219,7 @@ def build_timer_embed(
     # Players field (not on draw phase)
     if player_ids and phase != "draw":
         mentions = " · ".join(f"<@{uid}>" for uid in player_ids)
-        embed.add_field(name="🎮 Players", value=mentions, inline=False)
+        embed.add_field(name="Players", value=mentions, inline=False)
 
     # Progress bar
     bar = build_progress_bar(main_total, extra_total, remaining_main, remaining_total)
@@ -235,7 +235,7 @@ def build_timer_embed(
         )
         embed.description = (
             f"```{bar}```"
-            f"\nMain ends <t:{end_ts_main}:R> · Draw <t:{end_ts_final}:R>"
+            f"\nMain time ends <t:{end_ts_main}:R> · Draw <t:{end_ts_final}:R>"
         )
         embed.set_footer(text="Updates every 5 min · Use /checktimer or timestamps for exact time")
 
@@ -251,7 +251,7 @@ def build_timer_embed(
         )
         embed.description = (
             f"Time is over. You have **{extra_minutes} minutes** to finish "
-            f"the active player turn. Good luck!\n```{bar}```"
+            f"the active player's turn. Good luck!\n```{bar}```"
             f"\nDraw <t:{end_ts_final}:R>"
         )
         embed.set_footer(text="Updates every 5 min · Use /checktimer or timestamps for exact time")

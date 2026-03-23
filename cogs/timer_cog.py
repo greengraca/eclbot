@@ -1523,33 +1523,33 @@ class ECLTimerCog(commands.Cog):
             remaining_total = max(main_dur + extra_dur - elapsed, 0.0)
 
             orig = data.get("original_durations") or dur
-            main_total = orig["main"]
-            extra_total = orig["extra"]
+            bar = _build_progress_bar(orig["main"], orig["extra"], remaining_main, remaining_total)
 
-            end_ts_main = ts(data["start_time"] + timedelta(seconds=main_dur))
-            end_ts_final = ts(data["start_time"] + timedelta(seconds=main_dur + extra_dur))
-
-            if remaining_main > 0:
-                phase = "running"
-            elif remaining_total > 0:
-                phase = "extra"
-            else:
-                phase = "draw"
-
-            player_ids = data.get("player_mention_ids", [])
             game_number = data.get("game_number", game)
 
-            embed = _build_timer_embed(
-                game_number=game_number,
-                phase=phase,
-                main_total=main_total,
-                extra_total=extra_total,
-                remaining_main=remaining_main,
-                remaining_total=remaining_total,
-                end_ts_main=end_ts_main,
-                end_ts_final=end_ts_final,
-                player_ids=player_ids,
-            )
+            if remaining_main > 0:
+                m, s = int(remaining_main // 60), int(remaining_main % 60)
+                embed = discord.Embed(
+                    title=f"⏱️ ECL Game {game_number} — Running",
+                    description=f"```{bar}```",
+                    color=0x2ECC71,
+                )
+                embed.add_field(name="Main Time", value=f"**{m}:{s:02d}** remaining", inline=False)
+            elif remaining_total > 0:
+                m, s = int(remaining_total // 60), int(remaining_total % 60)
+                embed = discord.Embed(
+                    title=f"⏱️ ECL Game {game_number} — Extra Time",
+                    description=f"```{bar}```",
+                    color=0xF39C12,
+                )
+                embed.add_field(name="Extra Time", value=f"**{m}:{s:02d}** remaining", inline=False)
+            else:
+                embed = discord.Embed(
+                    title=f"⏱️ ECL Game {game_number} — Game Over",
+                    description=f"```{bar}```",
+                    color=0xE74C3C,
+                )
+
             await safe_ctx_respond(ctx, embed=embed, ephemeral=True)
             return
 
@@ -1566,21 +1566,22 @@ class ECLTimerCog(commands.Cog):
                 "main": TIMER_MINUTES * 60.0,
                 "extra": EXTRA_TURNS_MINUTES * 60.0,
             }
+            bar = _build_progress_bar(orig["main"], orig["extra"], remaining_main, remaining_total)
 
-            player_ids = data.get("player_mention_ids", [])
             game_number = data.get("game_number", game)
 
-            embed = _build_timer_embed(
-                game_number=game_number,
-                phase="paused",
-                main_total=orig["main"],
-                extra_total=orig["extra"],
-                remaining_main=remaining_main,
-                remaining_total=remaining_total,
-                end_ts_main=0,
-                end_ts_final=0,
-                player_ids=player_ids,
+            embed = discord.Embed(
+                title=f"⏸️ ECL Game {game_number} — Paused",
+                description=f"```{bar}```",
+                color=0x95A5A6,
             )
+            if remaining_main > 0:
+                m, s = int(remaining_main // 60), int(remaining_main % 60)
+                embed.add_field(name="Main Time", value=f"**{m}:{s:02d}** remaining", inline=False)
+            elif remaining_total > 0:
+                m, s = int(remaining_total // 60), int(remaining_total % 60)
+                embed.add_field(name="Extra Time", value=f"**{m}:{s:02d}** remaining", inline=False)
+
             await safe_ctx_respond(ctx, embed=embed, ephemeral=True)
             return
 
