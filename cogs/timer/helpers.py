@@ -233,9 +233,9 @@ def build_timer_embed(
             value=f"**{m}:{s:02d}** remaining",
             inline=False,
         )
-        embed.description = f"```{bar}```"
-        embed.set_footer(
-            text=f"⏰ Main ends <t:{end_ts_main}:R> · Draw at <t:{end_ts_final}:R>"
+        embed.description = (
+            f"```{bar}```"
+            f"\n⏰ Main ends <t:{end_ts_main}:R> · Draw at <t:{end_ts_final}:R>"
         )
 
     elif phase == "extra":
@@ -251,8 +251,8 @@ def build_timer_embed(
         embed.description = (
             f"Time is over. You have **{extra_minutes} minutes** to finish "
             f"the active player turn. Good luck!\n```{bar}```"
+            f"\n⏰ Draw at <t:{end_ts_final}:R>"
         )
-        embed.set_footer(text=f"⏰ Draw at <t:{end_ts_final}:R>")
 
     elif phase == "draw":
         embed.description = (
