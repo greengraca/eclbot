@@ -10,6 +10,7 @@ from topdeck_fetch import get_league_rows_cached, PlayerRow
 from online_games_store import count_online_games_by_topdeck_uid_str
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
+from utils.interactions import safe_ctx_defer, safe_ctx_followup
 from utils.settings import GUILD_ID
 
 
@@ -134,13 +135,13 @@ class TopdeckLeagueCog(commands.Cog):
             return
 
         # Defer as NON-ephemeral so we can send a public embed first
-        await ctx.defer(ephemeral=False)
+        await safe_ctx_defer(ctx, ephemeral=False)
 
         try:
             rows, fetched_at = await self._load_rows()
         except Exception as e:
             log_warn(f"[topdeck] /mostgames fetch error: {type(e).__name__}: {e}")
-            await ctx.followup.send(
+            await safe_ctx_followup(ctx,
                 "I couldn't fetch TopDeck data right now. "
                 "Please try again in a bit.",
                 ephemeral=True,
@@ -148,7 +149,7 @@ class TopdeckLeagueCog(commands.Cog):
             return
 
         if not rows:
-            await ctx.followup.send(
+            await safe_ctx_followup(ctx,
                 "I couldn't find any players in this bracket.",
                 ephemeral=True,
             )
@@ -188,7 +189,7 @@ class TopdeckLeagueCog(commands.Cog):
             
             embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
 
-        await ctx.followup.send(embed=embed)
+        await safe_ctx_followup(ctx,embed=embed)
 
         # ---- Ephemeral personal message ----
         member = ctx.author
@@ -226,7 +227,7 @@ class TopdeckLeagueCog(commands.Cog):
                 f"TopDeck data: last updated <t:{ts_int}:R>."
             )
 
-        await ctx.followup.send(personal_msg, ephemeral=True)
+        await safe_ctx_followup(ctx,personal_msg, ephemeral=True)
 
     # ------------- /top16 -------------
 
@@ -245,7 +246,7 @@ class TopdeckLeagueCog(commands.Cog):
 
         # --- SAFELY ACK THE INTERACTION ASAP ---
         try:
-            await ctx.defer(ephemeral=False)
+            await safe_ctx_defer(ctx, ephemeral=False)
         except discord.errors.NotFound:
             # Interaction already expired (bot lagged). Nothing we can do.
             log_warn("[topdeck] /top16 interaction expired before defer (Unknown interaction).")
@@ -260,12 +261,7 @@ class TopdeckLeagueCog(commands.Cog):
             embed: Optional[discord.Embed] = None,
             ephemeral: bool,
         ):
-            try:
-                await ctx.followup.send(content=content, embed=embed, ephemeral=ephemeral)
-            except discord.errors.NotFound:
-                log_warn("[topdeck] /top16 followup failed: interaction expired.")
-            except discord.errors.HTTPException as e:
-                log_warn(f"[topdeck] /top16 followup failed: {type(e).__name__}: {e}")
+            await safe_ctx_followup(ctx, content=content, embed=embed, ephemeral=ephemeral)
 
         # Load league rows
         try:

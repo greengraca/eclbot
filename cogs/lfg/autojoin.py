@@ -366,9 +366,9 @@ async def autojoin_specific_lobby_from_lfg(
                 current = cog.state.peek_guild_lobbies(guild.id).get(lobby_id)
                 if current is not None and current is lobby:
                     lobby.link = link_created
+                    lobby.link_creating = False
 
-            # ready_embed = cog._build_ready_embed(guild, lobby, started_at) 
-            ready_embed = await cog._build_ready_embed(guild, lobby, started_at)  # ✅
+            ready_embed = await cog._build_ready_embed(guild, lobby, started_at)
 
 
             if msg:

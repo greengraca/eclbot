@@ -606,7 +606,15 @@ async def get_in_progress_pods(
 
 # --------- Shared cached wrapper ---------
 
-_TOPDECK_CACHE_LOCK = asyncio.Lock()
+_TOPDECK_CACHE_LOCK: Optional[asyncio.Lock] = None
+
+
+def _get_cache_lock() -> asyncio.Lock:
+    """Lazily create the cache lock inside the running event loop."""
+    global _TOPDECK_CACHE_LOCK
+    if _TOPDECK_CACHE_LOCK is None:
+        _TOPDECK_CACHE_LOCK = asyncio.Lock()
+    return _TOPDECK_CACHE_LOCK
 
 # --------- Derived caches (computed from cached rows) ---------
 
@@ -741,7 +749,7 @@ async def get_league_rows_cached(
 
     key = (bracket_id, firebase_id_token or "")
 
-    async with _TOPDECK_CACHE_LOCK:
+    async with _get_cache_lock():
         now = datetime.now(timezone.utc)
 
         if not force_refresh and key in _TOPDECK_CACHE:

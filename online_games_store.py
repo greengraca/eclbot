@@ -56,20 +56,32 @@ async def save_index(bracket_id: str, year: int, month: int, records: List[Onlin
     bid = str(bracket_id)
     y = int(year)
     m = int(month)
-
-    await online_games.delete_many({"bracket_id": bid, "year": y, "month": m})
+    now = datetime.now(timezone.utc)
 
     if not records:
+        await online_games.delete_many({"bracket_id": bid, "year": y, "month": m})
         return
 
-    now = datetime.now(timezone.utc)
-    docs = []
+    # Atomic upsert per record — avoids the delete+insert gap where readers see zero records
+    from pymongo import UpdateOne
+    ops = []
+    seen_match_ids: set = set()
     for r in records:
         d = asdict(r)
         d.update({"bracket_id": bid, "year": y, "month": m, "updated_at": now})
-        docs.append(d)
+        filt = {"bracket_id": bid, "year": y, "month": m, "season": int(r.season), "match_id": str(r.match_id)}
+        ops.append(UpdateOne(filt, {"$set": d}, upsert=True))
+        seen_match_ids.add(str(r.match_id))
 
-    await online_games.insert_many(docs, ordered=False)
+    if ops:
+        await online_games.bulk_write(ops, ordered=False)
+
+    # Remove records that are no longer in the new set
+    if seen_match_ids:
+        await online_games.delete_many({
+            "bracket_id": bid, "year": y, "month": m,
+            "match_id": {"$nin": list(seen_match_ids)},
+        })
 
 
 async def upsert_record(bracket_id: str, year: int, month: int, record: OnlineGameRecord) -> None:

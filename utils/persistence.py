@@ -248,16 +248,15 @@ async def save_lobby(
         "elo_range_step": int(elo_range_step) if elo_range_step is not None else None,
         "elo_max_steps": int(elo_max_steps),
         "player_pts": pts_doc,
-        "created_at": created_at,
         "almost_full_at": almost_full_at,
         "last_seat_open": bool(last_seat_open),
         "expires_at": expires_at,
         "updated_at": now,
     }
-    
+
     await persistent_lobbies.update_one(
         {"guild_id": int(guild_id), "lobby_id": int(lobby_id)},
-        {"$set": doc},
+        {"$set": doc, "$setOnInsert": {"created_at": created_at}},
         upsert=True,
     )
 

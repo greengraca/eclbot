@@ -92,7 +92,7 @@ async def get_historical_months(
                     "latest_run_id": {"$first": "$_id"},
                     "run_id": {"$first": "$run_id"},
                     "created_at": {"$first": "$created_at"},
-                    "chunk_count": {"$first": "$chunk_count"},
+                    "chunk_count": {"$first": "$chunks"},
                 }
             },
             {"$sort": {"_id.month": 1}},

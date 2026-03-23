@@ -244,8 +244,10 @@ async def handle_join(
     if edit_content is not None or edit_embed is not None or edit_view is not None:
         await safe_i_edit(interaction, content=edit_content, embed=edit_embed, view=edit_view)
 
-    # Persist lobby state after successful join (refresh expiration too)
-    if reply_ephemeral is None and view.lobby is not None:
+    # Persist lobby state after successful join (refresh expiration too).
+    # Only persist when the join actually succeeded (reply_ephemeral is None
+    # AND the lobby was found and is still the view's lobby).
+    if reply_ephemeral is None and view.lobby is not None and edit_embed is not None:
         try:
             await cog._save_lobby_to_db(view.lobby)
         except Exception as e:
@@ -397,6 +399,10 @@ async def handle_leave(
                     else:
                         lobby.almost_full_at = None
                         lobby.last_seat_open = False
+                        # Cancel stale Elo embed updater so a fresh one starts if lobby fills again
+                        if lobby.update_task and not lobby.update_task.done():
+                            lobby.update_task.cancel()
+                            lobby.update_task = None
 
                 if became_empty:
                     # Delete from store immediately (fast) then do Discord I/O outside the lock.

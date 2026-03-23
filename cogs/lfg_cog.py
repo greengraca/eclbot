@@ -542,8 +542,8 @@ class LFGCog(commands.Cog):
 
         except asyncio.CancelledError:
             return
-        except Exception:
-            return
+        except Exception as e:
+            log_error(f"[lfg] Elo embed updater crashed for lobby {lobby.guild_id}:{lobby.lobby_id}: {type(e).__name__}: {e}")
 
     def _max_downward_range(self, lobby: LFGLobby) -> float:
         return float(
@@ -813,15 +813,17 @@ class LFGCog(commands.Cog):
                     format_name="Commander",
                     is_public=False,
                 )
-                full_lobby.link = link
             except Exception as e:
+                link = None
                 log_error(f"[lfg] Failed to create SpellTable game (friends fill): {e}")
+            if not link:
                 await safe_ctx_followup(
                     ctx,
                     "I couldn't create a SpellTable game right now. Please try again in a bit or ping a mod.",
                     ephemeral=True,
                 )
                 return
+            full_lobby.link = link
 
             started_at = now_utc()
             ready_embed = await self._build_ready_embed(ctx.guild, full_lobby, started_at)
