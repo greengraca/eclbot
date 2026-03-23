@@ -434,6 +434,7 @@ class StatsCog(commands.Cog):
             channel = ctx.channel
             if channel and hasattr(channel, "send"):
                 await channel.send(
+                    content=f"`/stats` — <@{target.id}>",
                     file=discord.File(buf, filename="stats_card.png"),
                 )
         except Exception as e:
