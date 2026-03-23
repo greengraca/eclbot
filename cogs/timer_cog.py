@@ -1515,39 +1515,42 @@ class ECLTimerCog(commands.Cog):
         if timer_id in self.active_timers:
             data = self.active_timers[timer_id]
             dur = data["durations"]
-            main_total = dur["main"]
-            extra_total = dur["extra"]
+            main_dur = dur["main"]
+            extra_dur = dur["extra"]
 
             elapsed = (now - data["start_time"]).total_seconds()
-            remaining_main = max(main_total - elapsed, 0.0)
-            remaining_total = max(main_total + extra_total - elapsed, 0.0)
+            remaining_main = max(main_dur - elapsed, 0.0)
+            remaining_total = max(main_dur + extra_dur - elapsed, 0.0)
 
-            bar = _build_progress_bar(
-                main_total,
-                extra_total,
-                remaining_main,
-                remaining_total,
-            )
+            orig = data.get("original_durations") or dur
+            main_total = orig["main"]
+            extra_total = orig["extra"]
+
+            end_ts_main = ts(data["start_time"] + timedelta(seconds=main_dur))
+            end_ts_final = ts(data["start_time"] + timedelta(seconds=main_dur + extra_dur))
 
             if remaining_main > 0:
-                mins = remaining_main / 60.0
-                await safe_ctx_respond(ctx,
-                    f"Timer for **{voice_channel.name}** is running.\n"
-                    f"≈ **{mins:.1f} minutes** of main time remaining.\n"
-                    f"```{bar}```",
-                    ephemeral=True,
-                )
-                return
+                phase = "running"
+            elif remaining_total > 0:
+                phase = "extra"
+            else:
+                phase = "draw"
 
-            # in extra time
-            extra_remaining = remaining_total
-            mins = extra_remaining / 60.0
-            await safe_ctx_respond(ctx,
-                f"Main time is already over for **{voice_channel.name}**.\n"
-                f"≈ **{mins:.1f} minutes** of extra time remaining.\n"
-                f"```{bar}```",
-                ephemeral=True,
+            player_ids = data.get("player_mention_ids", [])
+            game_number = data.get("game_number", game)
+
+            embed = _build_timer_embed(
+                game_number=game_number,
+                phase=phase,
+                main_total=main_total,
+                extra_total=extra_total,
+                remaining_main=remaining_main,
+                remaining_total=remaining_total,
+                end_ts_main=end_ts_main,
+                end_ts_final=end_ts_final,
+                player_ids=player_ids,
             )
+            await safe_ctx_respond(ctx, embed=embed, ephemeral=True)
             return
 
         # ---------- paused timer ----------
@@ -1559,42 +1562,27 @@ class ECLTimerCog(commands.Cog):
             remaining_extra = float(remaining.get("extra", 0.0))
             remaining_total = remaining_main + remaining_extra
 
-            # Use original durations for progress bar totals
             orig = data.get("original_durations") or {
                 "main": TIMER_MINUTES * 60.0,
                 "extra": EXTRA_TURNS_MINUTES * 60.0,
             }
-            MAIN_TOTAL = orig["main"]
-            EXTRA_TOTAL = orig["extra"]
 
-            bar = _build_progress_bar(
-                MAIN_TOTAL,
-                EXTRA_TOTAL,
-                remaining_main,
-                remaining_total,
+            player_ids = data.get("player_mention_ids", [])
+            game_number = data.get("game_number", game)
+
+            embed = _build_timer_embed(
+                game_number=game_number,
+                phase="paused",
+                main_total=orig["main"],
+                extra_total=orig["extra"],
+                remaining_main=remaining_main,
+                remaining_total=remaining_total,
+                end_ts_main=0,
+                end_ts_final=0,
+                player_ids=player_ids,
             )
-
-            if remaining_main > 0:
-                mins = remaining_main / 60.0
-                await safe_ctx_respond(ctx,
-                    f"Timer for **{voice_channel.name}** is **paused**.\n"
-                    f"≈ **{mins:.1f} minutes** of main time remaining.\n"
-                    f"```{bar}```",
-                    ephemeral=True,
-                )
-                return
-
-            if remaining_total > 0:
-                extra_remaining = remaining_total
-                mins = extra_remaining / 60.0
-                await safe_ctx_respond(ctx,
-                    f"Timer for **{voice_channel.name}** is **paused** "
-                    f"during extra time.\n"
-                    f"≈ **{mins:.1f} minutes** of extra time remaining.\n"
-                    f"```{bar}```",
-                    ephemeral=True,
-                )
-                return
+            await safe_ctx_respond(ctx, embed=embed, ephemeral=True)
+            return
 
         # ---------- weird edge ----------
         await safe_ctx_respond(ctx,

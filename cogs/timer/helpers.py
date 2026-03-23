@@ -235,8 +235,9 @@ def build_timer_embed(
         )
         embed.description = (
             f"```{bar}```"
-            f"\n⏰ Main ends <t:{end_ts_main}:R> · Draw at <t:{end_ts_final}:R>"
+            f"\nMain ends <t:{end_ts_main}:R> · Draw <t:{end_ts_final}:R>"
         )
+        embed.set_footer(text="Updates every 5 min · Use /checktimer or timestamps for exact time")
 
     elif phase == "extra":
         extra_remaining = remaining_total
@@ -251,8 +252,9 @@ def build_timer_embed(
         embed.description = (
             f"Time is over. You have **{extra_minutes} minutes** to finish "
             f"the active player turn. Good luck!\n```{bar}```"
-            f"\n⏰ Draw at <t:{end_ts_final}:R>"
+            f"\nDraw <t:{end_ts_final}:R>"
         )
+        embed.set_footer(text="Updates every 5 min · Use /checktimer or timestamps for exact time")
 
     elif phase == "draw":
         embed.description = (
