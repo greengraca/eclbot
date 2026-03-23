@@ -49,7 +49,7 @@ _DEFAULT_BAF = {
         "**Congratulations!** This game is a **Treasure Pod**!\n\n"
         "The **winner** of this game will receive **free ECL access** "
         "for an unregistered friend for the current or next league!\n\n"
-        "Please **open a ticket** to claim your prize! 🍀"
+        "Please **open a ticket** in <#1444483718067519649> to claim your prize! 🍀"
     ),
     "image_url": "",
 }
