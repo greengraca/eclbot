@@ -406,7 +406,7 @@ class MonthFlipHandler:
         
         try:
             # Get the TopdeckOnlineSyncCog
-            sync_cog = self.bot.get_cog("TopdeckOnlineSyncCog")
+            sync_cog = self.cog.bot.get_cog("TopdeckOnlineSyncCog")
             if not sync_cog:
                 await self.log.warn("[subs] TopdeckOnlineSyncCog not found, skipping synconline")
                 return

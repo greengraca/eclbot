@@ -154,6 +154,7 @@ class ECLTimerCog(commands.Cog):
         audio: Dict[str, str],
         player_mention_ids: Optional[List[int]] = None,
         game_number: int = 0,
+        original_durations: Optional[Dict[str, float]] = None,
     ) -> None:
         """Persist timer state to MongoDB."""
         try:
@@ -183,6 +184,7 @@ class ECLTimerCog(commands.Cog):
                 player_mention_ids=player_mention_ids,
                 game_number=game_number,
                 expires_at=expires_at,
+                original_durations=original_durations,
             )
         except Exception as e:
             log_error(f"[timer] Failed to persist timer {timer_id}: {type(e).__name__}: {e}")
@@ -283,6 +285,16 @@ class ECLTimerCog(commands.Cog):
         }
         ignore_autostop = bool(doc.get("ignore_autostop", False))
 
+        # Load original durations (for progress bar across pause/resume).
+        # Falls back to durations for timers saved before this field existed.
+        if doc.get("original_durations_main") is not None:
+            original_durations = {
+                "main": float(doc["original_durations_main"]),
+                "extra": float(doc.get("original_durations_extra", 0)),
+            }
+        else:
+            original_durations = {"main": durations["main"], "extra": durations["extra"]}
+
         # Update voice_channel_timers seq counter
         vc_id = voice_channel_id
         parts = timer_id.split("_")
@@ -304,6 +316,7 @@ class ECLTimerCog(commands.Cog):
             }
             self.paused_timers[timer_id] = {
                 "remaining": remaining,
+                "original_durations": original_durations,
                 "messages": messages,
                 "audio": audio,
                 "voice_channel_id": voice_channel_id,
@@ -347,6 +360,7 @@ class ECLTimerCog(commands.Cog):
         self.active_timers[timer_id] = {
             "start_time": start_time_utc,
             "durations": durations,
+            "original_durations": original_durations,
             "messages": messages,
             "audio": audio,
             "voice_channel_id": voice_channel_id,
@@ -679,13 +693,18 @@ class ECLTimerCog(commands.Cog):
             elapsed = (now - data["start_time"]).total_seconds()
             durations = data["durations"]
 
-            main_total = durations["main"]
-            extra_total = durations["extra"]
-            remaining_main = max(0.0, main_total - elapsed)
-            remaining_total = max(0.0, main_total + extra_total - elapsed)
+            main_dur = durations["main"]
+            extra_dur = durations["extra"]
+            remaining_main = max(0.0, main_dur - elapsed)
+            remaining_total = max(0.0, main_dur + extra_dur - elapsed)
 
-            end_ts_main = ts(data["start_time"] + timedelta(seconds=main_total))
-            end_ts_final = ts(data["start_time"] + timedelta(seconds=main_total + extra_total))
+            # Use original durations for progress bar totals (survives pause/resume)
+            orig = data.get("original_durations") or durations
+            main_total = orig["main"]
+            extra_total = orig["extra"]
+
+            end_ts_main = ts(data["start_time"] + timedelta(seconds=main_dur))
+            end_ts_final = ts(data["start_time"] + timedelta(seconds=main_dur + extra_dur))
 
             # Determine phase
             if data.get("phase_override") == "draw":
@@ -885,6 +904,10 @@ class ECLTimerCog(commands.Cog):
                 "easter_egg": to_end_delay_sec,
                 "extra": extra_seconds,
             },
+            "original_durations": {
+                "main": main_seconds,
+                "extra": extra_seconds,
+            },
             "ctx": ctx,
             "voice_channel_id": voice_channel.id,
             "ignore_autostop": bool(ignore_autostop),
@@ -956,6 +979,7 @@ class ECLTimerCog(commands.Cog):
             audio=self.active_timers[timer_id]["audio"],
             player_mention_ids=player_ids,
             game_number=game_number,
+            original_durations=self.active_timers[timer_id]["original_durations"],
         )
 
         # Intro audio (non-blocking for the timer tasks)
@@ -1215,8 +1239,10 @@ class ECLTimerCog(commands.Cog):
         remaining_main_val = float(remaining["main"])
         remaining_total_val = remaining_main_val + float(remaining["extra"])
 
-        MAIN_TOTAL = TIMER_MINUTES * 60.0
-        EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
+        # Use original durations for progress bar totals (survives pause/resume)
+        orig = timer_data.get("original_durations") or timer_data["durations"]
+        MAIN_TOTAL = orig["main"]
+        EXTRA_TOTAL = orig["extra"]
 
         player_ids = timer_data.get("player_mention_ids", [])
         game_number = timer_data.get("game_number", 0)
@@ -1242,6 +1268,7 @@ class ECLTimerCog(commands.Cog):
         self.paused_timers[timer_id] = {
             "ctx": timer_data["ctx"],
             "remaining": remaining,
+            "original_durations": orig,
             "messages": timer_data["messages"],
             "audio": timer_data["audio"],
             "pause_message": pause_msg,
@@ -1270,6 +1297,7 @@ class ECLTimerCog(commands.Cog):
             audio=timer_data["audio"],
             player_mention_ids=player_ids,
             game_number=game_number,
+            original_durations=orig,
         )
 
 
@@ -1350,9 +1378,16 @@ class ECLTimerCog(commands.Cog):
         game_number = paused.get("game_number", 0)
         draw_event = asyncio.Event()
 
+        # Preserve original durations for progress bar across pause/resume cycles
+        orig = paused.get("original_durations") or {
+            "main": TIMER_MINUTES * 60.0,
+            "extra": EXTRA_TURNS_MINUTES * 60.0,
+        }
+
         self.active_timers[timer_id] = {
             "start_time": now_utc(),
             "durations": paused["remaining"],
+            "original_durations": orig,
             "messages": paused["messages"],
             "audio": paused["audio"],
             "voice_channel_id": paused.get("voice_channel_id"),
@@ -1392,8 +1427,8 @@ class ECLTimerCog(commands.Cog):
             self._final_audio(total_remaining, final_audio, timer_id, paused.get("voice_channel_id", 0), draw_event)
         ))
 
-        MAIN_TOTAL = TIMER_MINUTES * 60.0
-        EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
+        MAIN_TOTAL = orig["main"]
+        EXTRA_TOTAL = orig["extra"]
 
         phase = "running" if main > 0 else "extra"
         end_ts_main = ts(now_utc() + timedelta(seconds=main))
@@ -1437,6 +1472,7 @@ class ECLTimerCog(commands.Cog):
             audio=paused["audio"],
             player_mention_ids=player_ids,
             game_number=game_number,
+            original_durations=orig,
         )
 
     @commands.slash_command(
@@ -1523,8 +1559,13 @@ class ECLTimerCog(commands.Cog):
             remaining_extra = float(remaining.get("extra", 0.0))
             remaining_total = remaining_main + remaining_extra
 
-            MAIN_TOTAL = TIMER_MINUTES * 60.0
-            EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
+            # Use original durations for progress bar totals
+            orig = data.get("original_durations") or {
+                "main": TIMER_MINUTES * 60.0,
+                "extra": EXTRA_TURNS_MINUTES * 60.0,
+            }
+            MAIN_TOTAL = orig["main"]
+            EXTRA_TOTAL = orig["extra"]
 
             bar = _build_progress_bar(
                 MAIN_TOTAL,

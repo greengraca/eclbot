@@ -85,10 +85,11 @@ async def save_timer(
     player_mention_ids: Optional[List[int]] = None,
     game_number: int = 0,
     expires_at: datetime = None,
+    original_durations: Optional[Dict[str, float]] = None,
 ) -> None:
     """Upsert a timer document."""
     now = _now_utc()
-    
+
     doc: Dict[str, Any] = {
         "timer_id": str(timer_id),
         "guild_id": int(guild_id),
@@ -103,6 +104,8 @@ async def save_timer(
         "remaining_main": float(remaining["main"]) if remaining else None,
         "remaining_easter_egg": float(remaining["easter_egg"]) if remaining else None,
         "remaining_extra": float(remaining["extra"]) if remaining else None,
+        "original_durations_main": float(original_durations["main"]) if original_durations else None,
+        "original_durations_extra": float(original_durations["extra"]) if original_durations else None,
         "ignore_autostop": bool(ignore_autostop),
         "msg_turns": str(messages.get("turns", "")),
         "msg_final": str(messages.get("final", "")),

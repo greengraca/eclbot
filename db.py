@@ -83,11 +83,13 @@ async def job_once(job_id: str) -> bool:
     Uses subs_jobs with _id = job_id for atomic idempotence.
     """
     from datetime import datetime, timezone
+    from pymongo.errors import DuplicateKeyError
 
-    if await subs_jobs.find_one({"_id": job_id}):
+    try:
+        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+        return True
+    except DuplicateKeyError:
         return False
-    await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
-    return True
 
 
 async def ensure_indexes() -> None:

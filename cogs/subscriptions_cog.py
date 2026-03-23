@@ -1665,12 +1665,42 @@ class SubscriptionsCog(commands.Cog):
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
         active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
 
+        # Recency thresholds (same logic as _eligible_top16_entries_for_month)
+        min_games = cfg.top16_min_online_games  # default 10
+        min_games_no_recency = cfg.top16_min_online_games_no_recency  # default 20
+        recency_after_day = cfg.top16_recency_after_day  # default 20
+
+        # Collect UIDs that need recency check (between min_games and min_games_no_recency)
+        uids_need_recency = []
+        for r in active_by_games:
+            uid = (r.uid or "").strip()
+            if not uid:
+                continue
+            online = online_counts.get(uid, 0)
+            if min_games <= online < min_games_no_recency:
+                uids_need_recency.append(uid)
+
+        recency_check: dict[str, bool] = {}
+        if uids_need_recency:
+            try:
+                recency_check = await has_recent_game_by_topdeck_uid(
+                    bracket_id, year, month, uids_need_recency,
+                    after_day=recency_after_day, online_only=True
+                )
+            except Exception as e:
+                return ([], [f"recency_check error: {type(e).__name__}: {e}"], 0)
+
         qualified: list[tuple[int, PlayerRow]] = []
         for idx, r in enumerate(active_by_games, start=1):
             uid = (r.uid or "").strip()
             if not uid:
                 continue
-            if online_counts.get(uid, 0) >= cfg.top16_min_online_games:
+            online = online_counts.get(uid, 0)
+            # Option A: >= 20 games (no recency needed)
+            if online >= min_games_no_recency:
+                qualified.append((idx, r))
+            # Option B: >= 10 games AND has recent game
+            elif online >= min_games and recency_check.get(uid, False):
                 qualified.append((idx, r))
 
         if not qualified:
@@ -1882,7 +1912,7 @@ class SubscriptionsCog(commands.Cog):
         removed = False
         with contextlib.suppress(Exception):
             await member.remove_roles(role, reason=reason)
-            removed = role not in member.roles
+            removed = True
 
         if removed and dm:
             await self._dm_access_removed(member)
