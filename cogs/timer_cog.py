@@ -1348,11 +1348,30 @@ class ECLTimerCog(commands.Cog):
         except Exception as e:
             log_warn(f"[pausetimer] Error deleting original timer message: {e}")
 
-        remaining_minutes = int(remaining["main"] // 60)
+        remaining_main_val = float(remaining["main"])
+        remaining_total_val = float(remaining["extra"])  # "extra" is total remaining
+
+        MAIN_TOTAL = TIMER_MINUTES * 60.0
+        EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
+
+        player_ids = timer_data.get("player_mention_ids", [])
+        game_number = timer_data.get("game_number", 0)
+
+        embed = _build_timer_embed(
+            game_number=game_number,
+            phase="paused",
+            main_total=MAIN_TOTAL,
+            extra_total=EXTRA_TOTAL,
+            remaining_main=remaining_main_val,
+            remaining_total=remaining_total_val,
+            end_ts_main=0,
+            end_ts_final=0,
+            player_ids=player_ids,
+        )
 
         pause_msg = await safe_ctx_followup(
             ctx,
-            f"⏸️ Timer for **{voice_channel.name}** paused – **{remaining_minutes} minutes** remaining.",
+            embed=embed,
             ephemeral=False,
         )
 
@@ -1364,6 +1383,8 @@ class ECLTimerCog(commands.Cog):
             "pause_message": pause_msg,
             "voice_channel_id": timer_data.get("voice_channel_id"),
             "ignore_autostop": bool(timer_data.get("ignore_autostop", False)),
+            "player_mention_ids": player_ids,
+            "game_number": game_number,
         }
 
         # Persist paused state to DB
@@ -1381,6 +1402,8 @@ class ECLTimerCog(commands.Cog):
             ignore_autostop=bool(timer_data.get("ignore_autostop", False)),
             messages=timer_data["messages"],
             audio=timer_data["audio"],
+            player_mention_ids=player_ids,
+            game_number=game_number,
         )
 
 
@@ -1457,6 +1480,10 @@ class ECLTimerCog(commands.Cog):
             with contextlib.suppress(Exception):
                 await pm.delete()
 
+        player_ids = paused.get("player_mention_ids", [])
+        game_number = paused.get("game_number", 0)
+        draw_event = asyncio.Event()
+
         self.active_timers[timer_id] = {
             "start_time": now_utc(),
             "durations": paused["remaining"],
@@ -1464,12 +1491,13 @@ class ECLTimerCog(commands.Cog):
             "audio": paused["audio"],
             "voice_channel_id": paused.get("voice_channel_id"),
             "ignore_autostop": bool(paused.get("ignore_autostop", False)),
+            "player_mention_ids": player_ids,
+            "game_number": game_number,
+            "phase_override": None,
+            "draw_event": draw_event,
         }
         self.timer_tasks[timer_id] = []
 
-        old_ctx = paused["ctx"]
-        turns_msg = paused["messages"]["turns"]
-        final_msg = paused["messages"]["final"]
         turns_audio = paused["audio"]["turns"]
         final_audio = paused["audio"]["final"]
         egg_audio = paused["audio"]["easter_egg"]
@@ -1478,37 +1506,52 @@ class ECLTimerCog(commands.Cog):
         egg = paused["remaining"]["easter_egg"]
         extra = paused["remaining"]["extra"]
 
+        # 1. Embed loop
         self.timer_tasks[timer_id].append(asyncio.create_task(
-            self.timer_end(old_ctx, main / 60.0, turns_msg, turns_audio, timer_id=timer_id, edit=True)
+            self._embed_update_loop(timer_id, game_number)
         ))
+        # 2. Easter egg audio
+        if egg > 0:
+            self.timer_tasks[timer_id].append(asyncio.create_task(
+                self._audio_at(egg, egg_audio, timer_id, paused.get("voice_channel_id", 0))
+            ))
+        # 3. Main-end audio
+        if main > 0:
+            self.timer_tasks[timer_id].append(asyncio.create_task(
+                self._audio_at(main, turns_audio, timer_id, paused.get("voice_channel_id", 0))
+            ))
+        # 4. Final audio
         self.timer_tasks[timer_id].append(asyncio.create_task(
-            self.play_voice_file(old_ctx, egg_audio, egg, timer_id=timer_id)
-        ))
-        self.timer_tasks[timer_id].append(asyncio.create_task(
-            self.timer_end(old_ctx, extra / 60.0, final_msg, final_audio, timer_id=timer_id, edit=True, delete_after=1, final_cleanup=True)
+            self._final_audio(extra, final_audio, timer_id, paused.get("voice_channel_id", 0), draw_event)
         ))
 
-        end_time = now_utc() + timedelta(seconds=main)
+        MAIN_TOTAL = TIMER_MINUTES * 60.0
+        EXTRA_TOTAL = EXTRA_TURNS_MINUTES * 60.0
 
-        # ✅ AFTER defer: use followup
-        msg = await safe_ctx_followup(ctx,
-            f"▶️ Timer for **{voice_channel.name}** has been resumed and will end <t:{ts(end_time)}:R>."
+        phase = "running" if main > 0 else "extra"
+        end_ts_main = ts(now_utc() + timedelta(seconds=main))
+        end_ts_final = ts(now_utc() + timedelta(seconds=extra))
+
+        embed = _build_timer_embed(
+            game_number=game_number,
+            phase=phase,
+            main_total=MAIN_TOTAL,
+            extra_total=EXTRA_TOTAL,
+            remaining_main=main,
+            remaining_total=extra,
+            end_ts_main=end_ts_main,
+            end_ts_final=end_ts_final,
+            player_ids=player_ids,
         )
+
+        msg = await safe_ctx_followup(ctx, embed=embed)
         self.timer_messages[timer_id] = (ctx.channel.id, msg.id)
 
-        # Persist resumed timer to DB
-        # IMPORTANT: Store the ORIGINAL durations concept (main, extra as separate)
-        # not the confusingly-named paused["remaining"] where "extra" is total remaining.
-        # For rehydration, we need to store the actual remaining times clearly.
-        #
-        # After resume, the new "durations" should represent the time windows from now:
-        # - main_duration = remaining main time
-        # - extra_duration = remaining extra time (total_remaining - main_remaining)
-        #
+        # Persist
         main_remaining_sec = paused["remaining"]["main"]
-        total_remaining_sec = paused["remaining"]["extra"]  # this is actually total, not extra
+        total_remaining_sec = paused["remaining"]["extra"]
         extra_only_sec = max(0, total_remaining_sec - main_remaining_sec)
-        
+
         await self._save_timer_to_db(
             timer_id=timer_id,
             guild_id=ctx.guild.id,
@@ -1519,13 +1562,15 @@ class ECLTimerCog(commands.Cog):
             start_time_utc=self.active_timers[timer_id]["start_time"],
             durations={
                 "main": main_remaining_sec,
-                "extra": extra_only_sec,  # store JUST extra, not total
+                "extra": extra_only_sec,
                 "easter_egg": paused["remaining"]["easter_egg"],
             },
             remaining=None,
             ignore_autostop=bool(paused.get("ignore_autostop", False)),
             messages=paused["messages"],
             audio=paused["audio"],
+            player_mention_ids=player_ids,
+            game_number=game_number,
         )
 
     @commands.slash_command(
