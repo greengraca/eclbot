@@ -605,7 +605,11 @@ async def _fetch_league_data_full(
         _compute_standings, matches, entrant_ids
     )
 
-    rows: List[PlayerRow] = []
+    # Build per-entrant rows, then merge by UID (a player may have multiple
+    # entrant IDs if they re-registered).  This matches the dashboard's
+    # buildRankedPlayers aggregation in players.ts.
+    uid_merged: Dict[str, PlayerRow] = {}
+    no_uid_rows: List[PlayerRow] = []
 
     for eid in entrant_ids:
         uid = entrant_to_uid.get(eid)
@@ -615,23 +619,48 @@ async def _fetch_league_data_full(
         dropped = bool(drop_state["is_dropped"].get(eid, False))
         dropped_at = drop_state["dropped_at"].get(eid)
 
-        rows.append(
-            PlayerRow(
-                entrant_id=eid,
-                uid=uid,
-                name=(p.get("name") if isinstance(p, dict) else None) or uid or "(unknown)",
-                discord=(p.get("discord") if isinstance(p, dict) else "") or "",
-                pts=float(points.get(eid, START_POINTS)),
-                win_pct=float(win_pct.get(eid, 0.0)),
-                ow_pct=float(ow_pct.get(eid, 0.0)),
-                games=int(s.get("games", 0)),
-                wins=int(s.get("wins", 0)),
-                draws=int(s.get("draws", 0)),
-                losses=int(s.get("losses", 0)),
-                dropped=dropped,
-                dropped_at=float(dropped_at) if dropped_at is not None else None,
-            )
+        row = PlayerRow(
+            entrant_id=eid,
+            uid=uid,
+            name=(p.get("name") if isinstance(p, dict) else None) or uid or "(unknown)",
+            discord=(p.get("discord") if isinstance(p, dict) else "") or "",
+            pts=float(points.get(eid, START_POINTS)),
+            win_pct=float(win_pct.get(eid, 0.0)),
+            ow_pct=float(ow_pct.get(eid, 0.0)),
+            games=int(s.get("games", 0)),
+            wins=int(s.get("wins", 0)),
+            draws=int(s.get("draws", 0)),
+            losses=int(s.get("losses", 0)),
+            dropped=dropped,
+            dropped_at=float(dropped_at) if dropped_at is not None else None,
         )
+
+        if not uid:
+            no_uid_rows.append(row)
+            continue
+
+        existing = uid_merged.get(uid)
+        if existing is None:
+            uid_merged[uid] = row
+        else:
+            # Merge: accumulate points, games, wins, draws, losses
+            existing.pts += row.pts
+            existing.games += row.games
+            existing.wins += row.wins
+            existing.draws += row.draws
+            existing.losses += row.losses
+            existing.win_pct = (existing.wins / existing.games) if existing.games else 0.0
+            # OW% merge: weighted average by games played
+            total_g = existing.games  # already includes row.games
+            old_g = total_g - row.games
+            if total_g > 0:
+                existing.ow_pct = (existing.ow_pct * old_g + row.ow_pct * row.games) / total_g
+            # Player is only dropped if ALL entrant IDs are dropped
+            if not row.dropped:
+                existing.dropped = False
+                existing.dropped_at = None
+
+    rows: List[PlayerRow] = list(uid_merged.values()) + no_uid_rows
 
     rows.sort(
         key=lambda r: (
