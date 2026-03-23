@@ -500,77 +500,148 @@ def render_player_stats_card(
     ow_pct: float,
     seat_stats: dict,
 ) -> io.BytesIO:
-    """Render a dark-themed player stats card image."""
-    CARD_BG = "#1E1F22"
-    SECTION_BG = "#2B2D31"
-    TEXT_PRIMARY = "#FFFFFF"
-    TEXT_SECONDARY = "#B5BAC1"
-    BORDER = "#3F4147"
+    """Render a premium dark-themed player stats card with brand logos."""
+    import os
+    from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+    from PIL import Image as PILImage
 
-    fig = plt.figure(figsize=(6, 5.5))
-    fig.patch.set_facecolor(CARD_BG)
+    # ── Brand tokens ──
+    BG_PRIMARY = "#0a0f14"
+    CARD_SURFACE = "#0f1419"
+    CARD_BORDER = "rgba(255,255,255,0.08)"  # matplotlib needs hex
+    CARD_BORDER_HEX = "#1a1f26"
+    GOLD = "#fbbf24"
+    GOLD_DIM = "#b8941c"
+    TEXT_PRIMARY = "#f1f5f9"
+    TEXT_SECONDARY = "#94a3b8"
+    TEXT_MUTED = "#64748b"
+    SUCCESS = "#34d399"
+    ERROR = "#ef4444"
+
+    W = 7.2
+    H = 7.0
+    fig = plt.figure(figsize=(W, H), dpi=150)
+    fig.patch.set_facecolor(BG_PRIMARY)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, 100)
     ax.set_ylim(0, 100)
     ax.axis("off")
-    ax.set_facecolor(CARD_BG)
+    ax.set_facecolor(BG_PRIMARY)
 
-    # ── Header: Name + Handle ──
-    ax.text(50, 95, name, fontsize=16, fontweight="bold", color=TEXT_PRIMARY,
-            ha="center", va="top")
+    # ── Helper: rounded rectangle ──
+    from matplotlib.patches import FancyBboxPatch
+
+    def _card(x, y, w, h, *, fc=CARD_SURFACE, ec=CARD_BORDER_HEX, lw=1.0, pad=0.8):
+        box = FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad={pad}",
+                             facecolor=fc, edgecolor=ec, linewidth=lw)
+        ax.add_patch(box)
+        return box
+
+    # ── Logos (top bar) ──
+    assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+    logo_specs = [
+        ("cedh-championship-logo.png", 8, 95),
+        ("ecl-logo-only.png", 50, 95),
+        ("commander-arena-logo.png", 92, 95),
+    ]
+    for fname, lx, ly in logo_specs:
+        path = os.path.join(assets_dir, fname)
+        if os.path.exists(path):
+            try:
+                img = PILImage.open(path).convert("RGBA")
+                img.thumbnail((120, 120), PILImage.LANCZOS)
+                import numpy as np
+                oimg = OffsetImage(np.array(img), zoom=0.28)
+                oimg.image.axes = ax
+                ab = AnnotationBbox(oimg, (lx, ly), frameon=False, box_alignment=(0.5, 0.5))
+                ax.add_artist(ab)
+            except Exception:
+                pass
+
+    # ── Gold accent line under logos ──
+    ax.plot([5, 95], [90.5, 90.5], color=GOLD, linewidth=1.2, alpha=0.6)
+
+    # ── Player name + handle ──
+    ax.text(50, 87, name, fontsize=18, fontweight="bold", color=TEXT_PRIMARY,
+            ha="center", va="top", fontfamily="sans-serif")
     if discord_handle:
-        ax.text(50, 90, discord_handle, fontsize=10, color=TEXT_SECONDARY,
-                ha="center", va="top")
+        ax.text(50, 82.5, discord_handle, fontsize=10, color=TEXT_MUTED,
+                ha="center", va="top", fontfamily="monospace")
 
-    # ── Standing + Record boxes ──
-    for (x, label, value) in [
-        (25, "TOURNAMENT STANDING", f"#{rank} / {total_players}"),
-        (75, "RECORD", f"{wins}-{losses}-{draws}"),
-    ]:
-        rect = plt.Rectangle((x - 22, 72), 44, 14, facecolor=SECTION_BG,
-                              edgecolor=BORDER, linewidth=0.8, clip_on=False)
-        ax.add_patch(rect)
-        ax.text(x, 84, label, fontsize=7, color=TEXT_SECONDARY, ha="center", va="center")
-        ax.text(x, 77, value, fontsize=14, fontweight="bold", color=TEXT_PRIMARY,
-                ha="center", va="center")
+    # ── Standing + Record cards ──
+    _card(4, 69, 43, 11)
+    ax.text(25.5, 78.5, "TOURNAMENT STANDING", fontsize=7, color=TEXT_MUTED,
+            ha="center", va="center", fontfamily="monospace",
+            fontweight="bold", style="normal")
+    ax.text(25.5, 73, f"#{rank} / {total_players}", fontsize=16, fontweight="bold",
+            color=GOLD, ha="center", va="center")
+
+    _card(53, 69, 43, 11)
+    ax.text(74.5, 78.5, "RECORD", fontsize=7, color=TEXT_MUTED,
+            ha="center", va="center", fontfamily="monospace",
+            fontweight="bold")
+    ax.text(74.5, 73, f"{wins}W - {losses}L - {draws}D", fontsize=16, fontweight="bold",
+            color=TEXT_PRIMARY, ha="center", va="center")
 
     # ── Tournament Stats section ──
-    ax.text(5, 67, "Tournament Stats", fontsize=11, fontweight="bold", color=TEXT_PRIMARY, va="top")
-    stats_rect = plt.Rectangle((3, 49), 94, 16, facecolor=SECTION_BG,
-                                edgecolor=BORDER, linewidth=0.8)
-    ax.add_patch(stats_rect)
+    ax.text(6, 65.5, "Tournament Stats", fontsize=12, fontweight="bold", color=GOLD,
+            va="top")
+    _card(4, 46, 92, 18)
 
     stat_rows = [
-        ("Pts:", f"{pts:,}"),
-        ("Win%:", f"{win_pct * 100:.2f}%"),
-        ("OW%:", f"{ow_pct * 100:.2f}%"),
+        ("Pts", f"{pts:,}", TEXT_PRIMARY),
+        ("Win%", f"{win_pct * 100:.2f}%", SUCCESS if win_pct >= 0.5 else TEXT_PRIMARY),
+        ("OW%", f"{ow_pct * 100:.2f}%", TEXT_PRIMARY),
     ]
-    for i, (label, value) in enumerate(stat_rows):
-        y = 62 - i * 4.5
-        ax.text(6, y, label, fontsize=9, color=TEXT_SECONDARY, va="center")
-        ax.text(94, y, value, fontsize=9, color=TEXT_PRIMARY, ha="right", va="center")
+    for i, (label, value, val_color) in enumerate(stat_rows):
+        y = 61.5 - i * 5
+        ax.text(8, y, label, fontsize=10, color=TEXT_SECONDARY, va="center",
+                fontfamily="monospace")
+        ax.text(93, y, value, fontsize=11, color=val_color, ha="right", va="center",
+                fontweight="bold", fontfamily="monospace")
+        if i < len(stat_rows) - 1:
+            ax.plot([8, 92], [y - 2.5, y - 2.5], color=CARD_BORDER_HEX, linewidth=0.5, alpha=0.6)
 
     # ── Seat Position Distribution ──
-    ax.text(5, 44, "Seat Position Distribution", fontsize=11, fontweight="bold",
-            color=TEXT_PRIMARY, va="top")
-    seat_rect = plt.Rectangle((3, 9), 94, 33, facecolor=SECTION_BG,
-                               edgecolor=BORDER, linewidth=0.8)
-    ax.add_patch(seat_rect)
+    ax.text(6, 42.5, "Seat Position Distribution", fontsize=12, fontweight="bold",
+            color=GOLD, va="top")
+    _card(4, 6, 92, 35)
 
     total_g = seat_stats.get("total_games", 0)
+    seat_colors = [SUCCESS, "#3b82f6", "#f59e0b", ERROR]
+
     for i in range(4):
         s = seat_stats.get(i, {"games": 0, "wins": 0, "win_rate": 0.0, "seat_pct": 0.0})
-        y = 38 - i * 6.5
-        label = f"Seat {i+1}:"
+        y = 37.5 - i * 6.5
         pct = s["seat_pct"] * 100
         wr = s["win_rate"] * 100
-        value = f"{pct:.1f}% ({s['games']} games) - {wr:.1f}% WR"
-        ax.text(6, y, label, fontsize=9, color=TEXT_SECONDARY, va="center")
-        ax.text(94, y, value, fontsize=9, color=TEXT_PRIMARY, ha="right", va="center")
+        g = s["games"]
+
+        # Seat label with colored dot
+        ax.plot(7.5, y, marker="o", markersize=5, color=seat_colors[i], zorder=5)
+        ax.text(10.5, y, f"Seat {i+1}", fontsize=10, color=TEXT_SECONDARY, va="center",
+                fontfamily="monospace")
+
+        # Stats value
+        value = f"{pct:.1f}%  ({g} games)  ·  {wr:.1f}% WR"
+        ax.text(93, y, value, fontsize=10, color=TEXT_PRIMARY, ha="right", va="center",
+                fontfamily="monospace")
+
+        # Thin progress bar for seat %
+        bar_y = y - 3
+        ax.plot([8, 92], [bar_y, bar_y], color=CARD_BORDER_HEX, linewidth=2, alpha=0.4, solid_capstyle="round")
+        bar_end = 8 + (84 * pct / 100) if pct > 0 else 8
+        ax.plot([8, bar_end], [bar_y, bar_y], color=seat_colors[i], linewidth=2, alpha=0.7, solid_capstyle="round")
 
     # Total games row
-    ax.text(6, 12, "Total Games:", fontsize=9, color=TEXT_SECONDARY, va="center")
-    ax.text(94, 12, str(total_g), fontsize=9, fontweight="bold", color=TEXT_PRIMARY,
-            ha="right", va="center")
+    y_total = 37.5 - 4 * 6.5
+    ax.plot([8, 92], [y_total + 2, y_total + 2], color=CARD_BORDER_HEX, linewidth=0.5, alpha=0.6)
+    ax.text(8, y_total, "Total Games", fontsize=10, color=TEXT_SECONDARY, va="center",
+            fontfamily="monospace")
+    ax.text(93, y_total, str(total_g), fontsize=12, fontweight="bold", color=GOLD,
+            ha="right", va="center", fontfamily="monospace")
+
+    # ── Bottom accent line ──
+    ax.plot([5, 95], [3, 3], color=GOLD, linewidth=1.2, alpha=0.4)
 
     return _save(fig)
