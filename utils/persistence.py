@@ -53,6 +53,10 @@ class TimerDoc(TypedDict, total=False):
     audio_final: str
     audio_easter_egg: str
     
+    # Player mentions (user IDs for embed display)
+    player_mention_ids: List[int]
+    game_number: int
+
     # Absolute time when the timer fully expires (for cleanup)
     expires_at: datetime
     
@@ -78,7 +82,9 @@ async def save_timer(
     ignore_autostop: bool,
     messages: Dict[str, str],
     audio: Dict[str, str],
-    expires_at: datetime,
+    player_mention_ids: Optional[List[int]] = None,
+    game_number: int = 0,
+    expires_at: datetime = None,
 ) -> None:
     """Upsert a timer document."""
     now = _now_utc()
@@ -103,6 +109,8 @@ async def save_timer(
         "audio_turns": str(audio.get("turns", "")),
         "audio_final": str(audio.get("final", "")),
         "audio_easter_egg": str(audio.get("easter_egg", "")),
+        "player_mention_ids": [int(x) for x in (player_mention_ids or [])],
+        "game_number": int(game_number),
         "expires_at": expires_at,
         "updated_at": now,
     }
