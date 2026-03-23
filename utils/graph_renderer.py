@@ -444,3 +444,44 @@ def render_league_points_alltime(
     ax.set_title("ECL Points Spread \u2014 All Time", fontsize=13, color=FG, pad=12)
 
     return _save(fig)
+
+
+def render_turn_order_winrates(
+    turn_rates: List[float],
+    draw_rate: float,
+    turn_wins: List[int],
+    draws: int,
+    total_pods: int,
+    title: str,
+) -> io.BytesIO:
+    """Bar chart of win rate by seat position (1-4) + draw rate."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    _apply_dark_style(ax, fig)
+
+    labels = ["Seat 1", "Seat 2", "Seat 3", "Seat 4", "Draw"]
+    rates = [r * 100 for r in turn_rates] + [draw_rate * 100]
+    counts = list(turn_wins) + [draws]
+    colors = ["#2ECC71", "#3498DB", "#E67E22", "#E74C3C", "#95A5A6"]
+
+    bars = ax.bar(labels, rates, color=colors, width=0.6, edgecolor=GRID, linewidth=0.5)
+
+    # Add percentage + count labels on bars
+    for bar, rate, count in zip(bars, rates, counts):
+        y = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2, y + 0.5,
+            f"{rate:.1f}%\n({count})",
+            ha="center", va="bottom", fontsize=10, color=FG, fontweight="bold",
+        )
+
+    # 25% reference line (expected fair rate for 4 players)
+    ax.axhline(y=25, color=FG, linestyle="--", linewidth=0.8, alpha=0.4)
+    ax.text(len(labels) - 0.5, 25.5, "25% (fair)", fontsize=8, color=FG, alpha=0.5, ha="right")
+
+    ax.set_ylabel("Win Rate %", fontsize=11)
+    ax.set_ylim(0, max(rates) * 1.25 if rates else 40)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax.set_title(title, fontsize=13, color=FG, pad=12)
+
+    return _save(fig)

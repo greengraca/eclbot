@@ -26,6 +26,7 @@ from utils.month_dump_reader import (
     get_live_matches,
     get_league_daily_activity,
     get_league_monthly_aggregates,
+    compute_turn_order_stats,
     _get_current_month_matches,
 )
 from utils.graph_renderer import (
@@ -36,6 +37,7 @@ from utils.graph_renderer import (
     render_league_activity_alltime,
     render_league_participation_alltime,
     render_league_points_alltime,
+    render_turn_order_winrates,
 )
 
 
@@ -44,9 +46,11 @@ LEAGUE_CHART_CHOICES = [
     discord.OptionChoice("Standings Top 16", "standings"),
     discord.OptionChoice("Points Distribution", "points_dist"),
     discord.OptionChoice("Games Distribution", "games_dist"),
+    discord.OptionChoice("Turn Order Win Rates", "turn_order"),
     discord.OptionChoice("All-Time Activity", "activity_alltime"),
     discord.OptionChoice("All-Time Participation", "participation_alltime"),
     discord.OptionChoice("All-Time Points", "points_alltime"),
+    discord.OptionChoice("All-Time Turn Order", "turn_order_alltime"),
 ]
 
 
@@ -100,12 +104,16 @@ class LeagueGraphsCog(commands.Cog):
                 buf, filename, emb = await self._chart_points_distribution(ml)
             elif chart == "games_dist":
                 buf, filename, emb = await self._chart_games_distribution(ml)
+            elif chart == "turn_order":
+                buf, filename, emb = await self._chart_turn_order(mk, ml)
             elif chart == "activity_alltime":
                 buf, filename, emb = await self._chart_activity_alltime()
             elif chart == "participation_alltime":
                 buf, filename, emb = await self._chart_participation_alltime()
             elif chart == "points_alltime":
                 buf, filename, emb = await self._chart_points_alltime()
+            elif chart == "turn_order_alltime":
+                buf, filename, emb = await self._chart_turn_order_alltime()
             else:
                 await safe_ctx_followup(ctx, "Unknown chart type.", ephemeral=True)
                 return
@@ -340,6 +348,116 @@ class LeagueGraphsCog(commands.Cog):
             f"(range: {min_pts[-1]:.0f}\u2013{max_pts[-1]:.0f})"
         )
         return buf, "league_points_alltime.png", emb
+
+    # ------------------------------------------------------------------
+    # Chart: Turn Order Win Rates (current month)
+    # ------------------------------------------------------------------
+
+    async def _chart_turn_order(self, mk, ml):
+        matches, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+        month_matches, _, _ = _get_current_month_matches(matches, entrant_to_uid)
+
+        stats = compute_turn_order_stats(month_matches)
+        if stats["total_pods"] == 0:
+            raise ValueError("No completed 4-player pods found for this month yet.")
+
+        buf = await asyncio.to_thread(
+            render_turn_order_winrates,
+            stats["turn_rates"],
+            stats["draw_rate"],
+            stats["turn_wins"],
+            stats["draws"],
+            stats["total_pods"],
+            f"ECL Turn Order Win Rates \u2014 {ml}",
+        )
+
+        emb = discord.Embed(title=f"\U0001f3b2 Turn Order Win Rates \u2014 {ml}")
+        rates_str = " / ".join(f"{r*100:.1f}%" for r in stats["turn_rates"])
+        emb.description = (
+            f"**{stats['total_pods']}** completed pods "
+            f"({stats['completed_pods']} decisive, {stats['draws']} draws)\n"
+            f"Seat 1\u20134: {rates_str} · Draw: {stats['draw_rate']*100:.1f}%"
+        )
+        return buf, "turn_order.png", emb
+
+    # ------------------------------------------------------------------
+    # Chart: Turn Order Win Rates (all-time)
+    # ------------------------------------------------------------------
+
+    async def _chart_turn_order_alltime(self):
+        from utils.month_dump_reader import (
+            get_historical_months,
+            reassemble_month_dump,
+            _rebuild_matches_from_dump,
+            _fetch_entrant_to_uid_for_bracket,
+        )
+
+        months_info = await get_historical_months(bracket_id=None)
+
+        all_turn_wins = [0, 0, 0, 0]
+        all_draws = 0
+        all_completed = 0
+
+        sem = asyncio.Semaphore(3)
+
+        async def _process(month_info):
+            async with sem:
+                dump = await reassemble_month_dump(month_info)
+                if dump is None:
+                    return None
+                e2u = dump.get("entrant_to_uid")
+                if not e2u:
+                    bid = dump.get("bracket_id") or month_info.get("bracket_id", "")
+                    if bid:
+                        fetched = await _fetch_entrant_to_uid_for_bracket(bid, FIREBASE_ID_TOKEN)
+                        if fetched:
+                            dump["entrant_to_uid"] = {str(k): v for k, v in fetched.items()}
+                matches = _rebuild_matches_from_dump(dump)
+                return compute_turn_order_stats(matches)
+
+        tasks = [_process(m) for m in months_info]
+        results = await asyncio.gather(*tasks)
+
+        for r in results:
+            if r is None:
+                continue
+            for i in range(4):
+                all_turn_wins[i] += r["turn_wins"][i]
+            all_draws += r["draws"]
+            all_completed += r["completed_pods"]
+
+        # Also add current month
+        try:
+            matches, e2u = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+            month_matches, _, _ = _get_current_month_matches(matches, e2u)
+            current = compute_turn_order_stats(month_matches)
+            for i in range(4):
+                all_turn_wins[i] += current["turn_wins"][i]
+            all_draws += current["draws"]
+            all_completed += current["completed_pods"]
+        except Exception:
+            pass
+
+        total = all_completed + all_draws
+        if total == 0:
+            raise ValueError("No historical turn order data found.")
+
+        all_rates = [(w / total) for w in all_turn_wins]
+        all_draw_rate = all_draws / total
+
+        buf = await asyncio.to_thread(
+            render_turn_order_winrates,
+            all_rates, all_draw_rate, all_turn_wins, all_draws, total,
+            "ECL Turn Order Win Rates \u2014 All Time",
+        )
+
+        emb = discord.Embed(title="\U0001f3b2 Turn Order Win Rates \u2014 All Time")
+        rates_str = " / ".join(f"{r*100:.1f}%" for r in all_rates)
+        emb.description = (
+            f"**{total}** pods across **{len(months_info) + 1}** months\n"
+            f"Seat 1\u20134: {rates_str} · Draw: {all_draw_rate*100:.1f}%"
+        )
+        return buf, "turn_order_alltime.png", emb
 
 
 def setup(bot: commands.Bot):

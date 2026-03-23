@@ -974,3 +974,53 @@ def get_league_daily_activity(
     log_sync(f"[graphs] get_league_daily_activity: {counted} completed matches, "
              f"{len(daily)} days with games")
     return daily
+
+
+def compute_turn_order_stats(
+    matches: List[Match],
+) -> Dict[str, Any]:
+    """Compute turn order (seat position) win rates for 4-player pods.
+
+    Only considers season 1 (Swiss rounds), 4-player, non-muted, completed matches.
+    Returns dict with keys: completed_pods, draws, turn_wins (list[4]), turn_rates (list[4]), draw_rate.
+    """
+    turn_wins = [0, 0, 0, 0]
+    completed = 0
+    draws = 0
+
+    for m in matches:
+        if m.season != 1:
+            continue
+        if len(m.es) != 4:
+            continue
+        if not _is_valid_completed_match(m):
+            continue
+
+        if m.winner == "_DRAW_":
+            draws += 1
+            continue
+
+        try:
+            winner_eid = int(m.winner)
+        except (TypeError, ValueError):
+            continue
+
+        if winner_eid not in m.es:
+            continue
+
+        seat_idx = m.es.index(winner_eid)
+        turn_wins[seat_idx] += 1
+        completed += 1
+
+    total = completed + draws
+    turn_rates = [(w / total if total > 0 else 0.0) for w in turn_wins]
+    draw_rate = draws / total if total > 0 else 0.0
+
+    return {
+        "completed_pods": completed,
+        "draws": draws,
+        "total_pods": total,
+        "turn_wins": turn_wins,
+        "turn_rates": turn_rates,
+        "draw_rate": draw_rate,
+    }
