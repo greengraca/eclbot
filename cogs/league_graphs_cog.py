@@ -19,6 +19,7 @@ from discord import Option
 from topdeck_fetch import PlayerRow, get_league_rows_cached
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
 from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.mod_check import is_mod
 from utils.dates import current_month_key, month_label as fmt_month_label
 from utils.logger import log_sync, log_warn
 from utils.month_dump_reader import (
@@ -71,6 +72,13 @@ class LeagueGraphsCog(commands.Cog):
         if ctx.guild is None:
             await ctx.respond("This command can only be used in a server.", ephemeral=True)
             return
+
+        # All-time charts are mod-only
+        if chart.endswith("_alltime"):
+            member = ctx.author
+            if not isinstance(member, discord.Member) or not is_mod(member):
+                await ctx.respond("These charts are not yet available.", ephemeral=True)
+                return
 
         await safe_ctx_defer(ctx, ephemeral=False, label="leaguegraphs")
 
