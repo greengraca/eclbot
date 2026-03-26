@@ -11,6 +11,7 @@ from online_games_store import count_online_games_by_topdeck_uid_str, has_recent
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
+from utils.mod_check import is_mod
 from utils.settings import GUILD_ID, load_subs_config
 
 
@@ -412,16 +413,18 @@ class TopdeckLeagueCog(commands.Cog):
         # Find players who would be in the top16 by points but failed recency
         bumped_from_top16: List[PlayerRow] = []
         if failed_recency:
-            # Merge qualified + failed_recency, sort by points, check who'd be top16
             all_with_online = sorted(
                 qualified_candidates + failed_recency,
                 key=lambda r: (-r.pts, -r.games),
             )
-            for i, r in enumerate(all_with_online[:16]):
+            for r in all_with_online[:16]:
                 if r in failed_recency:
                     bumped_from_top16.append(r)
 
-        if bumped_from_top16:
+        caller_is_mod = is_mod(member if isinstance(member, discord.Member) else None)
+
+        if bumped_from_top16 and caller_is_mod:
+            # Mods see all bumped players
             bump_lines = []
             for r in bumped_from_top16:
                 uid = (r.uid or "").strip()
@@ -431,6 +434,13 @@ class TopdeckLeagueCog(commands.Cog):
                 f"\n\n⚠️ **Players excluded from Top 16 due to recency** "
                 f"(no online game after day {recency_after_day}):\n"
                 + "\n".join(bump_lines)
+            )
+        elif bumped_from_top16 and row_for_author and row_for_author in bumped_from_top16:
+            # Non-mod caller is themselves bumped
+            missing_msg += (
+                f"\n\n⚠️ **You would be in the Top 16 by points, but you have no online game "
+                f"after day {recency_after_day}.** Play at least 1 online game after day "
+                f"{recency_after_day} to qualify, or reach {no_recency_threshold}+ online games."
             )
 
         # ---- Step 4: public Top 16 ----
