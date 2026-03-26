@@ -12,6 +12,7 @@ Default target is the caller; pass an optional member to inspect others.
 
 from __future__ import annotations
 
+import io
 from datetime import datetime
 from typing import Optional, List
 
@@ -138,6 +139,29 @@ def _most_games_contender_line(rows: List[PlayerRow], target: PlayerRow, top_n: 
     need = max(0, cutoff_games - my_games)
     return f"Most games contender: ❌ (need **{need}** more to reach **{cutoff_games}**)"
 
+
+
+class ShareStatsView(discord.ui.View):
+    """Ephemeral preview with a Share button to post the stats card publicly."""
+
+    def __init__(self, image_bytes: bytes, target_id: int, *, timeout: float = 120.0):
+        super().__init__(timeout=timeout)
+        self.image_bytes = image_bytes
+        self.target_id = target_id
+
+    @discord.ui.button(label="Post Publicly", style=discord.ButtonStyle.primary, emoji="\U0001f4e4")
+    async def share(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="Shared to channel!",
+            attachments=[],
+            view=None,
+        )
+        buf = io.BytesIO(self.image_bytes)
+        await interaction.channel.send(
+            content=f"`/stats` — <@{self.target_id}>",
+            file=discord.File(buf, filename="stats_card.png"),
+        )
+        self.stop()
 
 
 class StatsCog(commands.Cog):
@@ -391,7 +415,7 @@ class StatsCog(commands.Cog):
 
         await safe_ctx_followup(ctx, embed=emb, ephemeral=True)
 
-        # ---- Public stats card image ----
+        # ---- Stats card image (ephemeral preview + share button) ----
         try:
             import asyncio
 
@@ -431,15 +455,17 @@ class StatsCog(commands.Cog):
                 seat_stats=seat_stats,
             )
 
-            channel = ctx.channel
-            if channel and hasattr(channel, "send"):
-                await channel.send(
-                    content=f"`/stats` — <@{target.id}>",
-                    file=discord.File(buf, filename="stats_card.png"),
-                )
+            image_bytes = buf.getvalue()
+            await safe_ctx_followup(
+                ctx,
+                content=f"`/stats` — {target.display_name}",
+                file=discord.File(io.BytesIO(image_bytes), filename="stats_card.png"),
+                view=ShareStatsView(image_bytes, target.id),
+                ephemeral=True,
+            )
         except Exception as e:
             from utils.logger import log_warn
-            log_warn(f"[stats] Failed to send public stats card: {type(e).__name__}: {e}")
+            log_warn(f"[stats] Failed to send stats card: {type(e).__name__}: {e}")
 
 
 def setup(bot: commands.Bot):
