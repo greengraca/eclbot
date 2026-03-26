@@ -26,6 +26,7 @@ from utils.month_dump_reader import (
     get_live_matches,
     get_league_daily_activity,
     get_league_monthly_aggregates,
+    get_league_avg_daily_activity,
     compute_turn_order_stats,
     _get_current_month_matches,
 )
@@ -35,6 +36,7 @@ from utils.graph_renderer import (
     render_league_points_distribution,
     render_league_games_distribution,
     render_league_activity_alltime,
+    render_league_activity_daily_avg,
     render_league_participation_alltime,
     render_league_points_alltime,
     render_turn_order_winrates,
@@ -51,6 +53,7 @@ LEAGUE_CHART_CHOICES = [
     discord.OptionChoice("All-Time Participation", "participation_alltime"),
     discord.OptionChoice("All-Time Points", "points_alltime"),
     discord.OptionChoice("All-Time Turn Order", "turn_order_alltime"),
+    discord.OptionChoice("All-Time Avg Games by Day", "daily_avg_alltime"),
 ]
 
 
@@ -114,6 +117,8 @@ class LeagueGraphsCog(commands.Cog):
                 buf, filename, emb = await self._chart_points_alltime()
             elif chart == "turn_order_alltime":
                 buf, filename, emb = await self._chart_turn_order_alltime()
+            elif chart == "daily_avg_alltime":
+                buf, filename, emb = await self._chart_activity_daily_avg()
             else:
                 await safe_ctx_followup(ctx, "Unknown chart type.", ephemeral=True)
                 return
@@ -458,6 +463,35 @@ class LeagueGraphsCog(commands.Cog):
             f"Seat 1\u20134: {rates_str} · Draw: {all_draw_rate*100:.1f}%"
         )
         return buf, "turn_order_alltime.png", emb
+
+
+    # ------------------------------------------------------------------
+    # Chart: All-Time Avg Games by Day of Month
+    # ------------------------------------------------------------------
+
+    async def _chart_activity_daily_avg(self):
+        avg = await get_league_avg_daily_activity(
+            bracket_id=None,
+            firebase_id_token=FIREBASE_ID_TOKEN,
+        )
+
+        if not avg:
+            raise ValueError("No historical data available.")
+
+        days = sorted(avg.keys())
+        avg_games = [avg[d] for d in days]
+
+        buf = await asyncio.to_thread(render_league_activity_daily_avg, days, avg_games)
+
+        overall_avg = sum(avg_games) / len(avg_games)
+        peak_day = days[avg_games.index(max(avg_games))]
+        emb = discord.Embed(title="\U0001f4c5 Avg Games by Day of Month \u2014 All Time")
+        emb.description = (
+            f"Average across all historical months\n"
+            f"Overall avg: **{overall_avg:.1f}** games/day \u2022 "
+            f"Peak: day **{peak_day}** ({max(avg_games):.1f} avg)"
+        )
+        return buf, "league_daily_avg_alltime.png", emb
 
 
 def setup(bot: commands.Bot):

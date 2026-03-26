@@ -398,6 +398,27 @@ def render_league_activity_alltime(
     return _save(fig)
 
 
+def render_league_activity_daily_avg(
+    days: List[int],
+    avg_games: List[float],
+) -> io.BytesIO:
+    """Bar chart: average games per day-of-month across all historical months."""
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _apply_dark_style(ax, fig)
+
+    x = range(len(days))
+    ax.bar(x, avg_games, color=ACCENT, width=0.7, alpha=0.9)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([str(d) for d in days], fontsize=9, color=FG)
+    ax.set_xlabel("Day of Month", fontsize=11)
+    ax.set_ylabel("Avg Games", fontsize=11)
+
+    ax.set_title("ECL Avg Games by Day of Month \u2014 All Time", fontsize=13, color=FG, pad=12)
+
+    return _save(fig)
+
+
 def render_league_participation_alltime(
     months: List[str],
     player_counts: List[int],

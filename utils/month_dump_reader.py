@@ -976,6 +976,121 @@ def get_league_daily_activity(
     return daily
 
 
+async def get_league_avg_daily_activity(
+    bracket_id: Optional[str] = None,
+    firebase_id_token: Optional[str] = None,
+    max_months: int = 12,
+) -> Dict[int, float]:
+    """Average games per day-of-month across all historical months + current.
+
+    For each day 1-31, computes total_games / months_that_had_that_day.
+    Returns {day: avg_games}.
+    """
+    import calendar
+    from utils.settings import TOPDECK_BRACKET_ID
+
+    months_info = await get_historical_months(bracket_id)
+    months_info = months_info[-max_months:]
+
+    sem = asyncio.Semaphore(3)
+    # Collect per-month: (month_str, {day: games_count})
+    month_dailies: List[Tuple[str, Dict[int, int]]] = []
+
+    async def _process(month_info):
+        async with sem:
+            dump = await reassemble_month_dump(month_info)
+            if dump is None:
+                return None
+            e2u = dump.get("entrant_to_uid")
+            if not e2u:
+                bid = dump.get("bracket_id") or month_info.get("bracket_id", "")
+                if bid:
+                    cached = _get_cached_e2u(bid)
+                    if cached is not None:
+                        e2u = {str(k): v for k, v in cached.items()}
+                    else:
+                        fetched = await _fetch_entrant_to_uid_for_bracket(
+                            bid, firebase_id_token
+                        )
+                        if fetched:
+                            _set_cached_e2u(bid, fetched)
+                            e2u = {str(k): v for k, v in fetched.items()}
+                    if e2u:
+                        dump["entrant_to_uid"] = e2u
+            if not e2u:
+                return None
+
+            matches = _rebuild_matches_from_dump(dump)
+            daily: Dict[int, int] = {}
+            for m in matches:
+                if not _is_valid_completed_match(m):
+                    continue
+                ts = _normalize_ts(m.start)
+                if ts is None:
+                    continue
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(LISBON_TZ)
+                day = dt.day
+                daily[day] = daily.get(day, 0) + 1
+            m_str = dump.get("month") or month_info.get("month", "")
+            return (m_str, daily)
+
+    tasks = [_process(m) for m in months_info]
+    results = await asyncio.gather(*tasks)
+    for r in results:
+        if r is not None:
+            month_dailies.append(r)
+
+    # Current month from live data
+    live_bracket = TOPDECK_BRACKET_ID
+    if live_bracket:
+        try:
+            matches, e2u = await get_live_matches(live_bracket, firebase_id_token)
+            month_matches, _, _ = _get_current_month_matches(matches, e2u)
+            daily: Dict[int, int] = {}
+            for m in month_matches:
+                if not _is_valid_completed_match(m):
+                    continue
+                ts = _normalize_ts(m.start)
+                if ts is None:
+                    continue
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(LISBON_TZ)
+                daily[dt.day] = daily.get(dt.day, 0) + 1
+            if daily:
+                month_dailies.append((current_month_key(), daily))
+        except Exception as e:
+            log_warn(f"[leaguegraphs] get_league_avg_daily_activity: "
+                     f"error with current month: {type(e).__name__}: {e}")
+
+    if not month_dailies:
+        return {}
+
+    # For each day 1-31: sum games / months that had that day
+    day_totals: Dict[int, int] = {}
+    day_month_count: Dict[int, int] = {}
+    for m_str, daily in month_dailies:
+        # Determine how many days this month had
+        try:
+            parts = m_str.split("-")
+            year, month = int(parts[0]), int(parts[1])
+            _, days_in_month = calendar.monthrange(year, month)
+        except Exception:
+            days_in_month = 31
+        for day in range(1, days_in_month + 1):
+            day_month_count[day] = day_month_count.get(day, 0) + 1
+            if day in daily:
+                day_totals[day] = day_totals.get(day, 0) + daily[day]
+
+    avg: Dict[int, float] = {}
+    for day in range(1, 32):
+        count = day_month_count.get(day, 0)
+        if count > 0:
+            avg[day] = day_totals.get(day, 0) / count
+
+    log_sync(f"[leaguegraphs] get_league_avg_daily_activity: "
+             f"{len(month_dailies)} months, {sum(day_totals.values())} total games")
+    return avg
+
+
 def compute_player_seat_stats(
     matches: List[Match],
     target_entrant_ids: set,
