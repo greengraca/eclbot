@@ -15,7 +15,8 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar, Any
 
 import discord
 
-from topdeck_fetch import normalize_topdeck_discord, extract_discord_from_name
+from topdeck_fetch import extract_discord_from_name
+from utils.topdeck_normalize import normalize_topdeck_discord
 
 
 T = TypeVar("T")

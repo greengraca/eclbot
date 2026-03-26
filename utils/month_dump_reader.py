@@ -515,7 +515,7 @@ async def get_player_history(
 # Current-month daily data (uses live cached matches, NOT topdeck_pods)
 # ---------------------------------------------------------------------------
 
-def _normalize_ts(ts) -> Optional[float]:
+def normalize_ts(ts) -> Optional[float]:
     """Normalize a timestamp (ms vs s)."""
     if ts is None:
         return None
@@ -548,13 +548,13 @@ def _get_current_month_matches(
     for match in matches:
         if not _is_valid_completed_match(match):
             continue
-        ts = _normalize_ts(match.start)
+        ts = normalize_ts(match.start)
         if ts is None:
             continue
         if start_ts <= ts < end_ts:
             filtered.append(match)
 
-    filtered.sort(key=lambda m: (_normalize_ts(m.start) or 0.0, m.season, m.id))
+    filtered.sort(key=lambda m: (normalize_ts(m.start) or 0.0, m.season, m.id))
     return filtered, start_ts, end_ts
 
 
@@ -588,7 +588,7 @@ def get_daily_activity_from_matches(
             continue
 
         matched_count += 1
-        ts = _normalize_ts(m.start)
+        ts = normalize_ts(m.start)
         if ts is None:
             continue
 
@@ -631,7 +631,7 @@ def compute_daily_progression(
     # Group matches by Lisbon day
     day_to_matches: Dict[int, List[Match]] = defaultdict(list)
     for m in month_matches:
-        ts = _normalize_ts(m.start)
+        ts = normalize_ts(m.start)
         if ts is None:
             continue
         dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(LISBON_TZ)
@@ -953,7 +953,7 @@ def get_league_daily_activity(
         if not _is_valid_completed_match(m):
             continue
 
-        ts = _normalize_ts(m.start)
+        ts = normalize_ts(m.start)
         if ts is None:
             continue
 
@@ -1025,7 +1025,7 @@ async def get_league_avg_daily_activity(
             for m in matches:
                 if not _is_valid_completed_match(m):
                     continue
-                ts = _normalize_ts(m.start)
+                ts = normalize_ts(m.start)
                 if ts is None:
                     continue
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(LISBON_TZ)
@@ -1050,7 +1050,7 @@ async def get_league_avg_daily_activity(
             for m in month_matches:
                 if not _is_valid_completed_match(m):
                     continue
-                ts = _normalize_ts(m.start)
+                ts = normalize_ts(m.start)
                 if ts is None:
                     continue
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(LISBON_TZ)

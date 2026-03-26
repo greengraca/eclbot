@@ -4,6 +4,7 @@ import re
 import asyncio
 from dataclasses import dataclass
 from utils.logger import log_sync, log_warn
+from utils.topdeck_normalize import norm_handle as _norm_handle_basic, normalize_topdeck_discord
 from datetime import datetime, timezone, timedelta
 from typing import (
     Any,
@@ -240,26 +241,6 @@ def _is_in_progress_match(m: Match) -> bool:
 
     return started and not ended and not has_result
 
-
-def _norm_handle_basic(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", s.lower()) if isinstance(s, str) else ""
-
-
-def normalize_topdeck_discord(discord_raw: str) -> str:
-    if not discord_raw:
-        return ""
-    s = str(discord_raw).strip()
-
-    # handle "@name"
-    if s.startswith("@"):
-        s = s[1:]
-
-    # keep only first token (same as before)
-    for sep in (" ", "("):
-        if sep in s:
-            s = s.split(sep, 1)[0]
-
-    return _norm_handle_basic(s)
 
 
 def extract_discord_from_name(name: str) -> str:

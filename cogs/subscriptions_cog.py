@@ -23,7 +23,7 @@ from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
 
 from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, PlayerRow
-from online_games_store import count_online_games_by_topdeck_uid_str, has_recent_game_by_topdeck_uid
+from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
 from utils.interactions import resolve_member
@@ -197,26 +197,18 @@ class SubscriptionsCog(commands.Cog):
         month_ent_ids: list[int] = []
         pass_ids: list[int] = []
 
-        try:
-            month_ent_ids = await subs_access.distinct("user_id", {
-                "guild_id": cfg.guild_id,
-                "month": mk,
-                "kind": {"$ne": "kofi-one-time"},
-            })
-        except Exception as e:
-            log_error(f"[subs] DB error fetching month entitlements for {mk}: {type(e).__name__}: {e}")
-            month_ent_ids = []
+        month_ent_ids = await subs_access.distinct("user_id", {
+            "guild_id": cfg.guild_id,
+            "month": mk,
+            "kind": {"$ne": "kofi-one-time"},
+        })
 
-        try:
-            pass_ids = await subs_access.distinct("user_id", {
-                "guild_id": cfg.guild_id,
-                "kind": "kofi-one-time",
-                "starts_at": {"$lt": end_utc},
-                "expires_at": {"$gt": start_utc},
-            })
-        except Exception as e:
-            log_error(f"[subs] DB error fetching one-time passes for {mk}: {type(e).__name__}: {e}")
-            pass_ids = []
+        pass_ids = await subs_access.distinct("user_id", {
+            "guild_id": cfg.guild_id,
+            "kind": "kofi-one-time",
+            "starts_at": {"$lt": end_utc},
+            "expires_at": {"$gt": start_utc},
+        })
 
         def _to_int_set(xs) -> set[int]:
             out: set[int] = set()
@@ -232,11 +224,7 @@ class SubscriptionsCog(commands.Cog):
         kofi_set = month_ent_set | pass_set  # DB-based access union
 
         # ---- Free-entry DB list ----
-        try:
-            free_ids = await subs_free_entries.distinct("user_id", {"guild_id": cfg.guild_id, "month": mk})
-        except Exception as e:
-            log_error(f"[subs] DB error fetching free entries for {mk}: {type(e).__name__}: {e}")
-            free_ids = []
+        free_ids = await subs_free_entries.distinct("user_id", {"guild_id": cfg.guild_id, "month": mk})
         free_set = _to_int_set(free_ids)
 
         eligible: set[int] = set()
@@ -442,7 +430,7 @@ class SubscriptionsCog(commands.Cog):
             return ([], [f"bad mk: {mk!r}"])
 
         try:
-            online_counts = await count_online_games_by_topdeck_uid_str(bracket_id, year, month, online_only=True)
+            online_counts = await count_online_games_by_topdeck_uid(bracket_id, year, month, online_only=True)
         except Exception as e:
             return ([], [f"online_counts error: {type(e).__name__}: {e}"])
 
@@ -701,7 +689,7 @@ class SubscriptionsCog(commands.Cog):
         currency = str(payload.get("currency") or "").upper().strip()
         try:
             amount = float(payload.get("amount") or 0)
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             log_warn(f"[subs] Ko-fi amount parse failed (txn={txn_id}): {type(e).__name__}: {e}")
             amount = 0.0
 
@@ -1261,8 +1249,8 @@ class SubscriptionsCog(commands.Cog):
                     await self.log.warn(f"[treasure] Check failed: {type(e).__name__}: {e}")
 
         except Exception as e:
-            tb = traceback.format_exc()
-            await self.log.error(f"[subs] ❌ _tick crashed: {type(e).__name__}: {e}\n{tb}")
+            traceback.print_exc()
+            await self.log.error(f"[subs] ❌ _tick crashed: {type(e).__name__}: {e}")
             return
 
     @_tick.before_loop
@@ -1433,7 +1421,7 @@ class SubscriptionsCog(commands.Cog):
             return ([], [f"bad cut_month: {cut_month!r}"])
 
         try:
-            online_counts = await count_online_games_by_topdeck_uid_str(
+            online_counts = await count_online_games_by_topdeck_uid(
                 bracket_id, year, month, online_only=True
             )
         except Exception as e:
@@ -1591,7 +1579,7 @@ class SubscriptionsCog(commands.Cog):
             return ([], [f"bad mk: {mk!r}"], 0)
 
         try:
-            online_counts = await count_online_games_by_topdeck_uid_str(
+            online_counts = await count_online_games_by_topdeck_uid(
                 bracket_id, year, month, online_only=True
             )
         except Exception as e:

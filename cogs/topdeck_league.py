@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
-from online_games_store import count_online_games_by_topdeck_uid_str, has_recent_game_by_topdeck_uid
+from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
@@ -37,7 +37,7 @@ async def _load_online_counts() -> Dict[str, int]:
 
     ms = _month_start_utc()
     try:
-        counts = await count_online_games_by_topdeck_uid_str(
+        counts = await count_online_games_by_topdeck_uid(
             TOPDECK_BRACKET_ID, ms.year, ms.month, online_only=True
         )
     except Exception as e:

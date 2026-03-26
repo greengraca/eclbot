@@ -16,10 +16,8 @@ from typing import Dict, List, Optional, Tuple
 
 import discord
 
-from topdeck_fetch import (
-    get_league_rows_cached,
-    normalize_topdeck_discord,
-)
+from topdeck_fetch import get_league_rows_cached
+from utils.topdeck_normalize import normalize_topdeck_discord
 
 from utils.topdeck_identity import (
     extract_discord_id,

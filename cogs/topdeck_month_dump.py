@@ -18,6 +18,7 @@ from db import topdeck_month_dump_runs, topdeck_month_dump_chunks, topdeck_pods
 from utils.settings import GUILD_ID, LISBON_TZ
 from utils.dates import now_lisbon
 from utils.logger import log_sync, log_warn
+from utils.month_dump_reader import normalize_ts as _normalize_ts
 from utils.mod_check import is_mod
 
 from topdeck_fetch import (
@@ -46,17 +47,6 @@ def _now_utc() -> datetime:
 
 def _now_iso() -> str:
     return _now_utc().isoformat(timespec="seconds")
-
-
-def _normalize_ts(ts: Optional[float]) -> Optional[float]:
-    if ts is None:
-        return None
-    try:
-        x = float(ts)
-    except Exception:
-        return None
-    # ms vs s
-    return x / 1000.0 if x > 10_000_000_000 else x
 
 
 def _current_month_str() -> str:

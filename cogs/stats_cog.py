@@ -22,7 +22,7 @@ from discord import Option
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from utils.topdeck_identity import find_row_for_member
-from online_games_store import count_online_games_by_topdeck_uid_str, has_recent_game_by_topdeck_uid
+from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
@@ -30,6 +30,7 @@ from utils.month_dump_reader import get_live_matches, compute_player_seat_stats,
 from utils.graph_renderer import render_player_stats_card
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
 from utils.mod_check import is_mod
+from utils.logger import log_warn
 
 
 def _pct(x: float) -> str:
@@ -254,11 +255,13 @@ class StatsCog(commands.Cog):
         if subs_cog is not None and hasattr(subs_cog, "_eligibility"):
             try:
                 entitled_now, entitled_now_reason = await subs_cog._eligibility(target, mk)  # type: ignore
-            except Exception:
+            except Exception as e:
+                log_warn(f"[stats] eligibility check failed for {target} ({mk}): {type(e).__name__}: {e}")
                 entitled_now, entitled_now_reason = None, "Reason: error"
             try:
                 entitled_next, entitled_next_reason = await subs_cog._eligibility(target, next_mk)  # type: ignore
-            except Exception:
+            except Exception as e:
+                log_warn(f"[stats] eligibility check failed for {target} ({next_mk}): {type(e).__name__}: {e}")
                 entitled_next, entitled_next_reason = None, "Reason: error"
 
         access_lines = [
@@ -310,14 +313,15 @@ class StatsCog(commands.Cog):
         if uid:
             try:
                 y, m = mk.split("-")
-                online_counts = await count_online_games_by_topdeck_uid_str(
+                online_counts = await count_online_games_by_topdeck_uid(
                     TOPDECK_BRACKET_ID,
                     int(y),
                     int(m),
                     online_only=True,
                 )
                 online_count = int(online_counts.get(uid, 0) or 0)
-            except Exception:
+            except Exception as e:
+                log_warn(f"[stats] online game count failed for uid={uid}: {type(e).__name__}: {e}")
                 online_count = None
 
         min_online = int(getattr(cfg, "top16_min_online_games", 0) or 0)
@@ -341,7 +345,8 @@ class StatsCog(commands.Cog):
                     after_day=recency_after_day, online_only=True,
                 )
                 has_recent = recency_map.get(uid, False)
-            except Exception:
+            except Exception as e:
+                log_warn(f"[stats] recency check failed for uid={uid}: {type(e).__name__}: {e}")
                 has_recent = None
 
             if has_recent is False:

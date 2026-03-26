@@ -26,7 +26,12 @@ DB_NAME = os.getenv("MONGO_DB_NAME", _default_name)
 if not MONGO_URI:
     raise RuntimeError("Missing MONGO_URI/MONGODB_URI env var. Subscriptions require MongoDB.")
 
-_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+_client = motor.motor_asyncio.AsyncIOMotorClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=30000,
+)
 
 try:
     db = _client.get_default_database() or _client[DB_NAME]
@@ -92,7 +97,13 @@ async def job_once(job_id: str) -> bool:
         return False
 
 
+_indexes_ensured = False
+
+
 async def ensure_indexes() -> None:
+    global _indexes_ensured
+    if _indexes_ensured:
+        return
     await subs_access.create_indexes(
         [
             IndexModel(
@@ -313,4 +324,5 @@ async def ensure_indexes() -> None:
         ]
     )
 
+    _indexes_ensured = True
     return

@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 
 from utils.logger import log_sync, log_warn, log_debug
 from utils.mod_check import is_mod
+from utils.topdeck_normalize import norm_handle as _norm_handle, normalize_topdeck_discord as _extract_topdeck_handle
 
 from db import online_games, spellbot_scan_cache
 from online_games_store import OnlineGameRecord, upsert_record
@@ -73,28 +74,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _norm_handle(s: str) -> str:
-    """Normalize a Discord handle for fuzzy matching."""
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
-
-def _extract_topdeck_handle(discord_raw: str) -> str:
-    """
-    Take the TopDeck 'discord' field and turn it into something
-    that should match the real Discord username.
-
-    Examples:
-    - 'Zerox#1234'       -> 'zerox'
-    - 'Zerox (Zerox)'    -> 'zerox'
-    - 'Zerox some stuff' -> 'zerox'
-    """
-    if not discord_raw:
-        return ""
-    s = discord_raw.strip()
-    s = re.split(r"[\s(]", s, 1)[0]
-    if "#" in s:
-        s = s.split("#", 1)[0]
-    return _norm_handle(s)
 
 
 @dataclass
@@ -613,7 +592,8 @@ async def _save_online_stats_to_db(new_payload: Dict[str, Any]) -> None:
                 online=online_flag,
             )
             await upsert_record(bracket_id, year, month, rec)
-        except Exception:
+        except Exception as e:
+            log_warn(f"[sync] Failed to upsert record season={season} tid={tid}: {type(e).__name__}: {e}")
             continue
 
 

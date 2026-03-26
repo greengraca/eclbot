@@ -576,8 +576,8 @@ def render_player_stats_card(
             oimg = OffsetImage(np.array(img), zoom=zoom)
             oimg.image.axes = ax
             ax.add_artist(AnnotationBbox(oimg, (lx, ly), frameon=False, box_alignment=(0.5, 0.5)))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[graphs] Logo load failed for {fname}: {type(e).__name__}: {e}")
 
     # ── Name + handle ──
     ax.text(CARD_L, 95, name, fontsize=18, fontweight="bold", color=WHITE, ha="left", va="top")

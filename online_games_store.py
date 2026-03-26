@@ -1,6 +1,7 @@
 # online_games_store.py
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
@@ -42,46 +43,6 @@ def _doc_to_record(doc: dict) -> OnlineGameRecord:
         topdeck_uids=[str(x) for x in (uids or []) if str(x).strip()],
         online=bool(doc.get("online", True)),
     )
-
-
-async def load_index(bracket_id: str, year: int, month: int) -> List[OnlineGameRecord]:
-    cur = online_games.find(
-        {"bracket_id": str(bracket_id), "year": int(year), "month": int(month)}
-    )
-    docs = await cur.to_list(length=None)
-    return [_doc_to_record(d) for d in docs]
-
-
-async def save_index(bracket_id: str, year: int, month: int, records: List[OnlineGameRecord]) -> None:
-    bid = str(bracket_id)
-    y = int(year)
-    m = int(month)
-    now = datetime.now(timezone.utc)
-
-    if not records:
-        await online_games.delete_many({"bracket_id": bid, "year": y, "month": m})
-        return
-
-    # Atomic upsert per record — avoids the delete+insert gap where readers see zero records
-    from pymongo import UpdateOne
-    ops = []
-    seen_match_ids: set = set()
-    for r in records:
-        d = asdict(r)
-        d.update({"bracket_id": bid, "year": y, "month": m, "updated_at": now})
-        filt = {"bracket_id": bid, "year": y, "month": m, "season": int(r.season), "match_id": str(r.match_id)}
-        ops.append(UpdateOne(filt, {"$set": d}, upsert=True))
-        seen_match_ids.add(str(r.match_id))
-
-    if ops:
-        await online_games.bulk_write(ops, ordered=False)
-
-    # Remove records that are no longer in the new set
-    if seen_match_ids:
-        await online_games.delete_many({
-            "bracket_id": bid, "year": y, "month": m,
-            "match_id": {"$nin": list(seen_match_ids)},
-        })
 
 
 async def upsert_record(bracket_id: str, year: int, month: int, record: OnlineGameRecord) -> None:
@@ -154,22 +115,6 @@ async def count_online_games_by_topdeck_uid(
     return out
 
 
-async def count_online_games_by_topdeck_uid_str(
-    bracket_id: str,
-    year: int,
-    month: int,
-    *,
-    online_only: bool = True,
-) -> Dict[str, int]:
-    # already str keys, but keep the old call-site style
-    return await count_online_games_by_topdeck_uid(bracket_id, year, month, online_only=online_only)
-
-
-# ---- OPTIONAL: keep legacy names so nothing else explodes ----
-# If you truly want “rename everywhere”, you can delete these aliases after you update all call sites.
-count_online_games_by_discord_str = count_online_games_by_topdeck_uid_str
-
-
 async def has_recent_game_by_topdeck_uid(
     bracket_id: str,
     year: int,
@@ -196,8 +141,10 @@ async def has_recent_game_by_topdeck_uid(
     if not uids:
         return {}
     
-    # Calculate the timestamp for the start of after_day
-    cutoff_dt = datetime(year, month, after_day, 0, 0, 0, tzinfo=timezone.utc)
+    # Calculate the timestamp for the start of after_day (clamped to month length)
+    max_day = calendar.monthrange(year, month)[1]
+    clamped_day = min(after_day, max_day)
+    cutoff_dt = datetime(year, month, clamped_day, 0, 0, 0, tzinfo=timezone.utc)
     cutoff_ts = cutoff_dt.timestamp()
     
     match: Dict[str, object] = {
