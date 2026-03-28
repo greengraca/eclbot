@@ -68,6 +68,7 @@ persistent_lobbies = db["persistent_lobbies"]
 # Treasure pods (Bring a Friend)
 treasure_pod_schedule = db["treasure_pod_schedule"]
 treasure_pods = db["treasure_pods"]
+treasure_pod_config = db["dashboard_treasure_pod_config"]  # Dashboard-owned config
 
 # SpellBot scan cache (incremental /synconline)
 spellbot_scan_cache = db["spellbot_scan_cache"]

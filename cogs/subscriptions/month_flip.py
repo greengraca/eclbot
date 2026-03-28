@@ -13,8 +13,7 @@ Handles:
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -25,7 +24,6 @@ from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pod
 from utils.settings import LISBON_TZ, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
 from utils.dates import add_months, month_bounds, month_label, now_lisbon
 from utils.interactions import resolve_member
-from utils.logger import log_sync
 from utils.treasure_pods import TreasurePodManager
 
 from .embeds import build_flip_mods_embed, _get_color
@@ -169,7 +167,7 @@ class MonthFlipHandler:
             return
 
         # If month-close for previous month is pending but not done, delay revoke to avoid
-        # wrongly removing Top16 winners before their free-entry is written.
+        # wrongly removing members before month-close grants are written.
         prev_month = add_months(target_month, -1)
         prev_pending = await subs_jobs.find_one({"_id": self.month_close_pending_job_id(guild.id, prev_month)})
         prev_done = await subs_jobs.find_one({"_id": self.month_close_done_job_id(guild.id, prev_month)})
@@ -188,8 +186,6 @@ class MonthFlipHandler:
         role = guild.get_role(cfg.ecl_role_id)
         if not role:
             return
-
-        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
         flip_at = month_bounds(target_month)[0]  # start of target_month @ 00:00 Lisbon
 
@@ -217,6 +213,8 @@ class MonthFlipHandler:
             if cfg.dm_sleep_seconds:
                 await asyncio.sleep(cfg.dm_sleep_seconds)
 
+        # Mark done AFTER the loop so a crash mid-revoke allows retry on next tick.
+        await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
         await self.log.info(f"[subs] monthly revoke {target_month}: checked={checked} removed={removed}")
 
     # -------------------- Top16 cut application --------------------
@@ -224,7 +222,7 @@ class MonthFlipHandler:
     async def apply_top16_cut_for_next_month(
         self, guild: discord.Guild, *, cut_month: str, target_month: str
     ) -> None:
-        """Apply Top16 cut: grant free entry for next month + Top16 role."""
+        """Apply Top16 cut: grant Top16 role to qualifiers."""
         cfg = self.cfg
 
         top16_ids, missing = await self.cog._eligible_top16_discord_ids_for_month(guild, cut_month)
@@ -257,44 +255,7 @@ class MonthFlipHandler:
             await self.cog._grant_top16(uid, reason=f"Top16 qualifier ({cut_month})")
             applied += 1
 
-        await self.log.ok(f"[subs] Applied Top16 cut: {applied} users -> free entry {target_month} + Top16 role")
-
-    # -------------------- Cleanup job (legacy?) --------------------
-
-    async def run_cleanup_job(self, guild: discord.Guild, target_month: str) -> None:
-        """Remove ECL from ineligible users for target_month."""
-        job_id = f"cleanup:{guild.id}:{target_month}"
-        if not await job_once(job_id):
-            return
-
-        cfg = self.cfg
-        role = guild.get_role(cfg.ecl_role_id) if cfg.ecl_role_id else None
-        if not role:
-            return
-
-        cut_month = add_months(target_month, -1)  # month that just ended
-        await self.apply_top16_cut_for_next_month(guild, cut_month=cut_month, target_month=target_month)
-
-        members = list(role.members)
-        if len(members) < 50:
-            members = [m async for m in guild.fetch_members(limit=None)]
-            members = [m for m in members if role in m.roles]
-
-        flip_at = month_bounds(target_month)[0]
-
-        to_remove: list[discord.Member] = []
-        for m in members:
-            if m.bot:
-                continue
-            ok, _ = await self.cog._eligibility(m, target_month, at=flip_at)
-            if not ok:
-                to_remove.append(m)
-
-        await self.log.info(f"[subs] Cleanup for {target_month}: removing ECL from {len(to_remove)} users")
-
-        for m in to_remove:
-            with contextlib.suppress(Exception):
-                await m.remove_roles(role, reason=f"Not subscribed/free for {target_month}")
+        await self.log.ok(f"[subs] Applied Top16 cut: {applied} users -> Top16 role ({cut_month})")
 
     # -------------------- Flip reminder jobs --------------------
 

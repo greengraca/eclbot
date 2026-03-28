@@ -1931,8 +1931,11 @@ class SubscriptionsCog(commands.Cog):
 
         members = list(role.members)
         if len(members) < 50:
-            members = [m async for m in guild.fetch_members(limit=None)]
-            members = [m for m in members if role in m.roles]
+            try:
+                members = [m async for m in guild.fetch_members(limit=None)]
+                members = [m for m in members if role in m.roles]
+            except Exception:
+                members = list(role.members)
 
         # Build the raw target list (ineligible for target_month)
         to_dm_all: list[discord.Member] = []
@@ -1991,10 +1994,6 @@ class SubscriptionsCog(commands.Cog):
     async def _apply_top16_cut_for_next_month(self, guild: discord.Guild, *, cut_month: str, target_month: str):
         """Apply Top16 cut - delegated to flip handler."""
         await self.flip_handler.apply_top16_cut_for_next_month(guild, cut_month=cut_month, target_month=target_month)
-
-    async def _run_cleanup_job(self, guild: discord.Guild, target_month: str):
-        """Cleanup job - delegated to flip handler."""
-        await self.flip_handler.run_cleanup_job(guild, target_month)
 
     # -------------------- Flip reminders (delegated to handler) --------------------
 

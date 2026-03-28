@@ -307,9 +307,27 @@ class TreasurePodManager:
         month: str,
         player_count: int,
     ) -> Dict[str, Any]:
-        """Create a new treasure pod schedule for a month."""
-        estimated_total = estimate_total_tables(player_count)
+        """Create a new treasure pod schedule for a month.
+
+        Checks dashboard_treasure_pod_config for an active config first.
+        Falls back to TREASURE_POD_TYPES env var if no dashboard config exists.
+        """
+        # Check dashboard config first (dashboard_treasure_pod_config collection)
         pod_types = TREASURE_POD_TYPES
+        games_per_player = GAMES_PER_PLAYER_ESTIMATE
+        try:
+            from db import treasure_pod_config
+            dashboard_config = await treasure_pod_config.find_one(
+                {"guild_id": str(guild_id), "month": month, "status": "active"}
+            )
+            if dashboard_config and dashboard_config.get("pod_types"):
+                pod_types = dashboard_config["pod_types"]
+                games_per_player = dashboard_config.get("games_per_player", GAMES_PER_PLAYER_ESTIMATE)
+                log_ok(f"[treasure] Using dashboard config for {month} ({len(pod_types)} types)")
+        except Exception as e:
+            log_warn(f"[treasure] Failed to read dashboard config, using env vars: {e}")
+
+        estimated_total = max(int(player_count * games_per_player), 50)
 
         table_map = generate_all_treasure_tables(estimated_total, pod_types)
         encrypted = _encrypt_table_map(table_map)
