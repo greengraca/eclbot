@@ -219,11 +219,38 @@ class MonthFlipHandler:
 
     # -------------------- Top16 cut application --------------------
 
+    async def _strip_top16_role(self, guild: discord.Guild, *, cut_month: str) -> None:
+        """Remove Top16 role from every member who currently has it."""
+        cfg = self.cfg
+        if not cfg.top16_role_id:
+            return
+        role = guild.get_role(cfg.top16_role_id)
+        if not role:
+            return
+
+        holders = [m for m in role.members if not m.bot]
+        if not holders:
+            await self.log.info(f"[subs] Top16 strip ({cut_month}): no current holders")
+            return
+
+        removed = 0
+        for m in holders:
+            try:
+                await m.remove_roles(role, reason=f"Top16 reset on month flip ({cut_month})")
+                removed += 1
+            except Exception:
+                pass
+
+        await self.log.info(f"[subs] Top16 strip ({cut_month}): removed role from {removed}/{len(holders)} members")
+
     async def apply_top16_cut_for_next_month(
         self, guild: discord.Guild, *, cut_month: str, target_month: str
     ) -> None:
-        """Apply Top16 cut: grant Top16 role to qualifiers."""
+        """Apply Top16 cut: strip previous Top16 role from everyone, then grant to new qualifiers."""
         cfg = self.cfg
+
+        # ---- Strip Top16 role from ALL current holders first ----
+        await self._strip_top16_role(guild, cut_month=cut_month)
 
         top16_ids, missing = await self.cog._eligible_top16_discord_ids_for_month(guild, cut_month)
 
