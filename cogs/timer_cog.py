@@ -207,10 +207,21 @@ class ECLTimerCog(commands.Cog):
         self._rehydrated = True
 
         try:
-            # Clean up expired timers first
-            cleaned = await db_cleanup_expired_timers()
-            if cleaned:
-                log_sync(f"[timer] Cleaned up {cleaned} expired timers from DB")
+            # Clean up expired timers first, deleting their orphaned Discord messages
+            expired_docs = await db_cleanup_expired_timers()
+            if expired_docs:
+                log_sync(f"[timer] Cleaned up {len(expired_docs)} expired timers from DB")
+                for edoc in expired_docs:
+                    mid = edoc.get("message_id")
+                    cid = edoc.get("channel_id")
+                    if mid and cid:
+                        try:
+                            ch = self.bot.get_channel(int(cid))
+                            if ch:
+                                await ch.get_partial_message(int(mid)).delete()
+                                log_sync(f"[timer] Deleted orphaned message for expired timer {edoc.get('timer_id')}")
+                        except Exception:
+                            pass
 
             # Load active/paused timers
             docs = await db_get_all_active_timers()
@@ -371,6 +382,15 @@ class ECLTimerCog(commands.Cog):
 
         if total_remaining <= 0:
             log_sync(f"[timer] Rehydrate: timer {timer_id} has expired, cleaning up", level="warn")
+            # Delete the orphaned Discord message so it doesn't stay frozen
+            if message_id and channel_id:
+                try:
+                    ch = self.bot.get_channel(channel_id)
+                    if ch:
+                        await ch.get_partial_message(int(message_id)).delete()
+                        log_sync(f"[timer] Deleted orphaned message for expired timer {timer_id}")
+                except Exception:
+                    pass  # message already gone or no perms — fine
             await self._delete_timer_from_db(timer_id)
             return False
 

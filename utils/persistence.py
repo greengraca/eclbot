@@ -156,11 +156,14 @@ async def get_guild_timers(guild_id: int) -> List[Dict[str, Any]]:
     return await cursor.to_list(length=100)
 
 
-async def cleanup_expired_timers() -> int:
-    """Delete timers that have fully expired. Returns count deleted."""
+async def cleanup_expired_timers() -> List[Dict[str, Any]]:
+    """Fetch and delete timers that have fully expired. Returns the deleted docs."""
     now = _now_utc()
-    result = await persistent_timers.delete_many({"expires_at": {"$lte": now}})
-    return result.deleted_count
+    cursor = persistent_timers.find({"expires_at": {"$lte": now}})
+    expired_docs = await cursor.to_list(length=1000)
+    if expired_docs:
+        await persistent_timers.delete_many({"expires_at": {"$lte": now}})
+    return expired_docs
 
 
 # ============================================================================
