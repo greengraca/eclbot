@@ -1427,8 +1427,42 @@ class ECLTimerCog(commands.Cog):
             "extra": EXTRA_TURNS_MINUTES * 60.0,
         }
 
+        turns_audio = paused["audio"]["turns"]
+        final_audio = paused["audio"]["final"]
+        egg_audio = paused["audio"]["easter_egg"]
+
+        main = paused["remaining"]["main"]
+        egg = paused["remaining"]["easter_egg"]
+        extra = paused["remaining"]["extra"]
+        total_remaining = main + extra
+
+        MAIN_TOTAL = orig["main"]
+        EXTRA_TOTAL = orig["extra"]
+
+        phase = "running" if main > 0 else "extra"
+        start_time = now_utc()
+        end_ts_main = ts(start_time + timedelta(seconds=main))
+        end_ts_final = ts(start_time + timedelta(seconds=total_remaining))
+
+        embed = _build_timer_embed(
+            game_number=game_number,
+            phase=phase,
+            main_total=MAIN_TOTAL,
+            extra_total=EXTRA_TOTAL,
+            remaining_main=main,
+            remaining_total=total_remaining,
+            end_ts_main=end_ts_main,
+            end_ts_final=end_ts_final,
+            player_ids=player_ids,
+        )
+
+        # Send message and register it BEFORE starting tasks
+        # (otherwise the embed loop races with the stale pause message ID)
+        msg = await safe_ctx_followup(ctx, embed=embed)
+        self.timer_messages[timer_id] = (ctx.channel.id, msg.id, None)
+
         self.active_timers[timer_id] = {
-            "start_time": now_utc(),
+            "start_time": start_time,
             "durations": paused["remaining"],
             "original_durations": orig,
             "messages": paused["messages"],
@@ -1441,14 +1475,6 @@ class ECLTimerCog(commands.Cog):
             "draw_event": draw_event,
         }
         self.timer_tasks[timer_id] = []
-
-        turns_audio = paused["audio"]["turns"]
-        final_audio = paused["audio"]["final"]
-        egg_audio = paused["audio"]["easter_egg"]
-
-        main = paused["remaining"]["main"]
-        egg = paused["remaining"]["easter_egg"]
-        extra = paused["remaining"]["extra"]
 
         # 1. Embed loop
         self.timer_tasks[timer_id].append(asyncio.create_task(
@@ -1465,37 +1491,11 @@ class ECLTimerCog(commands.Cog):
                 self._audio_at(main, turns_audio, timer_id, paused.get("voice_channel_id", 0))
             ))
         # 4. Final audio (delay = main + extra = total remaining)
-        total_remaining = main + extra
         self.timer_tasks[timer_id].append(asyncio.create_task(
             self._final_audio(total_remaining, final_audio, timer_id, paused.get("voice_channel_id", 0), draw_event)
         ))
 
-        MAIN_TOTAL = orig["main"]
-        EXTRA_TOTAL = orig["extra"]
-
-        phase = "running" if main > 0 else "extra"
-        end_ts_main = ts(now_utc() + timedelta(seconds=main))
-        end_ts_final = ts(now_utc() + timedelta(seconds=total_remaining))
-
-        embed = _build_timer_embed(
-            game_number=game_number,
-            phase=phase,
-            main_total=MAIN_TOTAL,
-            extra_total=EXTRA_TOTAL,
-            remaining_main=main,
-            remaining_total=total_remaining,
-            end_ts_main=end_ts_main,
-            end_ts_final=end_ts_final,
-            player_ids=player_ids,
-        )
-
-        msg = await safe_ctx_followup(ctx, embed=embed)
-        self.timer_messages[timer_id] = (ctx.channel.id, msg.id, None)
-
         # Persist
-        main_remaining_sec = main
-        extra_only_sec = extra
-
         await self._save_timer_to_db(
             timer_id=timer_id,
             guild_id=ctx.guild.id,
@@ -1503,10 +1503,10 @@ class ECLTimerCog(commands.Cog):
             voice_channel_id=paused.get("voice_channel_id", 0),
             message_id=msg.id,
             status="active",
-            start_time_utc=self.active_timers[timer_id]["start_time"],
+            start_time_utc=start_time,
             durations={
-                "main": main_remaining_sec,
-                "extra": extra_only_sec,
+                "main": main,
+                "extra": extra,
                 "easter_egg": paused["remaining"]["easter_egg"],
             },
             remaining=None,
