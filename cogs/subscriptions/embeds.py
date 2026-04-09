@@ -107,18 +107,27 @@ def build_flip_mods_embed(
     )
 
     emb.add_field(
-        name="1) TopDeck",
+        name="1) TopDeck (manual)",
         value=(
-            "Set the **new** bracket id, restart the worker, then run:\n"
-            "`/unlink` → `/link`"
+            "Run on the **TopDeck bot**:\n"
+            "`/unlink` → `/link` with the new bracket ID below"
         ),
         inline=False,
     )
-    emb.add_field(name="Current TOPDECK_BRACKET_ID", value=f"`{current_bracket}`", inline=False)
-    emb.add_field(name="NEXT_MONTH_TOPDECK_BRACKET_ID", value=f"`{next_bracket}`", inline=False)
+    emb.add_field(name="Current bracket", value=f"`{current_bracket}`", inline=True)
+    emb.add_field(name="Next bracket", value=f"`{next_bracket}`", inline=True)
 
     emb.add_field(
-        name="2) Free-entry roles",
+        name="2) Automated",
+        value=(
+            "Bracket ID swap, channel rename, and joinpost are **automated**.\n"
+            "Verify the next month's config was set in the **dashboard Settings**."
+        ),
+        inline=False,
+    )
+
+    emb.add_field(
+        name="3) Free-entry roles",
         value="Review/update free-entry roles for this month, then restart the worker.",
         inline=False,
     )

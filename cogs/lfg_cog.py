@@ -60,13 +60,13 @@ from utils.persistence import (
 )
 from utils.logger import log_sync, log_ok, log_warn, log_error
 from utils.settings import GUILD_ID
+from utils.monthly_config import get_bracket_id
 LFG_EMBED_ICON_URL = os.getenv("LFG_EMBED_ICON_URL", "").strip()
 
 # minutes of inactivity (no button clicks) before a lobby auto-expires
 LOBBY_INACTIVITY_MINUTES = int(os.getenv("LOBBY_INACTIVITY_MINUTES", "45"))
 
 # TopDeck league config (for Elo lookup)
-TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "").strip()
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
 # /lfgelo availability & Elo window behaviour
@@ -388,9 +388,10 @@ class LFGCog(commands.Cog):
         lobby.update_task = asyncio.create_task(self._run_elo_embed_updater(lobby))
 
     async def _compute_dynamic_window(self, host_elo: float) -> Tuple[int, int]:
+        bracket_id = await get_bracket_id()
         return await compute_dynamic_window(
             host_elo,
-            bracket_id=TOPDECK_BRACKET_ID,
+            bracket_id=bracket_id,
             firebase_id_token=FIREBASE_ID_TOKEN,
             min_games=int(LFG_ELO_MIN_GAMES),
             base_range_default=int(LFG_ELO_BASE_RANGE),
@@ -409,13 +410,14 @@ class LFGCog(commands.Cog):
         player_ids: List[int],
     ) -> None:
         try:
+            bracket_id = await get_bracket_id()
             log_sync(
                 "[lfg] high-stakes check: "
-                f"bracket_set={bool(TOPDECK_BRACKET_ID)} wager_rate={WAGER_RATE} "
+                f"bracket_set={bool(bracket_id)} wager_rate={WAGER_RATE} "
                 f"threshold={HIGH_STAKES_THRESHOLD} players={player_ids}"
             )
 
-            if not TOPDECK_BRACKET_ID:
+            if not bracket_id:
                 log_sync("[lfg] high-stakes: skipped (TOPDECK_BRACKET_ID not set)")
                 return
             if WAGER_RATE <= 0 or HIGH_STAKES_THRESHOLD <= 0:
@@ -434,7 +436,7 @@ class LFGCog(commands.Cog):
                 members.append(m)
 
             handle_to_best, _ = await get_handle_to_best_cached(
-                TOPDECK_BRACKET_ID,
+                bracket_id,
                 FIREBASE_ID_TOKEN,
                 force_refresh=False,
             )
@@ -584,11 +586,12 @@ class LFGCog(commands.Cog):
         Matching is done by normalizing the member's username/global_name/display_name
         and comparing to TopDeck's stored discord handle (normalized).
         """
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             return None
         info = await get_member_points_games(
             member,
-            bracket_id=TOPDECK_BRACKET_ID,
+            bracket_id=bracket_id,
             firebase_id_token=FIREBASE_ID_TOKEN,
             force_refresh=False,
         )
@@ -649,10 +652,11 @@ class LFGCog(commands.Cog):
         pts_by_id: Dict[int, int] = {}
 
         # ✅ only fetch/show points for Elo lobbies
-        if lobby.elo_mode and TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if lobby.elo_mode and bracket_id:
             try:
                 handle_to_best, _ = await get_handle_to_best_cached(
-                    TOPDECK_BRACKET_ID,
+                    bracket_id,
                     FIREBASE_ID_TOKEN,
                     force_refresh=False,
                 )

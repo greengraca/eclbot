@@ -144,6 +144,20 @@ class JoinLeagueCog(commands.Cog):
         log_sync("[join] persistent views registered")
 
     # -------------------- helpers --------------------
+
+    async def get_target_month(self) -> str:
+        """Resolve target month from DB config, falling back to env var / current month."""
+        from utils.monthly_config import get_monthly_config
+
+        # Check ecl_monthly_config for the current month
+        current = month_key(now_lisbon())
+        config = await get_monthly_config(current)
+        if config and config.get("bracket_id"):
+            return current  # Config exists for current month, use it
+
+        # Fall back to the static config
+        return self.cfg.target_month
+
     def _has_any_role_id(self, member: discord.Member, role_ids: Set[int]) -> bool:
         if not role_ids:
             return False
@@ -235,15 +249,17 @@ class JoinLeagueCog(commands.Cog):
                 await interaction.response.send_message("Wrong server.", ephemeral=True)
             return
 
-        # Evaluate eligibility at the month flip moment (start of target_month).
-        flip_at = month_bounds(cfg.target_month)[0]
+        target_month = await self.get_target_month()
 
-        ok, why = await self._eligibility(member, cfg.target_month, at=flip_at)
+        # Evaluate eligibility at the month flip moment (start of target_month).
+        flip_at = month_bounds(target_month)[0]
+
+        ok, why = await self._eligibility(member, target_month, at=flip_at)
 
         if not ok:
             view = JoinLinksView(kofi_url=cfg.kofi_url, patreon_url=cfg.patreon_url)
             msg = (
-                f"❌ You're **not registered** for **{month_label(cfg.target_month)}**.\n\n"
+                f"❌ You're **not registered** for **{month_label(target_month)}**.\n\n"
                 f"**Why:** {why}\n\n"
                 "If you just subscribed, make sure your Discord account is linked/synced on **Ko-fi/Patreon**, "
                 "wait a moment for roles to appear, then click **Enter League** again."
@@ -252,17 +268,17 @@ class JoinLeagueCog(commands.Cog):
                 await interaction.response.send_message(msg, ephemeral=True, view=view)
             return
 
-        added = await self._grant_ecl(member, reason=f"Join button — eligible for {cfg.target_month}")
+        added = await self._grant_ecl(member, reason=f"Join button — eligible for {target_month}")
 
         # Welcome DM (once per month per user)
-        job_id = f"join-welcome-dm:{guild.id}:{int(member.id)}:{cfg.target_month}"
+        job_id = f"join-welcome-dm:{guild.id}:{int(member.id)}:{target_month}"
         sent_dm = False
         try:
             if await job_once(job_id):
                 rules = self._rules_mention(guild)
                 get_started = self._get_started_mention(guild)
                 await member.send(
-                    f"✅ You're in for **{month_label(cfg.target_month)}**!\n\n"
+                    f"✅ You're in for **{month_label(target_month)}**!\n\n"
                     f"Please read {rules} and {get_started} before playing. 🐸"
                 )
                 sent_dm = True
@@ -278,23 +294,15 @@ class JoinLeagueCog(commands.Cog):
         with contextlib.suppress(Exception):
             await interaction.response.send_message(text, ephemeral=True)
 
-    # -------------------- admin command --------------------
+    # -------------------- embed posting --------------------
 
-    @commands.slash_command(
-        name="joinpost",
-        description="Post the #join-... embeds (links + Enter button) in this channel.",
-        guild_ids=[_env_int("GUILD_ID", 0)] if _env_int("GUILD_ID", 0) else None,
-    )
-    async def joinpost(self, ctx: discord.ApplicationContext):
-        if not ctx.user.guild_permissions.manage_roles:
-            await ctx.respond("You need **Manage Roles**.", ephemeral=True)
-            return
-        if ctx.guild is None:
-            await ctx.respond("This command can only be used in a server.", ephemeral=True)
-            return
+    async def post_join_embed(self, channel: discord.TextChannel, target_month: str) -> Tuple[discord.Message, discord.Message]:
+        """Post the join embeds to a channel. Called by /joinpost and by month-flip automation.
 
+        Returns the two sent messages (links, enter).
+        """
         cfg = self.cfg
-        nice_month = month_label(cfg.target_month)
+        nice_month = month_label(target_month)
 
         YELLOW = 0xF1C40F  # gold/yellow
 
@@ -318,8 +326,6 @@ class JoinLeagueCog(commands.Cog):
             value="If something looks wrong, open a ticket and an admin will help you.",
             inline=False,
         )
-        # if ctx.guild and ctx.guild.icon:
-        #     emb1.set_thumbnail(url=ctx.guild.icon.url)
         emb1.set_footer(text="DragonShield ECL — Join the League")
 
         view_links = JoinLinksView(kofi_url=cfg.kofi_url, patreon_url=cfg.patreon_url)
@@ -338,13 +344,31 @@ class JoinLeagueCog(commands.Cog):
             inline=False,
         )
 
-
         view_enter = EnterLeagueView(self)
 
+        m1 = await channel.send(embed=emb1, view=view_links)
+        m2 = await channel.send(embed=emb2, view=view_enter)
+        return m1, m2
+
+    # -------------------- admin command --------------------
+
+    @commands.slash_command(
+        name="joinpost",
+        description="Post the #join-... embeds (links + Enter button) in this channel.",
+        guild_ids=[_env_int("GUILD_ID", 0)] if _env_int("GUILD_ID", 0) else None,
+    )
+    async def joinpost(self, ctx: discord.ApplicationContext):
+        if not ctx.user.guild_permissions.manage_roles:
+            await ctx.respond("You need **Manage Roles**.", ephemeral=True)
+            return
+        if ctx.guild is None:
+            await ctx.respond("This command can only be used in a server.", ephemeral=True)
+            return
+
+        target_month = await self.get_target_month()
 
         try:
-            m1 = await ctx.channel.send(embed=emb1, view=view_links)
-            m2 = await ctx.channel.send(embed=emb2, view=view_enter)
+            m1, m2 = await self.post_join_embed(ctx.channel, target_month)
         except Exception as e:
             await ctx.respond(f"❌ Failed to post embeds: {type(e).__name__}: {e}", ephemeral=True)
             return

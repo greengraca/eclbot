@@ -76,6 +76,9 @@ spellbot_scan_cache = db["spellbot_scan_cache"]
 # User preferences (timezone, etc.)
 user_preferences = db["user_preferences"]
 
+# League monthly config (shared with dashboard)
+ecl_monthly_config = db["ecl_monthly_config"]
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
@@ -310,6 +313,17 @@ async def ensure_indexes() -> None:
                 [("user_id", ASCENDING)],
                 unique=True,
                 name="uniq_user_id",
+            ),
+        ]
+    )
+
+    # ---- League monthly config (shared with dashboard) ----
+    await ecl_monthly_config.create_indexes(
+        [
+            IndexModel(
+                [("guild_id", ASCENDING), ("month", ASCENDING)],
+                unique=True,
+                name="uniq_guild_month",
             ),
         ]
     )

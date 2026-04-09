@@ -20,6 +20,7 @@ from utils.dates import now_lisbon
 from utils.logger import log_sync, log_warn
 from utils.month_dump_reader import normalize_ts as _normalize_ts
 from utils.mod_check import is_mod
+from utils.monthly_config import get_bracket_id
 
 from topdeck_fetch import (
     Match,
@@ -34,7 +35,6 @@ from topdeck_fetch import (
 
 # ---------- ENV / CONFIG ----------
 
-TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "").strip()
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
 # Keep chunks safely under Mongo's 16MB document limit (1MB-ish is comfy)
@@ -354,7 +354,8 @@ class TopdeckMonthDumpCog(commands.Cog):
             await ctx.respond('Month must be in "YYYY-MM" format.', ephemeral=True)
             return
 
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id(month_str)
+        if not bracket_id:
             await ctx.respond("TOPDECK_BRACKET_ID is not configured.", ephemeral=True)
             return
 
@@ -362,12 +363,12 @@ class TopdeckMonthDumpCog(commands.Cog):
 
         async with self._lock:
             try:
-                log_sync(f"[topdeck-dump] {_now_iso()} Starting dump for {month_str} (bracket={TOPDECK_BRACKET_ID}).")
+                log_sync(f"[topdeck-dump] {_now_iso()} Starting dump for {month_str} (bracket={bracket_id}).")
 
                 mongo_meta = await dump_topdeck_month_to_mongo(
                     guild_id=ctx.guild.id,
                     month_str=month_str,
-                    bracket_id=TOPDECK_BRACKET_ID,
+                    bracket_id=bracket_id,
                     firebase_id_token=FIREBASE_ID_TOKEN,
                 )
 

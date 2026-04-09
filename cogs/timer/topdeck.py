@@ -19,6 +19,7 @@ from db import treasure_pod_schedule, treasure_pods as treasure_pods_col
 from utils.logger import log_sync, log_ok, log_warn, log_debug
 from utils.treasure_pods import TreasurePodManager
 from utils.dates import month_key
+from utils.monthly_config import get_bracket_id
 
 from .helpers import norm_member_handles, month_start_utc, game_color
 
@@ -32,11 +33,9 @@ class TopDeckTagger:
     def __init__(
         self,
         cog: "ECLTimerCog",
-        bracket_id: str,
         firebase_token: Optional[str] = None,
     ):
         self.cog = cog
-        self.bracket_id = bracket_id
         self.firebase_token = firebase_token
         self._lock = asyncio.Lock()
         self._treasure_manager = TreasurePodManager(treasure_pod_schedule, treasure_pods_col)
@@ -72,14 +71,15 @@ class TopDeckTagger:
             )
             return None
 
-        if not self.bracket_id:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             log_sync("[timer/topdeck] TOPDECK_BRACKET_ID not set; skipping lookup.")
             return None
 
-        pods = await get_in_progress_pods(self.bracket_id, self.firebase_token)
+        pods = await get_in_progress_pods(bracket_id, self.firebase_token)
         log_sync(
             f"[timer/topdeck] get_in_progress_pods returned {len(pods)} pods "
-            f"for bracket={self.bracket_id!r}."
+            f"for bracket={bracket_id!r}."
         )
 
         if not pods:
@@ -164,7 +164,8 @@ class TopDeckTagger:
         match: InProgressPod,
     ) -> None:
         """Persist a TopDeck match as online (Mongo)."""
-        if not self.bracket_id:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             return
 
         ms = month_start_utc()
@@ -196,7 +197,7 @@ class TopDeckTagger:
 
         async with self._lock:
             existing = await get_record(
-                self.bracket_id, year, month, season=season, tid=tid
+                bracket_id, year, month, season=season, tid=tid
             )
             already_online = bool(existing and existing.online)
 
@@ -208,7 +209,7 @@ class TopDeckTagger:
                 topdeck_uids=topdeck_uids,
                 online=True,
             )
-            await upsert_record(self.bracket_id, year, month, rec)
+            await upsert_record(bracket_id, year, month, rec)
 
         log_ok(
             f"[timer/topdeck] Marked TopDeck match S{season}:T{tid} as online "
@@ -317,7 +318,8 @@ class TopDeckTagger:
         guild = ctx.guild
         if guild is None:
             return []
-        if not self.bracket_id:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             return []
 
         try:

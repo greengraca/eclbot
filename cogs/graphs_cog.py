@@ -23,7 +23,8 @@ from discord import Option
 from topdeck_fetch import Match, PlayerRow, get_league_rows_cached
 from utils.topdeck_identity import find_row_for_member
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
-from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
+from utils.monthly_config import get_bracket_id
 from utils.dates import current_month_key, month_label as fmt_month_label
 from utils.logger import log_sync, log_warn
 from utils.month_dump_reader import (
@@ -103,13 +104,14 @@ class GraphsCog(commands.Cog):
         target: discord.Member = player or ctx.author  # type: ignore
         await safe_ctx_defer(ctx, ephemeral=False, label="graphs")
 
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             await safe_ctx_followup(ctx, "TOPDECK_BRACKET_ID is not configured.", ephemeral=True)
             return
 
         # Fetch live rows
         try:
-            rows, _ = await get_league_rows_cached(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+            rows, _ = await get_league_rows_cached(bracket_id, FIREBASE_ID_TOKEN)
         except Exception as e:
             log_warn(f"[graphs] Failed to fetch league rows: {type(e).__name__}: {e}")
             await safe_ctx_followup(ctx, f"Couldn't fetch TopDeck data ({type(e).__name__}).", ephemeral=True)
@@ -151,13 +153,13 @@ class GraphsCog(commands.Cog):
                 buf, filename, emb = await self._chart_record(row, target.display_name, ml)
             elif chart == "activity":
                 buf, filename, emb = await self._chart_activity(
-                    entrant_id, target.display_name, mk, ml)
+                    entrant_id, target.display_name, mk, ml, bracket_id)
             elif chart == "points_rank":
                 buf, filename, emb = await self._chart_points_rank_daily(
-                    rows, row, entrant_id, target.display_name, mk, ml)
+                    rows, row, entrant_id, target.display_name, mk, ml, bracket_id)
             elif chart == "winrate":
                 buf, filename, emb = await self._chart_winrate_daily(
-                    entrant_id, target.display_name, mk, ml)
+                    entrant_id, target.display_name, mk, ml, bracket_id)
             elif chart == "points_rank_alltime":
                 buf, filename, emb = await self._chart_points_rank_alltime(
                     rows, row, uid, target.display_name, mk, ml)
@@ -192,9 +194,9 @@ class GraphsCog(commands.Cog):
     # Helpers: fetch live matches for current month
     # ------------------------------------------------------------------
 
-    async def _get_month_matches(self, entrant_id: int) -> Tuple[List[Match], set]:
+    async def _get_month_matches(self, entrant_id: int, bracket_id: str) -> Tuple[List[Match], set]:
         """Fetch live matches, filter to current month, return (matches, all_entrant_ids)."""
-        matches, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+        matches, entrant_to_uid = await get_live_matches(bracket_id, FIREBASE_ID_TOKEN)
         month_matches, _, _ = _get_current_month_matches(matches, entrant_to_uid)
 
         all_entrant_ids = set(entrant_to_uid.keys())
@@ -225,8 +227,8 @@ class GraphsCog(commands.Cog):
     # Chart: Monthly Activity (stacked bar by day)
     # ------------------------------------------------------------------
 
-    async def _chart_activity(self, entrant_id, name, mk, ml):
-        month_matches, _ = await self._get_month_matches(entrant_id)
+    async def _chart_activity(self, entrant_id, name, mk, ml, bracket_id):
+        month_matches, _ = await self._get_month_matches(entrant_id, bracket_id)
         daily = get_daily_activity_from_matches(month_matches, entrant_id)
 
         if not daily:
@@ -256,8 +258,8 @@ class GraphsCog(commands.Cog):
     # Chart: Points & Rank (day-by-day, current month)
     # ------------------------------------------------------------------
 
-    async def _chart_points_rank_daily(self, rows, row, entrant_id, name, mk, ml):
-        month_matches, all_entrant_ids = await self._get_month_matches(entrant_id)
+    async def _chart_points_rank_daily(self, rows, row, entrant_id, name, mk, ml, bracket_id):
+        month_matches, all_entrant_ids = await self._get_month_matches(entrant_id, bracket_id)
 
         progression = await asyncio.to_thread(
             compute_daily_progression, month_matches, all_entrant_ids, entrant_id
@@ -289,8 +291,8 @@ class GraphsCog(commands.Cog):
     # Chart: Win Rate (day-by-day, current month)
     # ------------------------------------------------------------------
 
-    async def _chart_winrate_daily(self, entrant_id, name, mk, ml):
-        month_matches, all_entrant_ids = await self._get_month_matches(entrant_id)
+    async def _chart_winrate_daily(self, entrant_id, name, mk, ml, bracket_id):
+        month_matches, all_entrant_ids = await self._get_month_matches(entrant_id, bracket_id)
 
         progression = await asyncio.to_thread(
             compute_daily_progression, month_matches, all_entrant_ids, entrant_id

@@ -27,11 +27,10 @@ from topdeck_fetch import (
     extract_discord_from_name,
 )
 
+from utils.monthly_config import get_bracket_id
 from utils.settings import GUILD_ID
 
 # ---------- ENV / CONFIG ----------
-
-TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
 FIRESTORE_TOURNAMENT_URL_TEMPLATE = (
@@ -98,14 +97,14 @@ class TopdeckMatchInfo:
 # ---------- TopDeck helpers ----------
 
 
-async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
+async def _fetch_topdeck_matches_for_month(bracket_id: str) -> List[TopdeckMatchInfo]:
     """
-    Fetch TopDeck matches for the configured bracket and return
+    Fetch TopDeck matches for the given bracket and return
     only matches that started on/after the first day of this month.
     We keep ALL such matches; some may later be marked online.
     """
-    if not TOPDECK_BRACKET_ID:
-        raise RuntimeError("TOPDECK_BRACKET_ID is not configured.")
+    if not bracket_id:
+        raise RuntimeError("Bracket ID from monthly config is not configured.")
 
     if not FIRESTORE_TOURNAMENT_URL_TEMPLATE:
         raise RuntimeError(
@@ -115,13 +114,13 @@ async def _fetch_topdeck_matches_for_month() -> List[TopdeckMatchInfo]:
     month_start = _month_start_utc()
     _log(
         f"[online-sync] {_now_iso()} Starting TopDeck fetch for bracket "
-        f"{TOPDECK_BRACKET_ID!r} from {month_start.isoformat()}."
+        f"{bracket_id!r} from {month_start.isoformat()}."
     )
 
-    players_url = f"https://topdeck.gg/PublicPData/{TOPDECK_BRACKET_ID}"
+    players_url = f"https://topdeck.gg/PublicPData/{bracket_id}"
 
     raw_doc_url = FIRESTORE_TOURNAMENT_URL_TEMPLATE.format(
-        bracket_id=TOPDECK_BRACKET_ID
+        bracket_id=bracket_id
     )
     doc_url = raw_doc_url.strip().strip('"').strip("'")
     if raw_doc_url != doc_url:
@@ -677,7 +676,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
     Mod-only command to rebuild 'online game' stats for the current month.
 
     - Scans SpellBot 'Your game is ready!' embeds in SPELLBOT_LFG_CHANNEL_ID
-    - Fetches all TopDeck matches for TOPDECK_BRACKET_ID this month
+    - Fetches all TopDeck matches for bracket ID from monthly config this month
     - Marks each TopDeck match as online/offline using handles + timestamps
     - Writes results to MongoDB (collection: online_games).
 
@@ -754,9 +753,12 @@ class TopdeckOnlineSyncCog(commands.Cog):
         
         async with self._lock:
             try:
+                # Resolve bracket ID from DB-backed monthly config
+                bracket_id = await get_bracket_id(month_str)
+
                 # 0) Load SpellBot scan cache for incremental scanning
                 cached_games, last_message_id = await _load_scan_cache(
-                    TOPDECK_BRACKET_ID, month_str
+                    bracket_id, month_str
                 )
 
                 # 1) Scan SpellBot ready games (incremental if cache exists)
@@ -785,7 +787,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
                 )
 
                 # 2) Fetch TopDeck matches for this month
-                topdeck_matches = await _fetch_topdeck_matches_for_month()
+                topdeck_matches = await _fetch_topdeck_matches_for_month(bracket_id)
 
                 # 3) Mark which TopDeck matches are online (handles + time)
                 match_online, per_player_online = _match_spellbot_to_topdeck(
@@ -816,7 +818,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
 
                 # 5) Save JSON (merged with existing/timer-written data)
                 payload = {
-                    "bracket_id": TOPDECK_BRACKET_ID,
+                    "bracket_id": bracket_id,
                     "guild_id": guild.id,
                     "month": month_str,
                     "built_at": int(datetime.now(timezone.utc).timestamp()),
@@ -828,7 +830,7 @@ class TopdeckOnlineSyncCog(commands.Cog):
 
                 # 6) Save SpellBot scan cache for next incremental run
                 await _save_scan_cache(
-                    TOPDECK_BRACKET_ID, month_str, spellbot_games, checkpoint_id
+                    bracket_id, month_str, spellbot_games, checkpoint_id
                 )
 
                 _log(

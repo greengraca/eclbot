@@ -15,12 +15,11 @@ from utils.mod_check import is_mod
 from utils.settings import GUILD_ID, load_subs_config
 
 
-TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
+from utils.monthly_config import get_bracket_id, get_mostgames_image
+
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
 
-
-MOSTGAMES_PRIZE_IMAGE_URL = (os.getenv("MOSTGAMES_PRIZE_IMAGE_URL", "") or "").strip()
 def _ts(dt: datetime) -> int:
     return int(dt.timestamp())
 
@@ -32,13 +31,14 @@ def _month_start_utc() -> datetime:
 
 async def _load_online_counts() -> Dict[str, int]:
     """Load per-player online game counts from Mongo (built by /synconline and timer marks)."""
-    if not TOPDECK_BRACKET_ID:
+    bracket_id = await get_bracket_id()
+    if not bracket_id:
         return {}
 
     ms = _month_start_utc()
     try:
         counts = await count_online_games_by_topdeck_uid(
-            TOPDECK_BRACKET_ID, ms.year, ms.month, online_only=True
+            bracket_id, ms.year, ms.month, online_only=True
         )
     except Exception as e:
         log_warn(f"[topdeck] Error reading online games from Mongo: {type(e).__name__}: {e}")
@@ -47,7 +47,7 @@ async def _load_online_counts() -> Dict[str, int]:
     month = f"{ms.year:04d}-{ms.month:02d}"
     log_sync(
         f"[topdeck] Loaded online-games from Mongo: "
-        f"month={month!r}, bracket={TOPDECK_BRACKET_ID!r}, "
+        f"month={month!r}, bracket={bracket_id!r}, "
         f"players_with_online_games={len(counts)}."
     )
     return counts
@@ -81,13 +81,14 @@ class TopdeckLeagueCog(commands.Cog):
         """
         Returns (rows, fetched_at), using the shared cache in topdeck_fetch.
         """
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             raise RuntimeError(
-                "TOPDECK_BRACKET_ID is not configured in environment variables."
+                "TOPDECK_BRACKET_ID is not configured (no DB config or environment variable)."
             )
 
         rows, fetched_at = await get_league_rows_cached(
-            TOPDECK_BRACKET_ID,
+            bracket_id,
             FIREBASE_ID_TOKEN,
             force_refresh=force_refresh,
         )
@@ -169,8 +170,9 @@ class TopdeckLeagueCog(commands.Cog):
             ),
         )
 
-        if MOSTGAMES_PRIZE_IMAGE_URL:
-            embed.set_thumbnail(url=MOSTGAMES_PRIZE_IMAGE_URL)
+        mostgames_img = await get_mostgames_image()
+        if mostgames_img:
+            embed.set_thumbnail(url=mostgames_img)
 
         if not top5:
             embed.add_field(
@@ -321,10 +323,11 @@ class TopdeckLeagueCog(commands.Cog):
                 uids_need_recency.append(uid)
 
         recency_check: Dict[str, bool] = {}
+        bracket_id = await get_bracket_id()
         if uids_need_recency:
             try:
                 recency_check = await has_recent_game_by_topdeck_uid(
-                    TOPDECK_BRACKET_ID, ms.year, ms.month, uids_need_recency,
+                    bracket_id, ms.year, ms.month, uids_need_recency,
                     after_day=recency_after_day, online_only=True,
                 )
             except Exception as e:

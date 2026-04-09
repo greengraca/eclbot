@@ -19,9 +19,10 @@ from typing import TYPE_CHECKING, Optional
 import discord
 
 from topdeck_fetch import get_in_progress_pods, get_league_rows_cached
-from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
+from db import subs_jobs, subs_free_entries, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once, ecl_monthly_config
 
-from utils.settings import LISBON_TZ, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.settings import LISBON_TZ, FIREBASE_ID_TOKEN, GUILD_ID
+from utils.monthly_config import get_bracket_id, get_monthly_config, get_join_channel_id
 from utils.dates import add_months, month_bounds, month_label, now_lisbon
 from utils.interactions import resolve_member
 from utils.treasure_pods import TreasurePodManager
@@ -65,13 +66,14 @@ class MonthFlipHandler:
         - int >= 0 when we can determine the in-progress count
         - None when unknown (fail-safe => do NOT run 7pm close logic)
         """
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             await self.log.warn("[subs] TOPDECK_BRACKET_ID not set; month-close will NOT run (fail-safe).")
             return None
 
         try:
             pods = await get_in_progress_pods(
-                TOPDECK_BRACKET_ID,
+                bracket_id,
                 firebase_id_token=FIREBASE_ID_TOKEN,
             )
             return len(pods)
@@ -117,6 +119,18 @@ class MonthFlipHandler:
 
         # 5) Generate Bring a Friend Treasure Pod schedule for NEXT month
         await self.generate_treasure_pod_schedule(guild, target_month=target_month)
+
+        # 6) Verify next month config is set in dashboard
+        await self._verify_next_month_config(guild, target_month=target_month)
+
+        # 7) Rename join channel for the new month
+        await self._rename_join_channel(guild, target_month=target_month)
+
+        # 8) Auto-post /joinpost in the renamed channel
+        await self._auto_post_join(guild, target_month=target_month)
+
+        # 9) Mark flip completed in ecl_monthly_config
+        await self._mark_flip_completed(guild, target_month=target_month)
 
     async def maybe_run_month_close_job(self, guild: discord.Guild, *, cut_month: str) -> None:
         """
@@ -431,10 +445,11 @@ class MonthFlipHandler:
         
         # Get current player count from TopDeck
         player_count = 100  # default fallback
-        if TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id(target_month)
+        if bracket_id:
             try:
                 rows, _ = await get_league_rows_cached(
-                    TOPDECK_BRACKET_ID,
+                    bracket_id,
                     FIREBASE_ID_TOKEN,
                     force_refresh=True,
                 )
@@ -457,3 +472,113 @@ class MonthFlipHandler:
             await self.log.ok(f"[treasure] Created treasure pod schedule for {target_month} (players={player_count})")
         except Exception as e:
             await self.log.error(f"[treasure] Failed to create schedule for {target_month}: {type(e).__name__}: {e}")
+
+    # -------------------- Flip step tracking --------------------
+
+    async def _update_flip_step(self, guild: discord.Guild, *, month: str, step: str) -> None:
+        """Add a step string to flip_steps_completed array in ecl_monthly_config."""
+        try:
+            await ecl_monthly_config.update_one(
+                {"guild_id": str(guild.id), "month": month},
+                {"$addToSet": {"flip_steps_completed": step}},
+            )
+        except Exception as e:
+            await self.log.warn(f"[subs] Failed to record flip step '{step}' for {month}: {type(e).__name__}: {e}")
+
+    # -------------------- Step 6: Verify next month config --------------------
+
+    async def _verify_next_month_config(self, guild: discord.Guild, *, target_month: str) -> None:
+        """Check that ecl_monthly_config has a bracket_id for the target month."""
+        try:
+            config = await get_monthly_config(target_month)
+            if not config or not config.get("bracket_id"):
+                await self.log.warn(f"[subs] No bracket ID set for {target_month} — set it in the dashboard!")
+            else:
+                bracket_id = config["bracket_id"]
+                await self.log.ok(f"[subs] Next month config verified for {target_month}: bracket={bracket_id}")
+            await self._update_flip_step(guild, month=target_month, step="verify_next_month_config")
+        except Exception as e:
+            await self.log.error(f"[subs] Failed to verify next month config for {target_month}: {type(e).__name__}: {e}")
+
+    # -------------------- Step 7: Rename join channel --------------------
+
+    async def _rename_join_channel(self, guild: discord.Guild, *, target_month: str) -> None:
+        """Rename the join channel to match the new month (e.g. join-april-league)."""
+        try:
+            join_channel_id = await get_join_channel_id(target_month)
+            if not join_channel_id:
+                # Fall back to current month's config (channel ID stays the same)
+                prev_month = add_months(target_month, -1)
+                join_channel_id = await get_join_channel_id(prev_month)
+            if not join_channel_id:
+                await self.log.info("[subs] No join channel ID configured, skipping rename")
+                return
+
+            channel = guild.get_channel(int(join_channel_id))
+            if not channel:
+                await self.log.warn(f"[subs] Join channel {join_channel_id} not found in guild")
+                return
+
+            # Parse month name from target_month (e.g. "2026-04" -> "april")
+            year, month_num = target_month.split("-")
+            month_name = datetime(int(year), int(month_num), 1).strftime("%B").lower()
+            new_name = f"join-{month_name}-league"
+
+            await channel.edit(name=new_name)
+            await self.log.ok(f"[subs] Renamed channel to {new_name}")
+            await self._update_flip_step(guild, month=target_month, step="rename_join_channel")
+        except discord.HTTPException as e:
+            await self.log.warn(f"[subs] Discord error renaming join channel: {e}")
+        except Exception as e:
+            await self.log.error(f"[subs] Failed to rename join channel for {target_month}: {type(e).__name__}: {e}")
+
+    # -------------------- Step 8: Auto-post join embed --------------------
+
+    async def _auto_post_join(self, guild: discord.Guild, *, target_month: str) -> None:
+        """Auto-post the /joinpost embed in the join channel."""
+        try:
+            join_cog = self.cog.bot.get_cog("JoinLeagueCog")
+            if not join_cog:
+                await self.log.warn("[subs] JoinLeagueCog not found, skipping auto joinpost")
+                return
+
+            # Resolve join channel (same logic as _rename_join_channel)
+            join_channel_id = await get_join_channel_id(target_month)
+            if not join_channel_id:
+                prev_month = add_months(target_month, -1)
+                join_channel_id = await get_join_channel_id(prev_month)
+            if not join_channel_id:
+                await self.log.info("[subs] No join channel ID configured, skipping auto joinpost")
+                return
+
+            channel = guild.get_channel(int(join_channel_id))
+            if not channel:
+                await self.log.warn(f"[subs] Join channel {join_channel_id} not found for auto joinpost")
+                return
+
+            if hasattr(join_cog, "post_join_embed"):
+                await join_cog.post_join_embed(channel, target_month)
+                await self.log.ok(f"[subs] Auto-posted joinpost in #{channel.name}")
+                await self._update_flip_step(guild, month=target_month, step="auto_post_join")
+            else:
+                await self.log.warn("[subs] JoinLeagueCog.post_join_embed not available yet, skipping auto joinpost")
+        except Exception as e:
+            await self.log.error(f"[subs] Failed to auto-post joinpost for {target_month}: {type(e).__name__}: {e}")
+
+    # -------------------- Step 9: Mark flip completed --------------------
+
+    async def _mark_flip_completed(self, guild: discord.Guild, *, target_month: str) -> None:
+        """Mark the month flip as completed in ecl_monthly_config."""
+        try:
+            await ecl_monthly_config.find_one_and_update(
+                {"guild_id": str(guild.id), "month": target_month},
+                {
+                    "$set": {
+                        "flip_status": "completed",
+                        "flip_completed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            )
+            await self.log.ok(f"[subs] Month flip completed for {target_month}")
+        except Exception as e:
+            await self.log.error(f"[subs] Failed to mark flip completed for {target_month}: {type(e).__name__}: {e}")

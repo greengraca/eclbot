@@ -25,7 +25,8 @@ from utils.topdeck_identity import find_row_for_member
 from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
 
 from utils.dates import current_month_key, add_months
-from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
+from utils.monthly_config import get_bracket_id
 from utils.month_dump_reader import get_live_matches, compute_player_seat_stats, _get_current_month_matches
 from utils.graph_renderer import render_player_stats_card
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
@@ -195,7 +196,8 @@ class StatsCog(commands.Cog):
         # Keep it private by default; it includes entitlement info.
         await safe_ctx_defer(ctx, ephemeral=True, label="stats")
 
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             await safe_ctx_followup(
                 ctx,
                 "TOPDECK_BRACKET_ID is not configured.",
@@ -205,7 +207,7 @@ class StatsCog(commands.Cog):
 
         try:
             rows, fetched_at = await get_league_rows_cached(
-                TOPDECK_BRACKET_ID,
+                bracket_id,
                 FIREBASE_ID_TOKEN,
                 force_refresh=False,
             )
@@ -234,7 +236,7 @@ class StatsCog(commands.Cog):
         if thumb_url.startswith(("http://", "https://")):
             emb.set_thumbnail(url=thumb_url)
 
-        emb.set_footer(text=f"ECL \u2022 {mk} \u2022 Bracket {TOPDECK_BRACKET_ID}")
+        emb.set_footer(text=f"ECL \u2022 {mk} \u2022 Bracket {bracket_id}")
 
         # ---- Access snapshot (current + next month) ----
         cfg = SUBS
@@ -314,7 +316,7 @@ class StatsCog(commands.Cog):
             try:
                 y, m = mk.split("-")
                 online_counts = await count_online_games_by_topdeck_uid(
-                    TOPDECK_BRACKET_ID,
+                    bracket_id,
                     int(y),
                     int(m),
                     online_only=True,
@@ -341,7 +343,7 @@ class StatsCog(commands.Cog):
             try:
                 y, m = mk.split("-")
                 recency_map = await has_recent_game_by_topdeck_uid(
-                    TOPDECK_BRACKET_ID, int(y), int(m), [uid],
+                    bracket_id, int(y), int(m), [uid],
                     after_day=recency_after_day, online_only=True,
                 )
                 has_recent = recency_map.get(uid, False)
@@ -424,7 +426,7 @@ class StatsCog(commands.Cog):
         try:
             import asyncio
 
-            matches_data, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+            matches_data, entrant_to_uid = await get_live_matches(bracket_id, FIREBASE_ID_TOKEN)
             month_matches, _, _ = _get_current_month_matches(matches_data, entrant_to_uid)
 
             # Gather all entrant IDs for this player's UID

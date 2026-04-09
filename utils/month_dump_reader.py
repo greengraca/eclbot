@@ -816,7 +816,7 @@ async def get_league_monthly_aggregates(
          total_wins, total_losses, total_draws}
     """
     from topdeck_fetch import get_league_rows_cached
-    from utils.settings import TOPDECK_BRACKET_ID
+    from utils.monthly_config import get_bracket_id
 
     months_info = await get_historical_months(bracket_id)
     months_info = months_info[-max_months:]
@@ -891,7 +891,7 @@ async def get_league_monthly_aggregates(
     aggregates = [r for r in results if r is not None]
 
     # Append current month from live data
-    live_bracket = TOPDECK_BRACKET_ID
+    live_bracket = await get_bracket_id()
     if live_bracket:
         try:
             matches, e2u = await get_live_matches(live_bracket, firebase_id_token)
@@ -987,7 +987,7 @@ async def get_league_avg_daily_activity(
     Returns {day: avg_games}.
     """
     import calendar
-    from utils.settings import TOPDECK_BRACKET_ID
+    from utils.monthly_config import get_bracket_id as _get_bracket_id
 
     months_info = await get_historical_months(bracket_id)
     months_info = months_info[-max_months:]
@@ -1041,7 +1041,7 @@ async def get_league_avg_daily_activity(
             month_dailies.append(r)
 
     # Current month from live data
-    live_bracket = TOPDECK_BRACKET_ID
+    live_bracket = await _get_bracket_id()
     if live_bracket:
         try:
             matches, e2u = await get_live_matches(live_bracket, firebase_id_token)

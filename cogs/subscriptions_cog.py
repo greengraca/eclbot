@@ -37,10 +37,9 @@ from utils.settings import (
     GUILD_ID,
     SUBS,
     LISBON_TZ,
-    TOPDECK_BRACKET_ID,
-    NEXT_MONTH_TOPDECK_BRACKET_ID,
     FIREBASE_ID_TOKEN,
 )
+from utils.monthly_config import get_bracket_id, get_next_month_bracket_id
 
 # Import consolidated date utilities
 from utils.dates import (
@@ -322,14 +321,16 @@ class SubscriptionsCog(commands.Cog):
 
     # -------------------- MOD reminder helpers --------------------
     
-    def _build_flip_mods_embed(self, guild: discord.Guild, mk: str) -> discord.Embed:
+    async def _build_flip_mods_embed(self, guild: discord.Guild, mk: str) -> discord.Embed:
         """Build month-flip checklist embed for mods."""
         cfg = self.cfg
+        current_bracket = await get_bracket_id() or ""
+        next_bracket = await get_next_month_bracket_id() or ""
         return build_flip_mods_embed(
             guild=guild,
             mk=mk,
-            current_bracket=TOPDECK_BRACKET_ID or "",
-            next_bracket=NEXT_MONTH_TOPDECK_BRACKET_ID or "",
+            current_bracket=current_bracket,
+            next_bracket=next_bracket,
             free_entry_role_ids=cfg.free_entry_role_ids,
             embed_color=cfg.embed_color,
             embed_thumbnail_url=cfg.embed_thumbnail_url,
@@ -407,7 +408,7 @@ class SubscriptionsCog(commands.Cog):
         """
         cfg = self.cfg
 
-        bracket_id = TOPDECK_BRACKET_ID
+        bracket_id = await get_bracket_id()
         firebase_token = FIREBASE_ID_TOKEN
 
         if not bracket_id:
@@ -520,10 +521,11 @@ class SubscriptionsCog(commands.Cog):
 
         async with self._topdeck_dump_lock:
             try:
+                bracket_id = await get_bracket_id()
                 meta = await dump_topdeck_month_to_mongo(
                     guild_id=guild.id,
                     month_str=month_str,
-                    bracket_id=TOPDECK_BRACKET_ID,
+                    bracket_id=bracket_id,
                     firebase_id_token=FIREBASE_ID_TOKEN,
                 )
                 await self._log(
@@ -1062,7 +1064,7 @@ class SubscriptionsCog(commands.Cog):
         _apply_thumbnail(emb_free, cfg.embed_thumbnail_url)
         embeds_to_send.append(("5/5 • Free-entry role notice", emb_free, None))
         
-        emb_flip = self._build_flip_mods_embed(ctx.guild, current_mk)
+        emb_flip = await self._build_flip_mods_embed(ctx.guild, current_mk)
         embeds_to_send.append(("6/6 • Month flip mods summary", emb_flip, None))
 
         # Send 1 DM per embed
@@ -1176,13 +1178,14 @@ class SubscriptionsCog(commands.Cog):
                     await subs_jobs.insert_one({"_id": elo_job_id, "ran_at": datetime.now(timezone.utc)})
 
             # --- Treasure pod checks (using cached TopDeck data) ---
-            if TOPDECK_BRACKET_ID:
+            _tick_bracket_id = await get_bracket_id()
+            if _tick_bracket_id:
                 try:
                     # Ensure cache is populated (triggers API fetch on cold start)
                     player_count = None
                     try:
                         rows, _ = await get_league_rows_cached(
-                            TOPDECK_BRACKET_ID,
+                            _tick_bracket_id,
                             FIREBASE_ID_TOKEN,
                             force_refresh=False,
                         )
@@ -1191,7 +1194,7 @@ class SubscriptionsCog(commands.Cog):
                     except Exception:
                         pass
 
-                    cached = get_cached_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+                    cached = get_cached_matches(_tick_bracket_id, FIREBASE_ID_TOKEN)
                     if cached:
                         matches, entrant_to_uid, player_map = cached
 
@@ -1401,7 +1404,7 @@ class SubscriptionsCog(commands.Cog):
         """
         cfg = self.cfg
 
-        bracket_id = TOPDECK_BRACKET_ID
+        bracket_id = await get_bracket_id()
         firebase_token = FIREBASE_ID_TOKEN
         if not bracket_id:
             return ([], ["TOPDECK_BRACKET_ID not set"])
@@ -1558,7 +1561,7 @@ class SubscriptionsCog(commands.Cog):
         """Targets for 'prize eligibility' reminder."""
         cfg = self.cfg
 
-        bracket_id = TOPDECK_BRACKET_ID
+        bracket_id = await get_bracket_id()
         firebase_token = FIREBASE_ID_TOKEN
 
         if not bracket_id:

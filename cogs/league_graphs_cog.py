@@ -18,7 +18,8 @@ from discord import Option
 
 from topdeck_fetch import PlayerRow, get_league_rows_cached
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
-from utils.settings import GUILD_ID, SUBS, TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN
+from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
+from utils.monthly_config import get_bracket_id
 from utils.mod_check import is_mod
 from utils.dates import current_month_key, month_label as fmt_month_label
 from utils.logger import log_sync, log_warn
@@ -89,7 +90,8 @@ class LeagueGraphsCog(commands.Cog):
 
         await safe_ctx_defer(ctx, ephemeral=False, label="leaguegraphs")
 
-        if not TOPDECK_BRACKET_ID:
+        bracket_id = await get_bracket_id()
+        if not bracket_id:
             await safe_ctx_followup(ctx, "TOPDECK_BRACKET_ID is not configured.", ephemeral=True)
             return
 
@@ -100,15 +102,15 @@ class LeagueGraphsCog(commands.Cog):
 
         try:
             if chart == "league_activity":
-                buf, filename, emb = await self._chart_league_activity(mk, ml)
+                buf, filename, emb = await self._chart_league_activity(mk, ml, bracket_id)
             elif chart == "standings":
-                buf, filename, emb = await self._chart_standings(ml)
+                buf, filename, emb = await self._chart_standings(ml, bracket_id)
             elif chart == "points_dist":
-                buf, filename, emb = await self._chart_points_distribution(ml)
+                buf, filename, emb = await self._chart_points_distribution(ml, bracket_id)
             elif chart == "games_dist":
-                buf, filename, emb = await self._chart_games_distribution(ml)
+                buf, filename, emb = await self._chart_games_distribution(ml, bracket_id)
             elif chart == "turn_order":
-                buf, filename, emb = await self._chart_turn_order(mk, ml)
+                buf, filename, emb = await self._chart_turn_order(mk, ml, bracket_id)
             elif chart == "activity_alltime":
                 buf, filename, emb = await self._chart_activity_alltime()
             elif chart == "participation_alltime":
@@ -116,7 +118,7 @@ class LeagueGraphsCog(commands.Cog):
             elif chart == "points_alltime":
                 buf, filename, emb = await self._chart_points_alltime()
             elif chart == "turn_order_alltime":
-                buf, filename, emb = await self._chart_turn_order_alltime()
+                buf, filename, emb = await self._chart_turn_order_alltime(bracket_id)
             elif chart == "daily_avg_alltime":
                 buf, filename, emb = await self._chart_activity_daily_avg()
             else:
@@ -148,9 +150,9 @@ class LeagueGraphsCog(commands.Cog):
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _fetch_rows(self) -> List[PlayerRow]:
+    async def _fetch_rows(self, bracket_id: str) -> List[PlayerRow]:
         """Fetch league rows, raise on failure."""
-        rows, _ = await get_league_rows_cached(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+        rows, _ = await get_league_rows_cached(bracket_id, FIREBASE_ID_TOKEN)
         if not rows:
             raise ValueError("No league data available.")
         return rows
@@ -159,8 +161,8 @@ class LeagueGraphsCog(commands.Cog):
     # Chart: League Activity (stacked bar)
     # ------------------------------------------------------------------
 
-    async def _chart_league_activity(self, mk, ml):
-        matches, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+    async def _chart_league_activity(self, mk, ml, bracket_id):
+        matches, entrant_to_uid = await get_live_matches(bracket_id, FIREBASE_ID_TOKEN)
         log_sync(f"[leaguegraphs] league_activity: got {len(matches)} total matches from live data")
         month_matches, _, _ = _get_current_month_matches(matches, entrant_to_uid)
         log_sync(f"[leaguegraphs] league_activity: filtered to {len(month_matches)} for current month ({mk})")
@@ -189,8 +191,8 @@ class LeagueGraphsCog(commands.Cog):
     # Chart: Standings Top 16 (horizontal bar)
     # ------------------------------------------------------------------
 
-    async def _chart_standings(self, ml):
-        rows = await self._fetch_rows()
+    async def _chart_standings(self, ml, bracket_id):
+        rows = await self._fetch_rows(bracket_id)
 
         # Sort by points descending, take top 16 with games > 0
         ranked = sorted(
@@ -222,8 +224,8 @@ class LeagueGraphsCog(commands.Cog):
     # Chart: Points Distribution (histogram)
     # ------------------------------------------------------------------
 
-    async def _chart_points_distribution(self, ml):
-        rows = await self._fetch_rows()
+    async def _chart_points_distribution(self, ml, bracket_id):
+        rows = await self._fetch_rows(bracket_id)
 
         # Include all players with games
         pts_list = [
@@ -250,8 +252,8 @@ class LeagueGraphsCog(commands.Cog):
     # Chart: Games Distribution (histogram)
     # ------------------------------------------------------------------
 
-    async def _chart_games_distribution(self, ml):
-        rows = await self._fetch_rows()
+    async def _chart_games_distribution(self, ml, bracket_id):
+        rows = await self._fetch_rows(bracket_id)
 
         games_list = [
             int(getattr(r, "games", 0) or 0)
@@ -358,8 +360,8 @@ class LeagueGraphsCog(commands.Cog):
     # Chart: Turn Order Win Rates (current month)
     # ------------------------------------------------------------------
 
-    async def _chart_turn_order(self, mk, ml):
-        matches, entrant_to_uid = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+    async def _chart_turn_order(self, mk, ml, bracket_id):
+        matches, entrant_to_uid = await get_live_matches(bracket_id, FIREBASE_ID_TOKEN)
         month_matches, _, _ = _get_current_month_matches(matches, entrant_to_uid)
 
         stats = compute_turn_order_stats(month_matches)
@@ -389,7 +391,7 @@ class LeagueGraphsCog(commands.Cog):
     # Chart: Turn Order Win Rates (all-time)
     # ------------------------------------------------------------------
 
-    async def _chart_turn_order_alltime(self):
+    async def _chart_turn_order_alltime(self, bracket_id):
         from utils.month_dump_reader import (
             get_historical_months,
             reassemble_month_dump,
@@ -433,7 +435,7 @@ class LeagueGraphsCog(commands.Cog):
 
         # Also add current month
         try:
-            matches, e2u = await get_live_matches(TOPDECK_BRACKET_ID, FIREBASE_ID_TOKEN)
+            matches, e2u = await get_live_matches(bracket_id, FIREBASE_ID_TOKEN)
             month_matches, _, _ = _get_current_month_matches(matches, e2u)
             current = compute_turn_order_stats(month_matches)
             for i in range(4):

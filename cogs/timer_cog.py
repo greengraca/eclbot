@@ -75,7 +75,6 @@ except Exception as e:
 
 # --- TopDeck / online-games (Mongo) config (shared with other cogs) ---
 
-TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
 
@@ -126,7 +125,6 @@ class ECLTimerCog(commands.Cog):
         # TopDeck online game tagger
         self.topdeck_tagger = TopDeckTagger(
             self,
-            bracket_id=TOPDECK_BRACKET_ID,
             firebase_token=FIREBASE_ID_TOKEN,
         )
 

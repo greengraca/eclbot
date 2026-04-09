@@ -11,6 +11,7 @@ from utils.topdeck_identity import find_row_for_member, build_row_index, find_ro
 from utils.interactions import resolve_member
 from utils.logger import log_sync, log_ok, log_warn, log_debug
 from utils.settings import GUILD_ID
+from utils.monthly_config import get_bracket_id
 
 SPELLBOT_USER_ID = int(os.getenv("SPELLBOT_USER_ID", "0"))
 SPELLBOT_LFG_CHANNEL_ID = int(os.getenv("SPELLBOT_LFG_CHANNEL_ID", "0"))
@@ -22,7 +23,6 @@ SPELLBOT_READY_TITLE_PREFIX = os.getenv(
 
 DEBUG_SPELLBOT_WATCH = bool(int(os.getenv("DEBUG_SPELLBOT_WATCH", "0")))
 
-TOPDECK_BRACKET_ID = os.getenv("TOPDECK_BRACKET_ID", "")
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
 # Minimum total pot for "high-stakes pod" announcement
@@ -175,7 +175,8 @@ class SpellBotWatchCog(commands.Cog):
                     return
                 members.append(member)
 
-            if not TOPDECK_BRACKET_ID:
+            bracket_id = await get_bracket_id()
+            if not bracket_id:
                 self._debug("_handle_high_stakes: TOPDECK_BRACKET_ID not set, skipping.")
                 log_warn(
                     "[spellbot-watch] High-stakes check aborted: "
@@ -185,7 +186,7 @@ class SpellBotWatchCog(commands.Cog):
 
             # Get league rows (cached) – shared cache in topdeck_fetch
             rows, fetched_at = await get_league_rows_cached(
-                TOPDECK_BRACKET_ID,
+                bracket_id,
                 FIREBASE_ID_TOKEN,
                 force_refresh=False,
             )
