@@ -26,7 +26,7 @@ from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cach
 from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
-from utils.interactions import resolve_member
+from utils.interactions import resolve_member, safe_ctx_defer, safe_ctx_followup
 from utils.logger import get_logger, log_sync, log_ok, log_warn, log_error
 from utils.treasure_pods import TreasurePodManager
 
@@ -925,6 +925,8 @@ class SubscriptionsCog(commands.Cog):
             await ctx.respond("Month must be **YYYY-MM**.", ephemeral=True)
             return
 
+        await safe_ctx_defer(ctx, ephemeral=True)
+
         discord_name = member.display_name
         discord_username = member.name
 
@@ -948,7 +950,7 @@ class SubscriptionsCog(commands.Cog):
         )
 
         await self._grant_ecl(member.id, reason=f"Free entry ({month})")
-        await ctx.respond(f"✅ Added free entry for {member.mention} for **{month}**.", ephemeral=True)
+        await safe_ctx_followup(ctx, f"✅ Added free entry for {member.mention} for **{month}**.", ephemeral=True)
 
     @commands.slash_command(
         name="substatus",
