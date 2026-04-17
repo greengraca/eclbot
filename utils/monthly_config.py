@@ -12,8 +12,11 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+import aiohttp
+
 from db import ecl_monthly_config
 from utils.dates import LISBON_TZ, month_key
+from utils.logger import log_warn
 from utils.settings import GUILD_ID
 
 from datetime import datetime
@@ -22,15 +25,19 @@ from datetime import datetime
 _ENV_BRACKET_ID = (os.getenv("TOPDECK_BRACKET_ID") or "").strip()
 _ENV_NEXT_BRACKET_ID = (os.getenv("NEXT_MONTH_TOPDECK_BRACKET_ID") or "").strip()
 _ENV_MOSTGAMES_IMAGE = (os.getenv("MOSTGAMES_PRIZE_IMAGE_URL") or "").strip()
+_ENV_DASHBOARD_URL = (os.getenv("DASHBOARD_BASE_URL") or "").rstrip("/")
 
 # In-memory cache: { month_key: (doc_or_None, expiry_ts) }
 _cache: Dict[str, tuple[Optional[Dict[str, Any]], float]] = {}
+# Separate cache for mostgames image URLs (resolved via dashboard HTTP)
+_mostgames_cache: Dict[str, tuple[str, float]] = {}
 _CACHE_TTL = 60  # seconds
 
 
 def clear_cache() -> None:
     """Clear the in-memory config cache (call after writes)."""
     _cache.clear()
+    _mostgames_cache.clear()
 
 
 def _now_lisbon() -> datetime:
@@ -111,9 +118,10 @@ async def get_mostgames_image(month: Optional[str] = None) -> str:
     Get the most games prize image URL for a month.
 
     Resolution:
-      1. ecl_monthly_config.mostgames_prize_image_url  (set via dashboard)
-      2. dashboard_prizes with recipient_type=="most_games" for the month
-      3. MOSTGAMES_PRIZE_IMAGE_URL env var
+      1. Dashboard API /api/prizes/most-games/image (canonical — resolves
+         ecl_monthly_config override, dashboard_prizes.image_url, or a fresh
+         presigned URL for dashboard_prizes.r2_key).
+      2. MOSTGAMES_PRIZE_IMAGE_URL env var (fallback when dashboard unreachable).
 
     Args:
         month: "YYYY-MM" key. Defaults to current Lisbon month.
@@ -121,24 +129,38 @@ async def get_mostgames_image(month: Optional[str] = None) -> str:
     if month is None:
         month = _current_month()
 
-    # 1. Check config
-    config = await _get_config(month)
-    if config and config.get("mostgames_prize_image_url"):
-        return config["mostgames_prize_image_url"]
+    cached = _mostgames_cache.get(month)
+    if cached and time.monotonic() < cached[1]:
+        return cached[0]
 
-    # 2. Check dashboard_prizes
-    try:
-        from db import db
-        prize = await db["dashboard_prizes"].find_one(
-            {"month": month, "recipient_type": "most_games"}
-        )
-        if prize and prize.get("image_url"):
-            return prize["image_url"]
-    except Exception:
-        pass
+    url = ""
+    if _ENV_DASHBOARD_URL:
+        api_url = f"{_ENV_DASHBOARD_URL}/api/prizes/most-games/image?month={month}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(api_url) as resp:
+                    if resp.status == 200:
+                        payload = await resp.json()
+                        resolved = (payload.get("data") or {}).get("url")
+                        if resolved:
+                            url = resolved
+                    else:
+                        log_warn(
+                            f"[monthly_config] mostgames image HTTP {resp.status} for {month}"
+                        )
+        except Exception as e:
+            log_warn(
+                f"[monthly_config] mostgames image fetch failed: {type(e).__name__}: {e}"
+            )
 
-    # 3. Env var fallback
-    return _ENV_MOSTGAMES_IMAGE
+    if not url:
+        url = _ENV_MOSTGAMES_IMAGE
+
+    if url:
+        _mostgames_cache[month] = (url, time.monotonic() + _CACHE_TTL)
+
+    return url
 
 
 async def get_join_channel_id(month: Optional[str] = None) -> Optional[str]:
