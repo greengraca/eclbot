@@ -22,7 +22,7 @@ from discord import Option
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from utils.topdeck_identity import find_row_for_member
-from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
+from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid, is_recency_active
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
@@ -339,14 +339,18 @@ class StatsCog(commands.Cog):
         recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
         meets_recency = True  # default: not needed (20+ games or < min)
         has_recent = None
+        recency_active = False
         if online_count is not None and min_online <= online_count < no_recency_threshold:
             try:
                 y, m = mk.split("-")
-                recency_map = await has_recent_game_by_topdeck_uid(
-                    bracket_id, int(y), int(m), [uid],
-                    after_day=recency_after_day, online_only=True,
-                )
-                has_recent = recency_map.get(uid, False)
+                year_i, month_i = int(y), int(m)
+                recency_active = is_recency_active(year_i, month_i, recency_after_day)
+                if recency_active:
+                    recency_map = await has_recent_game_by_topdeck_uid(
+                        bracket_id, year_i, month_i, [uid],
+                        after_day=recency_after_day, online_only=True,
+                    )
+                    has_recent = recency_map.get(uid, False)
             except Exception as e:
                 log_warn(f"[stats] recency check failed for uid={uid}: {type(e).__name__}: {e}")
                 has_recent = None

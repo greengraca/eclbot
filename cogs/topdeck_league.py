@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
-from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
+from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid, is_recency_active
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
@@ -311,16 +311,18 @@ class TopdeckLeagueCog(commands.Cog):
         recency_after_day = cfg.top16_recency_after_day      # default 20
 
         ms = _month_start_utc()
+        recency_active = is_recency_active(ms.year, ms.month, recency_after_day)
 
         # Collect UIDs that need a recency check (between min_online and no_recency_threshold)
         uids_need_recency: List[str] = []
-        for r in active_by_games:
-            uid = (r.uid or "").strip()
-            if not uid:
-                continue
-            online = online_counts.get(uid, 0)
-            if min_online <= online < no_recency_threshold:
-                uids_need_recency.append(uid)
+        if recency_active:
+            for r in active_by_games:
+                uid = (r.uid or "").strip()
+                if not uid:
+                    continue
+                online = online_counts.get(uid, 0)
+                if min_online <= online < no_recency_threshold:
+                    uids_need_recency.append(uid)
 
         recency_check: Dict[str, bool] = {}
         bracket_id = await get_bracket_id()
@@ -342,10 +344,11 @@ class TopdeckLeagueCog(commands.Cog):
             online = online_counts.get(uid, 0)
             if online >= no_recency_threshold:
                 qualified_candidates.append(r)
-            elif online >= min_online and recency_check.get(uid, False):
-                qualified_candidates.append(r)
-            elif online >= min_online and not recency_check.get(uid, False):
-                failed_recency.append(r)
+            elif online >= min_online:
+                if not recency_active or recency_check.get(uid, False):
+                    qualified_candidates.append(r)
+                else:
+                    failed_recency.append(r)
 
         log_sync(f"[topdeck] Players qualified (online + recency): {len(qualified_candidates)}.")
         log_sync(f"[topdeck] Players failed recency: {len(failed_recency)}.")
@@ -378,8 +381,16 @@ class TopdeckLeagueCog(commands.Cog):
                     f"TopDeck data: last updated <t:{ts_int}:R>."
                 )
             elif online_games_for_author >= min_online:
-                author_has_recent = recency_check.get(author_uid, False)
-                if author_has_recent:
+                if not recency_active:
+                    missing_msg = (
+                        f"You're already eligible: you have **{online_games_for_author}** online games. "
+                        f"After day {recency_after_day}, you'll also need at least 1 online game played that day or later "
+                        f"(or reach {no_recency_threshold}+ online games to skip the recency requirement).\n"
+                        f"(TopDeck record: {row_for_author.wins}W / {row_for_author.draws}D / {row_for_author.losses}L "
+                        f"across {total_games} total games.)\n\n"
+                        f"TopDeck data: last updated <t:{ts_int}:R>."
+                    )
+                elif recency_check.get(author_uid, False):
                     missing_msg = (
                         f"You're already eligible: you have **{online_games_for_author}** online games "
                         f"and a game after day {recency_after_day}.\n"

@@ -23,7 +23,7 @@ from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
 
 from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, PlayerRow
-from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid
+from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid, is_recency_active
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
 from utils.interactions import resolve_member, safe_ctx_defer, safe_ctx_followup
@@ -1440,15 +1440,18 @@ class SubscriptionsCog(commands.Cog):
         min_games_no_recency = cfg.top16_min_online_games_no_recency  # default 20
         recency_after_day = cfg.top16_recency_after_day  # default 20
 
+        recency_active = is_recency_active(year, month, recency_after_day)
+
         # Collect UIDs that need recency check (between min_games and min_games_no_recency)
         uids_need_recency = []
-        for r in active_by_games:
-            uid = (r.uid or "").strip()
-            if not uid:
-                continue
-            online = online_counts.get(uid, 0)
-            if min_games <= online < min_games_no_recency:
-                uids_need_recency.append(uid)
+        if recency_active:
+            for r in active_by_games:
+                uid = (r.uid or "").strip()
+                if not uid:
+                    continue
+                online = online_counts.get(uid, 0)
+                if min_games <= online < min_games_no_recency:
+                    uids_need_recency.append(uid)
 
         # Check recency for those UIDs
         recency_check: dict[str, bool] = {}
@@ -1463,18 +1466,17 @@ class SubscriptionsCog(commands.Cog):
 
         # Qualification:
         # - Option A: >= min_games_no_recency (20) games - no recency needed
-        # - Option B: >= min_games (10) games AND has game after day 20
+        # - Option B: >= min_games (10) games AND (recency cutoff not yet reached
+        #             OR player has a game after the cutoff day)
         qualified: list[PlayerRow] = []
         for r in active_by_games:
             uid = (r.uid or "").strip()
             if not uid:
                 continue
             online = online_counts.get(uid, 0)
-            # Option A: >= 20 games (no recency needed)
             if online >= min_games_no_recency:
                 qualified.append(r)
-            # Option B: >= 10 games AND has recent game
-            elif online >= min_games and recency_check.get(uid, False):
+            elif online >= min_games and (not recency_active or recency_check.get(uid, False)):
                 qualified.append(r)
 
         if not qualified:
@@ -1598,15 +1600,18 @@ class SubscriptionsCog(commands.Cog):
         min_games_no_recency = cfg.top16_min_online_games_no_recency  # default 20
         recency_after_day = cfg.top16_recency_after_day  # default 20
 
+        recency_active = is_recency_active(year, month, recency_after_day)
+
         # Collect UIDs that need recency check (between min_games and min_games_no_recency)
         uids_need_recency = []
-        for r in active_by_games:
-            uid = (r.uid or "").strip()
-            if not uid:
-                continue
-            online = online_counts.get(uid, 0)
-            if min_games <= online < min_games_no_recency:
-                uids_need_recency.append(uid)
+        if recency_active:
+            for r in active_by_games:
+                uid = (r.uid or "").strip()
+                if not uid:
+                    continue
+                online = online_counts.get(uid, 0)
+                if min_games <= online < min_games_no_recency:
+                    uids_need_recency.append(uid)
 
         recency_check: dict[str, bool] = {}
         if uids_need_recency:
@@ -1624,11 +1629,9 @@ class SubscriptionsCog(commands.Cog):
             if not uid:
                 continue
             online = online_counts.get(uid, 0)
-            # Option A: >= 20 games (no recency needed)
             if online >= min_games_no_recency:
                 qualified.append((idx, r))
-            # Option B: >= 10 games AND has recent game
-            elif online >= min_games and recency_check.get(uid, False):
+            elif online >= min_games and (not recency_active or recency_check.get(uid, False)):
                 qualified.append((idx, r))
 
         if not qualified:

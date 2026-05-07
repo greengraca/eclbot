@@ -115,6 +115,19 @@ async def count_online_games_by_topdeck_uid(
     return out
 
 
+def is_recency_active(year: int, month: int, after_day: int = 20) -> bool:
+    """True if the recency cutoff (day `after_day` of the given month, UTC) has arrived.
+
+    Used to gate the top16 recency check: before the cutoff day, no game can satisfy
+    "after day N" for the current month, so callers should skip the filter rather
+    than incorrectly disqualifying players in the 10-19 game band.
+    """
+    max_day = calendar.monthrange(year, month)[1]
+    clamped_day = min(after_day, max_day)
+    cutoff_dt = datetime(year, month, clamped_day, 0, 0, 0, tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= cutoff_dt
+
+
 async def has_recent_game_by_topdeck_uid(
     bracket_id: str,
     year: int,
