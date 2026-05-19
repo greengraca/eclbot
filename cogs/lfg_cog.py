@@ -960,4 +960,27 @@ class LFGCog(commands.Cog):
 
 
 def setup(bot: commands.Bot):
-    bot.add_cog(LFGCog(bot))
+    from db import get_feature_flag_sync
+
+    lfgelo_enabled = get_feature_flag_sync("lfgelo_enabled", default=False)
+
+    cog = LFGCog(bot)
+
+    if not lfgelo_enabled:
+        # Strip /lfgelo from the cog's command list BEFORE adding it so
+        # the slash command is never registered with Discord. Toggled
+        # from the dashboard Settings UI; requires bot restart for the
+        # slash command list to re-sync.
+        try:
+            filtered = [
+                c for c in cog.__cog_commands__
+                if getattr(c, "name", "") != "lfgelo"
+            ]
+            cog.__cog_commands__ = (
+                tuple(filtered) if isinstance(cog.__cog_commands__, tuple) else filtered
+            )
+            log_warn("[lfg] /lfgelo disabled via dashboard feature flag — slash command not registered")
+        except Exception as e:
+            log_error(f"[lfg] Failed to strip /lfgelo command: {e}")
+
+    bot.add_cog(cog)

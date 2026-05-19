@@ -79,6 +79,35 @@ user_preferences = db["user_preferences"]
 # League monthly config (shared with dashboard)
 ecl_monthly_config = db["ecl_monthly_config"]
 
+# Feature flags (shared with dashboard; written by the dashboard Settings UI)
+dashboard_feature_flags = db["dashboard_feature_flags"]
+
+
+def get_feature_flag_sync(key: str, default: bool = False) -> bool:
+    """Synchronously read a feature flag from dashboard_feature_flags.
+
+    Used during cog `setup()` (sync context) so we can decide whether to
+    register optional slash commands before they're synced to Discord.
+
+    Falls back to `default` on any error (no doc, DB down, etc.) — the
+    bot should still boot even if MongoDB is briefly unreachable.
+    """
+    import pymongo
+    from utils.settings import GUILD_ID
+
+    try:
+        client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
+        try:
+            sync_db = client.get_default_database() or client[DB_NAME]
+            doc = sync_db.dashboard_feature_flags.find_one({"guild_id": str(GUILD_ID)})
+            if doc and "flags" in doc and key in doc["flags"]:
+                return bool(doc["flags"][key])
+            return default
+        finally:
+            client.close()
+    except Exception:
+        return default
+
 
 async def ping() -> bool:
     await _client.admin.command("ping")
