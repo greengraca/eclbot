@@ -10,7 +10,6 @@ from .views import SubsLinksView
 from .embeds import (
     build_reminder_embed,
     build_flip_mods_embed,
-    build_top16_online_reminder_embed,
     build_topcut_prize_reminder_embed,
 )
 from .month_flip import MonthFlipHandler
@@ -22,7 +21,6 @@ __all__ = [
     "SubsLinksView",
     "build_reminder_embed",
     "build_flip_mods_embed",
-    "build_top16_online_reminder_embed",
     "build_topcut_prize_reminder_embed",
     "MonthFlipHandler",
 ]

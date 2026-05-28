@@ -62,7 +62,6 @@ from .subscriptions import (
     SubsLinksView,
     build_reminder_embed,
     build_flip_mods_embed,
-    build_top16_online_reminder_embed,
     build_topcut_prize_reminder_embed,
     MonthFlipHandler,
 )
@@ -86,7 +85,6 @@ class SubscriptionsCog(commands.Cog):
         self._access_audit.start()
 
         # small locks to avoid overlap
-        self._top16_reminder_lock = asyncio.Lock()
         self._access_audit_lock = asyncio.Lock()
         self._topdeck_dump_lock = asyncio.Lock()
 
@@ -395,126 +393,6 @@ class SubscriptionsCog(commands.Cog):
 
     # -------------------- Top16 online-games reminder helpers --------------------
 
-    async def _top16_unqualified_for_month(
-        self,
-        guild: discord.Guild,
-        *,
-        mk: str,
-    ) -> tuple[list[dict], list[str]]:
-        """
-        Returns:
-          - entries: [{rank, row, online_games, missing, discord_id}]
-          - debug_missing: list[str] of mapping misses
-        Only includes players who are currently in TopDeck Top16 AND have < required online games.
-        """
-        cfg = self.cfg
-
-        bracket_id = await get_bracket_id()
-        firebase_token = FIREBASE_ID_TOKEN
-
-        if not bracket_id:
-            return ([], ["TOPDECK_BRACKET_ID not set"])
-
-        # Fetch rows
-        try:
-            rows, _ = await get_league_rows_cached(bracket_id, firebase_token, force_refresh=True)
-        except Exception:
-            rows, _ = await get_league_rows_cached(bracket_id, firebase_token, force_refresh=False)
-
-        if not rows:
-            return ([], ["no TopDeck rows"])
-
-        # Online counts for mk
-        try:
-            y, m = mk.split("-")
-            year, month = int(y), int(m)
-        except Exception:
-            return ([], [f"bad mk: {mk!r}"])
-
-        try:
-            online_counts = await count_online_games_by_topdeck_uid(bracket_id, year, month, online_only=True)
-        except Exception as e:
-            return ([], [f"online_counts error: {type(e).__name__}: {e}"])
-
-        # Active, sorted like TopDeck leaderboard (points first)
-        active = [r for r in rows if not r.dropped]
-        active = sorted(active, key=lambda r: (-r.pts, -r.games))
-        top16 = active[:16]
-
-        # Shared identity index (Discord ID first; unique handle/name fallback)
-        index = await self._build_member_index(guild)
-
-        entries: list[dict] = []
-        misses: list[str] = []
-
-        conf_counts: dict[str, int] = {}
-
-        for idx, r in enumerate(top16, start=1):
-            uid = (r.uid or "").strip()
-            online = online_counts.get(uid, 0) if uid else 0
-            need = max(0, cfg.top16_min_online_games - online)
-            if need <= 0:
-                continue  # already qualified
-
-            # Map to Discord ID (ID -> unique handle -> unique name)
-            res = resolve_row_discord_id(r, index)
-            conf_counts[res.confidence] = conf_counts.get(res.confidence, 0) + 1
-
-            if not res.discord_id:
-                misses.append(
-                    f"{r.discord or r.name or 'unknown'} ({res.confidence}{(' ' + res.matched_key) if res.matched_key else ''})"
-                )
-                continue
-
-            discord_id = int(res.discord_id)
-
-            # Log when we had to fall back (or when ambiguous/no-match happens)
-            if res.confidence != "discord_id":
-                await self.log.info(
-                    "[subs/identity] top16-unqualified "
-                    f"mk={mk} row={getattr(r, 'name', '')!r} discord={getattr(r, 'discord', '')!r} "
-                    f"-> discord_id={discord_id} conf={res.confidence} key={res.matched_key!r}"
-                )
-
-            entries.append({
-                "rank": idx,
-                "row": r,
-                "online_games": int(online),
-                "missing": int(need),
-                "discord_id": int(discord_id),
-            })
-
-        if conf_counts:
-            parts = ", ".join(f"{k}={v}" for k, v in sorted(conf_counts.items()))
-            await self.log.info(f"[subs/identity] top16-unqualified mk={mk} mapping_counts: {parts}")
-
-        return entries, misses
-
-    async def _build_top16_online_reminder_embed(
-        self,
-        *,
-        kind: str,          # "5d" | "3d" | "last"
-        mk: str,            # YYYY-MM
-        rank: int,
-        name: str,
-        online_games: int,
-        need_total: int,
-        mention: str,       # e.g. member.mention
-    ) -> discord.Embed:
-        """Build Top16 online games reminder embed."""
-        cfg = self.cfg
-        return build_top16_online_reminder_embed(
-            kind=kind,
-            mk=mk,
-            rank=rank,
-            name=name,
-            online_games=online_games,
-            need_total=need_total,
-            mention=mention,
-            embed_color=cfg.embed_color,
-            embed_thumbnail_url=cfg.embed_thumbnail_url,
-        )
-    
     async def _run_topdeck_month_dump_flip_job(self, guild: discord.Guild, *, month_str: str) -> None:
         job_id = f"topdeckdumpmonth:auto:{guild.id}:{month_str}"
         if not await job_once(job_id):
@@ -546,98 +424,6 @@ class SubscriptionsCog(commands.Cog):
                     guild,
                     summary=f"[ECL] TopDeck month dump FAILED for {month_str}: {type(e).__name__}: {e}",
                 )
-
-
-    async def _run_top16_online_reminder_job(self, guild: discord.Guild, *, mk: str, kind: str) -> None:
-        """
-        DM players who are currently TopDeck Top16 but not qualified (< min online games).
-        Runs at most once per (mk, kind).
-        Also logs/prints who would receive it.
-        """
-        job_id = f"top16-online-remind:{guild.id}:{mk}:{kind}"
-        if not await job_once(job_id):
-            return
-
-        cfg = self.cfg
-
-        async with self._top16_reminder_lock:
-            entries, misses = await self._top16_unqualified_for_month(guild, mk=mk)
-
-            if misses:
-                await self.log.info(f"[subs] Top16-online mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
-
-            if not entries:
-                await self.log.info(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
-                log_sync(f"[subs] Top16-online reminder ({mk} {kind}): 0 targets")
-                await self._dm_mods_summary(
-                    guild,
-                    summary=f"[ECL] Top16-online reminder ({mk} {kind}) — sent 0 DMs (0 targets).",
-                )
-                return
-
-            # ---- Log/print who will be targeted (sample up to 20) ----
-            sample_lines: list[str] = []
-            for e in entries[:20]:
-                try:
-                    did = int(e["discord_id"])
-                except Exception:
-                    did = 0
-                try:
-                    rank = int(e["rank"])
-                except Exception:
-                    rank = 0
-                try:
-                    og = int(e["online_games"])
-                except Exception:
-                    og = 0
-                row = e.get("row")
-                nm = str(getattr(row, "name", "") or "Player")
-                sample_lines.append(f"#{rank:02d} {nm} | discord_id={did} | online={og}/{int(cfg.top16_min_online_games)}")
-
-            msg = (
-                f"[subs] Top16-online reminder ({mk} {kind}) targets={len(entries)}. "
-                f"Sample (up to 20):\n" + "\n".join(sample_lines)
-            )
-            log_sync(msg)
-            await self._log(msg)
-
-            sem = asyncio.Semaphore(cfg.dm_concurrency)
-            sent = 0
-
-            async def _send_one(entry: dict):
-                nonlocal sent
-                async with sem:
-                    uid = int(entry["discord_id"])
-                    member = await resolve_member(guild, uid)
-                    if not member or member.bot:
-                        return
-
-                    try:
-                        emb = await self._build_top16_online_reminder_embed(
-                            kind=kind,
-                            mk=mk,
-                            rank=int(entry["rank"]),
-                            name=str(getattr(entry["row"], "name", "") or ""),
-                            online_games=int(entry["online_games"]),
-                            need_total=int(cfg.top16_min_online_games),
-                            mention=member.mention,  
-                        )
-                        await member.send(embed=emb)
-                        sent += 1
-                    except Exception:
-                        return
-
-                    if cfg.dm_sleep_seconds:
-                        await asyncio.sleep(cfg.dm_sleep_seconds)
-
-            await asyncio.gather(*[_send_one(e) for e in entries])
-            await self.log.ok(f"[subs] Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
-            log_ok(f"[subs] Top16-online reminder ({mk} {kind}) sent {sent}/{len(entries)}")
-            await self._dm_mods_summary(
-                guild,
-                summary=f"[ECL] Top16-online reminder ({mk} {kind}) — sent {sent}/{len(entries)} DMs.",
-            )
-
 
 
     # -------------------- Ko-fi ingestion --------------------
@@ -988,7 +774,6 @@ class SubscriptionsCog(commands.Cog):
 
         # "first option" choices:
         kind_sub = "3d"     # subscription reminder
-        kind_top16 = "5d"   # top16-online reminder
         kind_prize = "5d"   # prize reminder
 
         target_month = add_months(month_key(now), 1)
@@ -1011,18 +796,6 @@ class SubscriptionsCog(commands.Cog):
             registered_count=registered_count,
         )
         embeds_to_send.append(("1/5 • Subscription reminder (3d)", emb_sub, view))
-
-        # 2) Top16 online-games reminder (5d) (placeholder)
-        emb_top16 = await self._build_top16_online_reminder_embed(
-            kind=kind_top16,
-            mk=current_mk,
-            rank=1,
-            name=str(getattr(ctx.user, "display_name", "") or "Player"),
-            online_games=max(0, int(cfg.top16_min_online_games) - 2),
-            need_total=int(cfg.top16_min_online_games),
-            mention=ctx.user.mention,
-        )
-        embeds_to_send.append(("2/5 • Top16 online-games reminder (5d)", emb_top16, None))
 
         # 3) Prize eligibility reminder (5d) (placeholder)
         emb_prize = await self._build_topcut_prize_reminder_embed(
@@ -1150,18 +923,14 @@ class SubscriptionsCog(commands.Cog):
                 # Also retry revoke for current month if previous close was delayed
                 await self._run_monthly_midnight_revoke_job(guild, target_month=now_mk)
 
-            # --- Top16 online-games reminders for CURRENT month ---
+            # --- Topcut prize reminders for CURRENT month ---
             if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
                 mk_current = now_mk
 
                 if now.date() == d5_before_close:
-                    await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="5d")
                     await self._run_topcut_prize_reminder_job(guild, mk=mk_current, kind="5d")
-                elif now.date() == d3_before_close:
-                    await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="3d")
                 elif now.date() == d1_before_close:
                     await self._run_topcut_prize_reminder_job(guild, mk=mk_current, kind="1d")
-                    await self._run_top16_online_reminder_job(guild, mk=mk_current, kind="last")
 
             # --- /lfgelo unlock announcement ---
             if LFG_ELO_MIN_DAY and now.day >= LFG_ELO_MIN_DAY:

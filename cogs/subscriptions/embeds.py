@@ -138,56 +138,6 @@ def build_flip_mods_embed(
     return emb
 
 
-def build_top16_online_reminder_embed(
-    *,
-    kind: str,          # "5d" | "3d" | "last"
-    mk: str,            # YYYY-MM
-    rank: int,
-    name: str,
-    online_games: int,
-    need_total: int,
-    mention: str,       # e.g. member.mention
-    embed_color: Optional[int] = None,
-    embed_thumbnail_url: Optional[str] = None,
-) -> discord.Embed:
-    """Build the Top16 online games reminder embed."""
-    kind = (kind or "").strip().lower()
-    if kind not in ("5d", "3d", "last"):
-        kind = "5d"
-
-    nice_month = month_label(mk)
-    missing = max(0, int(need_total) - int(online_games))
-
-    if kind == "last":
-        title = "⏳ Last day — finish your online games for Top16"
-        urgency = "Today is the **last day** of the league."
-    elif kind == "3d":
-        title = "⚠️ 3 days left — finish your online games for Top16"
-        urgency = "Only **3 days** left in the league."
-    else:
-        title = "👀 5 days left — finish your online games for Top16"
-        urgency = "Only **5 days** left in the league."
-
-    desc = (
-        f"Hey {mention} 👋\n\n"
-        f"{urgency}\n\n"
-        f"You're currently **#{rank:02d}** on **TopDeck** for **{nice_month}**, "
-        f"but you're **not qualified** for the Top16 cut yet because of the **online games requirement**.\n\n"
-        f"✅ Online games: **{online_games} / {need_total}**\n"
-        f"❗ You need **{missing}** more online game(s) to qualify.\n\n"
-        "If you want to keep your spot, try to finish the remaining online games before the league ends."
-    )
-
-    emb = discord.Embed(
-        title=title,
-        description=desc,
-        color=_get_color(embed_color),
-    )
-
-    emb.set_footer(text="ECL • Top16 qualification reminder")
-    _apply_thumbnail(emb, embed_thumbnail_url)
-
-    return emb
 
 
 def build_topcut_prize_reminder_embed(
