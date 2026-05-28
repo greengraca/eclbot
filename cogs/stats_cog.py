@@ -22,7 +22,7 @@ from discord import Option
 
 from topdeck_fetch import get_league_rows_cached, PlayerRow
 from utils.topdeck_identity import find_row_for_member
-from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid, is_recency_active
+from online_games_store import has_recent_game_by_topdeck_uid, is_recency_active
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
@@ -309,38 +309,20 @@ class StatsCog(commands.Cog):
             inline=False,
         )
 
-        # ---- Online games for current month ----
+        # ---- Eligibility (total games + any-game recency) ----
         uid = (getattr(row, "uid", None) or "").strip()
-        online_count = None
-        if uid:
-            try:
-                y, m = mk.split("-")
-                online_counts = await count_online_games_by_topdeck_uid(
-                    bracket_id,
-                    int(y),
-                    int(m),
-                    online_only=True,
-                )
-                online_count = int(online_counts.get(uid, 0) or 0)
-            except Exception as e:
-                log_warn(f"[stats] online game count failed for uid={uid}: {type(e).__name__}: {e}")
-                online_count = None
-
-        min_online = int(getattr(cfg, "top16_min_online_games", 0) or 0)
         min_total = int(getattr(cfg, "top16_min_total_games", 0) or 0)
-        meets_total = games >= min_total
-        meets_online = (online_count is not None) and (online_count >= min_online)
+        no_recency_threshold = int(getattr(cfg, "top16_min_online_games_no_recency", 20) or 20)
+        recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
 
+        meets_total = games >= min_total
         top16_pos = _top16_position(rows or [], row)
         in_top16_window = bool(top16_pos and top16_pos <= 16)
 
-        # ---- Recency check for 10-19 online games ----
-        no_recency_threshold = int(getattr(cfg, "top16_min_online_games_no_recency", 20) or 20)
-        recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
-        meets_recency = True  # default: not needed (20+ games or < min)
+        meets_recency = True
         has_recent = None
         recency_active = False
-        if online_count is not None and min_online <= online_count < no_recency_threshold:
+        if uid and min_total <= games < no_recency_threshold:
             try:
                 y, m = mk.split("-")
                 year_i, month_i = int(y), int(m)
@@ -348,56 +330,41 @@ class StatsCog(commands.Cog):
                 if recency_active:
                     recency_map = await has_recent_game_by_topdeck_uid(
                         bracket_id, year_i, month_i, [uid],
-                        after_day=recency_after_day, online_only=True,
+                        after_day=recency_after_day, online_only=False,
                     )
                     has_recent = recency_map.get(uid, False)
             except Exception as e:
                 log_warn(f"[stats] recency check failed for uid={uid}: {type(e).__name__}: {e}")
                 has_recent = None
-
             if has_recent is False:
                 meets_recency = False
 
-        # ---- Inline fields: Online Games + Recency ----
-        if online_count is None:
-            emb.add_field(name="\U0001f3ae Online Games", value="\u2014", inline=True)
-        else:
-            emb.add_field(
-                name="\U0001f3ae Online Games",
-                value=f"**{online_count}** / {min_online} required {'✅' if meets_online else '❌'}",
-                inline=True,
-            )
-
-        # Recency field (only shown when applicable: 10-19 online games)
-        if online_count is not None and min_online <= online_count < no_recency_threshold:
+        # Recency field (only shown when applicable: 10-19 total games)
+        if uid and min_total <= games < no_recency_threshold:
             if has_recent is True:
-                emb.add_field(name="\U0001f4c5 Recency", value=f"Game after day {recency_after_day} ✅", inline=True)
+                emb.add_field(name="📅 Recency", value=f"Game after day {recency_after_day} ✅", inline=True)
             elif has_recent is False:
-                emb.add_field(name="\U0001f4c5 Recency", value=f"Game after day {recency_after_day} ❌", inline=True)
+                emb.add_field(name="📅 Recency", value=f"Game after day {recency_after_day} ❌", inline=True)
 
         # ---- Top16 Eligibility (checklist + verdict) ----
         elig_lines = []
         if top16_pos:
             elig_lines.append(f"Position: **#{top16_pos}** {'✅' if in_top16_window else '❌'}")
         else:
-            elig_lines.append("Position: \u2014")
-        elig_lines.append(f"Total games: **{games}** / {min_total} {'✅' if meets_total else '❌'}")
-        if online_count is not None:
-            elig_lines.append(f"Online games: **{online_count}** / {min_online} {'✅' if meets_online else '❌'}")
-        else:
-            elig_lines.append("Online games: \u2014")
-        if online_count is not None and min_online <= online_count < no_recency_threshold:
+            elig_lines.append("Position: —")
+        elig_lines.append(f"Games: **{games}** / {min_total} {'✅' if meets_total else '❌'}")
+        if uid and min_total <= games < no_recency_threshold:
             if has_recent is True:
                 elig_lines.append("Recency: ✅")
             elif has_recent is False:
                 elig_lines.append("Recency: ❌")
                 elig_lines.append(
-                    f"\U0001f534 **Warning:** No online game after day **{recency_after_day}** \u2014 "
-                    f"required with fewer than **{no_recency_threshold}** online games."
+                    f"🔴 **Warning:** No game after day **{recency_after_day}** — "
+                    f"required with fewer than **{no_recency_threshold}** games."
                 )
-        elig_lines.append("\u2500")
+        elig_lines.append("─")
 
-        all_eligible = meets_total and meets_online and in_top16_window and meets_recency
+        all_eligible = meets_total and in_top16_window and meets_recency
         if all_eligible:
             elig_lines.append("\U0001f7e2 **You are on the Top cut this month**")
         else:
