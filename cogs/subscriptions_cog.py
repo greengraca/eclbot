@@ -1570,32 +1570,20 @@ class SubscriptionsCog(commands.Cog):
         except Exception:
             return ([], [f"bad mk: {mk!r}"], 0)
 
-        try:
-            online_counts = await count_online_games_by_topdeck_uid(
-                bracket_id, year, month, online_only=True
-            )
-        except Exception as e:
-            return ([], [f"online_counts error: {type(e).__name__}: {e}"], 0)
-
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
         active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
 
-        # Recency thresholds (same logic as _eligible_top16_entries_for_month)
-        min_games = cfg.top16_min_online_games  # default 10
-        min_games_no_recency = cfg.top16_min_online_games_no_recency  # default 20
-        recency_after_day = cfg.top16_recency_after_day  # default 20
+        min_total = cfg.top16_min_total_games
+        no_recency = cfg.top16_min_online_games_no_recency
+        recency_after_day = cfg.top16_recency_after_day
 
         recency_active = is_recency_active(year, month, recency_after_day)
 
-        # Collect UIDs that need recency check (between min_games and min_games_no_recency)
         uids_need_recency = []
         if recency_active:
             for r in active_by_games:
                 uid = (r.uid or "").strip()
-                if not uid:
-                    continue
-                online = online_counts.get(uid, 0)
-                if min_games <= online < min_games_no_recency:
+                if uid and needs_recency_check(r.games, min_total, no_recency):
                     uids_need_recency.append(uid)
 
         recency_check: dict[str, bool] = {}
@@ -1603,7 +1591,7 @@ class SubscriptionsCog(commands.Cog):
             try:
                 recency_check = await has_recent_game_by_topdeck_uid(
                     bracket_id, year, month, uids_need_recency,
-                    after_day=recency_after_day, online_only=True
+                    after_day=recency_after_day, online_only=False,
                 )
             except Exception as e:
                 return ([], [f"recency_check error: {type(e).__name__}: {e}"], 0)
@@ -1613,10 +1601,10 @@ class SubscriptionsCog(commands.Cog):
             uid = (r.uid or "").strip()
             if not uid:
                 continue
-            online = online_counts.get(uid, 0)
-            if online >= min_games_no_recency:
-                qualified.append((idx, r))
-            elif online >= min_games and (not recency_active or recency_check.get(uid, False)):
+            if is_top16_eligible(
+                dropped=False, total_games=r.games, has_recent=recency_check.get(uid, False),
+                recency_active=recency_active, min_total=min_total, no_recency_games=no_recency,
+            ):
                 qualified.append((idx, r))
 
         if not qualified:
