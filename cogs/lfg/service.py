@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 import discord
 
 from spelltable_client import create_spelltable_game
-from utils.interactions import safe_i_send, safe_i_edit
+from utils.interactions import safe_i_send, safe_i_edit, resolve_member
 from utils.logger import log_error
 
 from .models import now_utc
@@ -163,7 +163,10 @@ async def handle_join(
                 reply_ephemeral = "You're already in this lobby."
             elif lobby.is_full():
                 _disable_all_buttons(view)
-                lobby_id_to_clear = lobby.lobby_id
+                # Don't tear down a lobby that's mid-finalization (a SpellTable link
+                # is being created/applied) — the in-flight finalize owns cleanup.
+                if not getattr(lobby, "link_creating", False) and not lobby.has_link():
+                    lobby_id_to_clear = lobby.lobby_id
                 edit_view = view
                 reply_ephemeral = "This lobby is already full."
             else:
@@ -329,11 +332,15 @@ async def handle_join(
 
     # DM players
     for uid in dms_to_send:
-        member = guild.get_member(uid)
-        if not member:
+        member = await resolve_member(guild, uid)
+        if not member or member.bot:
             continue
-        with contextlib.suppress(discord.Forbidden):
+        try:
             await member.send(embed=ready_embed_for_dm)
+        except discord.Forbidden:
+            continue
+        except Exception as e:
+            log_error(f"[lfg] ready DM to {uid} failed: {type(e).__name__}: {e}")
 
 
 

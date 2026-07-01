@@ -828,11 +828,15 @@ class LFGCog(commands.Cog):
                 await self._maybe_announce_high_stakes(msg.channel, ctx.guild, full_lobby.player_ids)
 
             for uid in full_lobby.player_ids:
-                member = ctx.guild.get_member(uid)
-                if not member:
+                member = await resolve_member(ctx.guild, uid)
+                if not member or member.bot:
                     continue
-                with contextlib.suppress(discord.Forbidden):
+                try:
                     await member.send(embed=ready_embed)
+                except discord.Forbidden:
+                    continue
+                except Exception as e:
+                    log_error(f"[lfg] ready DM to {uid} failed: {type(e).__name__}: {e}")
 
             return
 

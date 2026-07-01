@@ -276,20 +276,28 @@ class JoinLeagueCog(commands.Cog):
 
         added = await self._grant_ecl(member, reason=f"Join button — eligible for {target_month}")
 
-        # Welcome DM (once per month per user)
+        # Welcome DM (once per user per month). Claim the dedup token first, but
+        # release it if the send fails so a closed-DMs / transient error can retry.
         job_id = f"join-welcome-dm:{guild.id}:{int(member.id)}:{target_month}"
         sent_dm = False
         try:
-            if await job_once(job_id):
-                rules = self._rules_mention(guild)
-                get_started = self._get_started_mention(guild)
+            already_welcomed = await subs_jobs.find_one({"_id": job_id})
+        except Exception:
+            already_welcomed = True  # DB error — skip the welcome DM this time
+        if not already_welcomed:
+            rules = self._rules_mention(guild)
+            get_started = self._get_started_mention(guild)
+            try:
                 await member.send(
-                    f"✅ You're in for **{month_label(target_month)}**!\n\n"
+                    "✅ You're in!\n\n"
                     f"Please read {rules} and {get_started} before playing. 🐸"
                 )
                 sent_dm = True
-        except Exception:
-            sent_dm = False
+                # Record the once-marker only after a successful send.
+                with contextlib.suppress(Exception):
+                    await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+            except Exception:
+                sent_dm = False
 
         # Ephemeral confirmation
         if added:

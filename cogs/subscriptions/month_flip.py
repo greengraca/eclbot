@@ -300,8 +300,16 @@ class MonthFlipHandler:
         if not await job_once(job_id):
             return
 
-        emb = self.cog._build_flip_mods_embed(guild, mk)
-        await self.cog._dm_mods_embed(guild, embed=emb)
+        try:
+            emb = await self.cog._build_flip_mods_embed(guild, mk)
+            await self.cog._dm_mods_embed(guild, embed=emb)
+        except Exception as e:
+            # Release the job token so a failure doesn't permanently skip the checklist.
+            try:
+                await subs_jobs.delete_one({"_id": job_id})
+            except Exception:
+                pass
+            await self.log.error(f"[subs] flip-mods reminder ({mk}) failed, will retry: {type(e).__name__}: {e}")
 
     async def run_free_role_flip_info_job(self, guild: discord.Guild, *, mk: str) -> None:
         """Once-per-month DM to players who have free-entry via specific roles.
@@ -318,13 +326,25 @@ class MonthFlipHandler:
         if not await job_once(job_id):
             return
 
-        # Build per-user list of role names that grant free entry
+        # Build per-user list of role names that grant free entry.
+        # role.members relies on the member cache; if it looks empty, fetch the full
+        # roster so a cold cache doesn't make us silently skip everyone for the month.
+        role_objs = [r for r in (guild.get_role(rid) for rid in role_ids) if r]
+        member_pool = None
+        if role_objs and sum(len(getattr(r, "members", []) or []) for r in role_objs) == 0:
+            try:
+                member_pool = [m async for m in guild.fetch_members(limit=None)]
+            except Exception:
+                member_pool = None
+
         user_roles: dict[int, list[str]] = {}
-        for rid in role_ids:
-            role = guild.get_role(rid)
-            if not role:
-                continue
-            for m in getattr(role, "members", []) or []:
+        for role in role_objs:
+            role_members = (
+                [m for m in member_pool if role in m.roles]
+                if member_pool is not None
+                else (getattr(role, "members", []) or [])
+            )
+            for m in role_members:
                 if m.bot:
                     continue
                 user_roles.setdefault(int(m.id), []).append(role.name)
@@ -375,10 +395,18 @@ class MonthFlipHandler:
                 )
                 emb.set_footer(text="DragonShield ECL • Free entry notice")
 
+                # Respect the DM opt-in preference for the notice (the DB write above
+                # is the source of truth and happens regardless).
+                if not self.cog._dm_opted_in(member):
+                    return
+
                 try:
                     await member.send(embed=emb)
                     sent += 1
-                except Exception:
+                except discord.Forbidden:
+                    return
+                except Exception as e:
+                    await self.log.warn(f"[subs] free-role DM to {uid} failed: {type(e).__name__}: {e}")
                     return
 
                 if cfg.dm_sleep_seconds:

@@ -204,11 +204,37 @@ async def autojoin_specific_lobby_group(
             log_error(f"[lfg] Failed to create SpellTable game (autojoin group): {e}")
 
         if link_created:
+            dm_targets: list[int] = []
+            finalize = False
             async with cog.state.lock:
                 current = cog.state.peek_guild_lobbies(guild.id).get(lobby_id)
                 if current is not None and current is lobby:
-                    lobby.link = link_created
-                    lobby.link_creating = False
+                    if lobby.is_full() and not lobby.has_link():
+                        lobby.link = link_created
+                        lobby.link_creating = False
+                        dm_targets = list(lobby.player_ids)
+                        finalize = True
+                    else:
+                        # A player left during room creation — abort, re-open the lobby.
+                        lobby.link_creating = False
+
+            if not finalize:
+                log_error(
+                    f"[lfg] autojoin group: lobby {guild.id}:{lobby_id} no longer full "
+                    "at finalize; discarding SpellTable link"
+                )
+                if msg and view:
+                    embed = cog._build_lobby_embed(guild, lobby)
+                    view._sync_open_last_seat_button()
+                    with contextlib.suppress(Exception):
+                        await msg.edit(embed=embed, view=view)
+                with contextlib.suppress(Exception):
+                    await safe_ctx_followup(
+                        ctx,
+                        "Joined, but a player left before the room was ready — the lobby is open again.",
+                        ephemeral=True,
+                    )
+                return True
 
             ready_embed = await cog._build_ready_embed(guild, lobby, started_at)
 
@@ -217,14 +243,18 @@ async def autojoin_specific_lobby_group(
                     await msg.edit(embed=ready_embed, view=None)
 
             with contextlib.suppress(Exception):
-                await cog._maybe_announce_high_stakes(channel, guild, player_ids_snapshot)
+                await cog._maybe_announce_high_stakes(channel, guild, dm_targets)
 
-            for uid in player_ids_snapshot:
-                m = guild.get_member(uid)
-                if not m:
+            for uid in dm_targets:
+                m = await resolve_member(guild, uid)
+                if not m or m.bot:
                     continue
-                with contextlib.suppress(discord.Forbidden):
+                try:
                     await m.send(embed=ready_embed)
+                except discord.Forbidden:
+                    continue
+                except Exception as e:
+                    log_error(f"[lfg] autojoin ready DM to {uid} failed: {type(e).__name__}: {e}")
 
             async with cog.state.lock:
                 cog._clear_lobby(guild.id, lobby_id)
@@ -362,28 +392,57 @@ async def autojoin_specific_lobby_from_lfg(
             log_error(f"[lfg] Failed to create SpellTable game (autojoin): {e}")
 
         if link_created:
+            dm_targets: list[int] = []
+            finalize = False
             async with cog.state.lock:
                 current = cog.state.peek_guild_lobbies(guild.id).get(lobby_id)
                 if current is not None and current is lobby:
-                    lobby.link = link_created
-                    lobby.link_creating = False
+                    if lobby.is_full() and not lobby.has_link():
+                        lobby.link = link_created
+                        lobby.link_creating = False
+                        dm_targets = list(lobby.player_ids)
+                        finalize = True
+                    else:
+                        # A player left during room creation — abort, re-open the lobby.
+                        lobby.link_creating = False
+
+            if not finalize:
+                log_error(
+                    f"[lfg] autojoin: lobby {guild.id}:{lobby_id} no longer full "
+                    "at finalize; discarding SpellTable link"
+                )
+                if msg and view:
+                    embed = cog._build_lobby_embed(guild, lobby)
+                    view._sync_open_last_seat_button()
+                    with contextlib.suppress(Exception):
+                        await msg.edit(embed=embed, view=view)
+                with contextlib.suppress(Exception):
+                    await safe_ctx_followup(
+                        ctx,
+                        "Joined, but a player left before the room was ready — the lobby is open again.",
+                        ephemeral=True,
+                    )
+                return True
 
             ready_embed = await cog._build_ready_embed(guild, lobby, started_at)
-
 
             if msg:
                 with contextlib.suppress(Exception):
                     await msg.edit(embed=ready_embed, view=None)
 
             with contextlib.suppress(Exception):
-                await cog._maybe_announce_high_stakes(channel, guild, player_ids_snapshot)
+                await cog._maybe_announce_high_stakes(channel, guild, dm_targets)
 
-            for uid in player_ids_snapshot:
-                m = guild.get_member(uid)
-                if not m:
+            for uid in dm_targets:
+                m = await resolve_member(guild, uid)
+                if not m or m.bot:
                     continue
-                with contextlib.suppress(discord.Forbidden):
+                try:
                     await m.send(embed=ready_embed)
+                except discord.Forbidden:
+                    continue
+                except Exception as e:
+                    log_error(f"[lfg] autojoin ready DM to {uid} failed: {type(e).__name__}: {e}")
 
             async with cog.state.lock:
                 cog._clear_lobby(guild.id, lobby_id)

@@ -901,7 +901,7 @@ class SubscriptionsCog(commands.Cog):
             # regular "register for next month" reminders
             target_month = add_months(now_mk, 1)  # next month
 
-            if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
+            if cfg.dm_enabled and now.hour >= 10:
                 if now.date() == d3_before_close:
                     await self._run_reminder_job(guild, target_month, kind="3d")
                 elif now.date() == d1_before_close:
@@ -924,7 +924,7 @@ class SubscriptionsCog(commands.Cog):
                 await self._run_monthly_midnight_revoke_job(guild, target_month=now_mk)
 
             # --- Topcut prize reminders for CURRENT month ---
-            if cfg.dm_enabled and now.hour == 10 and now.minute < 5:
+            if cfg.dm_enabled and now.hour >= 10:
                 mk_current = now_mk
 
                 if now.date() == d5_before_close:
@@ -1487,7 +1487,15 @@ class SubscriptionsCog(commands.Cog):
             return
 
         cfg = self.cfg
-        targets, misses, cutoff_pts = await self._topcut_prize_reminder_targets(guild, mk=mk)
+        try:
+            targets, misses, cutoff_pts = await self._topcut_prize_reminder_targets(guild, mk=mk)
+        except Exception as e:
+            # Target computation failed AFTER claiming the job — release it so the
+            # next tick retries instead of skipping the reminder for the whole month.
+            with contextlib.suppress(Exception):
+                await subs_jobs.delete_one({"_id": job_id})
+            await self.log.error(f"[subs] Topcut-prize reminder ({mk} {kind}) target fetch failed, will retry: {type(e).__name__}: {e}")
+            return
 
         if misses:
             await self.log.info(f"[subs] Topcut-prize mapping misses ({mk} {kind}): " + ", ".join(misses[:20]))
@@ -1511,6 +1519,8 @@ class SubscriptionsCog(commands.Cog):
                 member = await resolve_member(guild, uid)
                 if not member or member.bot:
                     return
+                if not self._dm_opted_in(member):
+                    return
 
                 try:
                     emb = await self._build_topcut_prize_reminder_embed(
@@ -1523,7 +1533,10 @@ class SubscriptionsCog(commands.Cog):
                     )
                     await member.send(embed=emb, view=self._build_links_view())
                     sent += 1
-                except Exception:
+                except discord.Forbidden:
+                    return
+                except Exception as e:
+                    await self.log.warn(f"[subs] topcut-prize DM to {uid} failed: {type(e).__name__}: {e}")
                     return
 
                 if cfg.dm_sleep_seconds:
@@ -1621,10 +1634,12 @@ class SubscriptionsCog(commands.Cog):
 
         mk = month_key(now_dt)
         job_id = f"ecl-revoked-dm:{cfg.guild_id}:{int(member.id)}:{mk}"
-        with contextlib.suppress(Exception):
+        # Skip if this month's notice already went out (defensive against DB errors).
+        try:
             if await subs_jobs.find_one({"_id": job_id}):
                 return
-            await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
+        except Exception:
+            return
 
         emb = discord.Embed(
             title="⚠️ ECL access removed",
@@ -1644,8 +1659,13 @@ class SubscriptionsCog(commands.Cog):
         _apply_thumbnail(emb, cfg.embed_thumbnail_url)
 
         view = self._build_links_view()
-        with contextlib.suppress(Exception):
+        try:
             await member.send(embed=emb, view=view)
+        except Exception:
+            return  # send failed — don't record the marker, so it can retry later
+        # Record the dedup marker only AFTER a successful send.
+        with contextlib.suppress(Exception):
+            await subs_jobs.insert_one({"_id": job_id, "ran_at": datetime.now(timezone.utc)})
 
 
     async def _grant_top16(self, user_id: int, reason: str):
@@ -1689,25 +1709,33 @@ class SubscriptionsCog(commands.Cog):
             except Exception:
                 members = list(role.members)
 
-        # Build the raw target list (ineligible for target_month)
-        to_dm_all: list[discord.Member] = []
-        for m in members:
-            if m.bot:
-                continue
-            ok, _ = await self._eligibility(m, target_month, at=flip_at)
-            if not ok:
-                to_dm_all.append(m)
+        # Build the raw target list (ineligible for target_month). If any of this
+        # pre-send work throws after we claimed the job, release the token so the
+        # next tick retries instead of skipping the reminder for the whole month.
+        try:
+            to_dm_all: list[discord.Member] = []
+            for m in members:
+                if m.bot:
+                    continue
+                ok, _ = await self._eligibility(m, target_month, at=flip_at)
+                if not ok:
+                    to_dm_all.append(m)
 
-        # Opt-in gate: only DM members who opted in (if DM opt-in role is configured)
-        to_dm = [m for m in to_dm_all if self._dm_opted_in(m)]
-        skipped_optout = len(to_dm_all) - len(to_dm)
+            # Opt-in gate: only DM members who opted in (if DM opt-in role is configured)
+            to_dm = [m for m in to_dm_all if self._dm_opted_in(m)]
+            skipped_optout = len(to_dm_all) - len(to_dm)
 
-        count = await self._count_registered_for_month(guild, target_month)
-        emb = await self._build_reminder_embed(
-            kind=kind,
-            target_month=target_month,
-            registered_count=count,
-        )
+            count = await self._count_registered_for_month(guild, target_month)
+            emb = await self._build_reminder_embed(
+                kind=kind,
+                target_month=target_month,
+                registered_count=count,
+            )
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                await subs_jobs.delete_one({"_id": job_id})
+            await self.log.error(f"[subs] Reminder '{kind}' for {target_month} prep failed, will retry: {type(e).__name__}: {e}")
+            return
 
         await self._log(
             f"[subs] Reminder '{kind}' for {target_month}: "
@@ -1724,8 +1752,10 @@ class SubscriptionsCog(commands.Cog):
                 try:
                     await member.send(embed=emb, view=self._build_links_view())
                     sent += 1
-                except Exception:
+                except discord.Forbidden:
                     pass
+                except Exception as e:
+                    await self.log.warn(f"[subs] reminder DM to {member.id} failed: {type(e).__name__}: {e}")
                 if cfg.dm_sleep_seconds:
                     await asyncio.sleep(cfg.dm_sleep_seconds)
 
