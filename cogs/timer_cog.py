@@ -4,6 +4,7 @@ import re
 import asyncio
 import imageio_ffmpeg
 import contextlib
+from types import SimpleNamespace
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -20,6 +21,7 @@ from utils.persistence import (
 )
 from utils.logger import log_sync, log_ok, log_warn, log_error, log_debug
 from utils.mod_check import is_mod
+from utils.topdeck_identity import build_row_index, find_row_in_index
 
 # Import from timer submodule
 from .timer import (
@@ -28,8 +30,6 @@ from .timer import (
     ts,
     month_start_utc as _month_start_utc,
     make_timer_id,
-    norm_handle as _norm_handle,
-    norm_member_handles as _norm_member_handles,
     same_channel as _same_channel,
     voice_prereqs_ok as _voice_prereqs_ok,
     ffmpeg_src as _ffmpeg_src,
@@ -643,9 +643,9 @@ class ECLTimerCog(commands.Cog):
     ) -> Optional[bool]:
         """
         Returns:
-        True  -> verified pod player
-        False -> verified NOT a pod player
-        None  -> couldn't resolve pod (TopDeck mismatch / fetch error)
+        True  -> verified pod player (matched by Discord ID, handle, or name)
+        False -> pod matched, but caller is not one of its entrants (spectator/judge)
+        None  -> couldn't resolve pod (TopDeck mismatch / fetch error / bracket unset)
         """
         try:
             pod = await self.topdeck_tagger.match_vc_to_pod(vc, _non_bot_members(vc))
@@ -656,9 +656,22 @@ class ECLTimerCog(commands.Cog):
         if not pod:
             return None
 
-        pod_handles = {h for h in (getattr(pod, "entrant_discords_norm", []) or []) if h}
-        caller_handles = _norm_member_handles(member)
-        return bool(pod_handles.intersection(caller_handles))
+        # Robust identity match (Discord ID > handle > accent-stripped name),
+        # reusing utils.topdeck_identity — the same matcher the rest of the bot
+        # uses. The old set-intersection rejected players whose handle contains
+        # non-ASCII chars (e.g. "João": pod side normalizes to "joo" via
+        # normalize_topdeck_discord, but the member side kept "joão" via
+        # helpers.norm_handle/isalnum), so a real pod player was misread as a
+        # spectator. build_row_index normalizes both sides identically.
+        entrant_rows = [
+            SimpleNamespace(discord=str(d or ""), name=str(n or ""))
+            for d, n in zip(
+                getattr(pod, "entrant_discords", []) or [],
+                getattr(pod, "entrant_names", []) or [],
+            )
+        ]
+        match = find_row_in_index(build_row_index(entrant_rows), member)
+        return match is not None
 
 
 
@@ -1240,16 +1253,13 @@ class ECLTimerCog(commands.Cog):
                 return
 
             if is_player is None:
-                # Fallback: if we can't verify TopDeck pod, only the timer starter can control
-                owner_id = self._timer_owner_id(timer_id)
-                if owner_id is not None and owner_id != member.id:
-                    await safe_ctx_followup(
-                        ctx,
-                        "I couldn't verify the TopDeck pod for this table right now. "
-                        "Only the timer starter (or a mod) can pause it.",
-                        ephemeral=True,
-                    )
-                    return
+                # Couldn't verify the pod (TopDeck unreachable, game already
+                # reported/closed, or bracket unset). Don't lock out the table —
+                # the caller already passed the in-VC check above, so allow it.
+                log_sync(
+                    f"[pausetimer] TopDeck pod unverified for {timer_id}; "
+                    f"allowing in-VC caller {member.id}"
+                )
 
 
         await self._cancel_tasks(timer_id)
@@ -1396,16 +1406,13 @@ class ECLTimerCog(commands.Cog):
                 return
 
             if is_player is None:
-                # Fallback: if we can't verify TopDeck pod, only the timer starter can control
-                owner_id = self._timer_owner_id(timer_id)
-                if owner_id is not None and owner_id != member.id:
-                    await safe_ctx_followup(
-                        ctx,
-                        "I couldn't verify the TopDeck pod for this table right now. "
-                        "Only the timer starter (or a mod) can resume it.",
-                        ephemeral=True,
-                    )
-                    return
+                # Couldn't verify the pod (TopDeck unreachable, game already
+                # reported/closed, or bracket unset). Don't lock out the table —
+                # the caller already passed the in-VC check above, so allow it.
+                log_sync(
+                    f"[resumetimer] TopDeck pod unverified for {timer_id}; "
+                    f"allowing in-VC caller {member.id}"
+                )
 
 
         paused = self.paused_timers.pop(timer_id)
