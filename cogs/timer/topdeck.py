@@ -294,7 +294,7 @@ class TopDeckTagger:
                 if pod_image_url:
                     embed.set_thumbnail(url=pod_image_url)
                 pod_type_label = treasure.get("pod_type", "treasure")
-                embed.set_footer(text=f"ECL • {pod_type_label.replace('_', ' ').title()} Treasure Pod")
+                embed.set_footer(text=f"DragonShield ECL • {pod_type_label.replace('_', ' ').title()} Treasure Pod")
 
                 content = mentions if mentions else None
                 await channel.send(content=content, embed=embed)

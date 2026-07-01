@@ -1090,7 +1090,7 @@ class ECLTimerCog(commands.Cog):
 
         if caller_vc is None:
             await safe_ctx_respond(ctx,
-                f"You must be in **{voice_channel.name}** to start a timer for that room "
+                f"You must be in **{voice_channel.name}** to start a timer for that table "
                 f"(you're not in any voice channel).",
                 ephemeral=True,
             )
@@ -1098,7 +1098,7 @@ class ECLTimerCog(commands.Cog):
 
         if caller_vc.id != voice_channel.id:
             await safe_ctx_respond(ctx,
-                f"You must be in **{voice_channel.name}** to start a timer for that room "
+                f"You must be in **{voice_channel.name}** to start a timer for that table "
                 f"(you're currently in **{caller_vc.name}**).",
                 ephemeral=True,
             )
@@ -1111,7 +1111,7 @@ class ECLTimerCog(commands.Cog):
         if len(non_bot) < 3 and not is_mod:
             await safe_ctx_respond(ctx,
                 f"Cannot start a timer for **{voice_channel.name}**: "
-                f"need at least 3 players in the channel (currently {len(non_bot)}). ",
+                f"need at least 3 players at the table (currently {len(non_bot)}). ",
                 ephemeral=True,
             )
             return
@@ -1209,7 +1209,7 @@ class ECLTimerCog(commands.Cog):
         description="Pauses the current timer for a given ECL game.",
         guild_ids=[GUILD_ID] if GUILD_ID else None,
     )
-    async def pausetimer(self, ctx: discord.ApplicationContext, game: int = Option(int, "...", min_value=1)):
+    async def pausetimer(self, ctx: discord.ApplicationContext, game: int = Option(int, "Game number (e.g. 1 for 'ECL Game 1')", min_value=1)):
         if ctx.guild is None:
             await safe_ctx_respond(ctx, "This command can only be used in a server.", ephemeral=True)
             return

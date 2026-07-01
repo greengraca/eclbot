@@ -61,7 +61,7 @@ def build_reminder_embed(
         inline=False,
     )
 
-    emb.set_footer(text="ECL • If you're having any issues please open a ticket !")
+    emb.set_footer(text="DragonShield ECL • If you're having any issues please open a ticket!")
     _apply_thumbnail(emb, embed_thumbnail_url)
 
     return emb
@@ -120,8 +120,9 @@ def build_flip_mods_embed(
     emb.add_field(
         name="2) Automated",
         value=(
-            "Bracket ID swap, channel rename, and joinpost are **automated**.\n"
-            "Verify the next month's config was set in the **dashboard Settings**."
+            "Bracket ID swap is **automated** (from the dashboard config).\n"
+            "Verify the next month's config was set in the **dashboard Settings**.\n"
+            "The #join-the-league post is static now — no monthly repost needed."
         ),
         inline=False,
     )
@@ -134,7 +135,7 @@ def build_flip_mods_embed(
     emb.add_field(name="Free-entry roles (names)", value=roles_value, inline=False)
 
     _apply_thumbnail(emb, embed_thumbnail_url)
-    emb.set_footer(text="ECL • Mods month flip checklist")
+    emb.set_footer(text="DragonShield ECL • Mods month flip checklist")
     return emb
 
 
@@ -181,7 +182,7 @@ def build_topcut_prize_reminder_embed(
         description=desc,
         color=_get_color(embed_color),
     )
-    emb.set_footer(text="ECL • Prize eligibility reminder")
+    emb.set_footer(text="DragonShield ECL • Prize eligibility reminder")
     _apply_thumbnail(emb, embed_thumbnail_url)
 
     return emb

@@ -36,6 +36,10 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+# Timer message refresh cadence (mirrors timer_cog's TIMER_UPDATE_INTERVAL_MINUTES).
+TIMER_UPDATE_INTERVAL_MINUTES: float = env_float("TIMER_UPDATE_INTERVAL_MINUTES", 5.0)
+
+
 # ---------------- time helpers ----------------
 
 def now_utc() -> datetime:
@@ -245,7 +249,7 @@ def build_timer_embed(
             f"```{bar}```"
             f"\nMain time ends <t:{end_ts_main}:R> · Draw <t:{end_ts_final}:R>"
         )
-        embed.set_footer(text="Updates every 5 min · Use /checktimer or timestamps for exact time")
+        embed.set_footer(text=f"Updates every {int(TIMER_UPDATE_INTERVAL_MINUTES)} min · Use /checktimer or timestamps for exact time")
 
     elif phase == "extra":
         extra_remaining = remaining_total
@@ -262,12 +266,12 @@ def build_timer_embed(
             f"the active player's turn. Good luck!\n```{bar}```"
             f"\nDraw <t:{end_ts_final}:R>"
         )
-        embed.set_footer(text="Updates every 5 min · Use /checktimer or timestamps for exact time")
+        embed.set_footer(text=f"Updates every {int(TIMER_UPDATE_INTERVAL_MINUTES)} min · Use /checktimer or timestamps for exact time")
 
     elif phase == "draw":
         embed.description = (
             f"```{bar}```\n"
-            "If no one won until now, the game is a draw. Well Played."
+            "If no one has won by now, the game is a draw. Well played!"
         )
 
     elif phase == "paused":

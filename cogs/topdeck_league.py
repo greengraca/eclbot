@@ -183,7 +183,7 @@ class TopdeckLeagueCog(commands.Cog):
         if row_for_author:
             if top5:
                 threshold_games = top5[-1].games
-                games_diff = threshold_games - row_for_author.games + 1
+                games_diff = threshold_games - row_for_author.games
             else:
                 threshold_games = 0
                 games_diff = 0
@@ -214,7 +214,7 @@ class TopdeckLeagueCog(commands.Cog):
 
     @commands.slash_command(
         name="top16",
-        description="Show Top 16 qualified players (>= 10 games).",
+        description="Show the Top 16 qualified players.",
         guild_ids=[GUILD_ID] if GUILD_ID else None,
     )
     async def top16(self, ctx: discord.ApplicationContext):
@@ -405,13 +405,13 @@ class TopdeckLeagueCog(commands.Cog):
         # ---- Step 4: public Top 16 ----
         if not qualified_top16:
             await _safe_followup_send(
-                "There are no players with at least 10 games in this bracket yet.",
+                f"There are no players with at least {cfg.top16_min_total_games} games in this bracket yet.",
                 ephemeral=False,
             )
         else:
             embed = discord.Embed(
                 title="Top 16 \u2014 Qualified Players",
-                description="Players with **>= 10 games** in the current bracket.",
+                description=f"Players with **>= {cfg.top16_min_total_games} games** in the current bracket.",
             )
             index = await _get_member_index(ctx.guild)
 

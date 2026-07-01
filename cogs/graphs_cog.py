@@ -126,7 +126,7 @@ class GraphsCog(commands.Cog):
             await safe_ctx_followup(
                 ctx,
                 f"I couldn't find a TopDeck profile for **{target.display_name}**. "
-                "Make sure your TopDeck discord field contains your Discord ID or username.",
+                "Make sure the player's TopDeck discord field contains their Discord ID or username.",
                 ephemeral=True,
             )
             return

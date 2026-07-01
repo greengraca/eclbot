@@ -224,7 +224,7 @@ class DebugCog(commands.Cog):
                 td_name = str(getattr(row, "name", "") or "").strip() if row else ""
                 if not td_name:
                     td_name = m.display_name
-                lines.append(f"**{i:02d}.** {m.mention} — {td_name} - {pts} - {games} games")
+                lines.append(f"**{i:02d}.** {m.mention} — {td_name} — {pts} pts — {games} games")
             
             # Now chunk and add fields AFTER building all lines
             chunks = _chunk_lines_for_embed(lines, limit=1024)
@@ -244,10 +244,14 @@ class DebugCog(commands.Cog):
         # Show config requirements (same as subscriptions logic)
         try:
             req_total = int(getattr(cfg, "top16_min_total_games", 0) or 0)
-            req_online = int(getattr(cfg, "top16_min_online_games", 0) or 0)
+            req_after_day = int(getattr(cfg, "top16_recency_after_day", 0) or 0)
+            req_no_recency = int(getattr(cfg, "top16_min_online_games_no_recency", 0) or 0)
             emb.add_field(
                 name="Requirements used",
-                value=f"min_total_games={req_total} • min_online_games={req_online} • eligibility checked at close time",
+                value=(
+                    f"min_total_games={req_total} • recent game after day {req_after_day} "
+                    f"(unless ≥ {req_no_recency} games) • eligibility checked at close time"
+                ),
                 inline=False,
             )
         except Exception:

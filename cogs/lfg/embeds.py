@@ -42,7 +42,7 @@ def build_lobby_embed(
 ) -> discord.Embed:
     remaining = lobby.remaining_slots()
     if remaining <= 0:
-        title = "Waiting for players to join..."
+        title = "Pod full — creating your SpellTable game…"
     elif remaining == 1:
         title = "Waiting for 1 more player to join..."
     else:
@@ -86,7 +86,7 @@ def build_lobby_embed(
         if lobby.elo_mode:
             pts = getattr(lobby, "player_pts", {}).get(uid)
             if pts is not None:
-                pts_suffix = f" - {int(pts)}"
+                pts_suffix = f" (**{int(pts)} pts**)"
 
         member = guild.get_member(uid)
         if member:

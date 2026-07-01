@@ -280,7 +280,7 @@ class StatsCog(commands.Cog):
         # ---- TopDeck row details ----
         if not row:
             hint = "I couldn't find a TopDeck row for this Discord user.\n"
-            hint += "If your TopDeck `discord` field contains your Discord ID/mention, mapping will be perfect."
+            hint += "If the player's TopDeck `discord` field contains their Discord ID/mention, mapping will be perfect."
             if caller_is_mod and match is not None:
                 hint += f"\nMatch attempt: conf={match.confidence} key={match.matched_key!r} ({match.detail})"
             emb.add_field(name="TopDeck", value=hint, inline=False)
@@ -366,9 +366,9 @@ class StatsCog(commands.Cog):
 
         all_eligible = meets_total and in_top16_window and meets_recency
         if all_eligible:
-            elig_lines.append("\U0001f7e2 **You are on the Top cut this month**")
+            elig_lines.append("\U0001f7e2 **On the Top cut this month**")
         else:
-            elig_lines.append("\U0001f534 **You are not eligible for Top cut this month**")
+            elig_lines.append("\U0001f534 **Not eligible for Top cut this month**")
 
         emb.add_field(name="\U0001f3c5 Top16 Eligibility", value="\n".join(elig_lines), inline=False)
 

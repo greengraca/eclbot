@@ -3,10 +3,10 @@
 Join-league channel helper.
 
 Goal:
-- Post a "Join <target month>" embed in #join-<month>-league with Ko-fi + Patreon buttons.
+- Post a generic "Join the League" embed (Ko-fi + Patreon buttons) once in #join-the-league.
 - Post a second small embed with an "Enter" button.
-- When a user clicks "Enter", the bot checks eligibility (roles + DB entitlements) for target_month.
-  If eligible, it grants the ECL role and DMs them to read #rules and #get-started.
+- When a user clicks "Enter", the bot checks eligibility (roles + DB entitlements) for the
+  current month. If eligible, it grants the ECL role and DMs them to read the rules / get-started.
 
 This is intentionally separate from subscriptions_cog.py to keep that file smaller.
 """
@@ -155,8 +155,9 @@ class JoinLeagueCog(commands.Cog):
         if config and config.get("bracket_id"):
             return current  # Config exists for current month, use it
 
-        # Fall back to the static config
-        return self.cfg.target_month
+        # Fall back to the current month (never a startup-frozen value, so a
+        # permanently-pinned join message always resolves the live month).
+        return month_key(now_lisbon())
 
     def _has_any_role_id(self, member: discord.Member, role_ids: Set[int]) -> bool:
         if not role_ids:
@@ -213,23 +214,28 @@ class JoinLeagueCog(commands.Cog):
             return False
         if role in member.roles:
             return False
-        with contextlib.suppress(Exception):
+        # add_roles doesn't refresh member.roles synchronously, so return the
+        # outcome of the API call rather than re-reading the (stale) cache —
+        # otherwise a genuine first-time grant looks like "already had it".
+        try:
             await member.add_roles(role, reason=reason)
-        return role in member.roles
+            return True
+        except Exception:
+            return False
 
     def _rules_mention(self, guild: discord.Guild) -> str:
         cfg = self.cfg
         if cfg.rules_channel_id:
             return f"<#{int(cfg.rules_channel_id)}>"
         ch = discord.utils.get(guild.text_channels, name="rules")
-        return ch.mention if ch else "#rules"
+        return ch.mention if ch else "the rules channel"
 
     def _get_started_mention(self, guild: discord.Guild) -> str:
         cfg = self.cfg
         if cfg.get_started_channel_id:
             return f"<#{int(cfg.get_started_channel_id)}>"
         ch = discord.utils.get(guild.text_channels, name="get-started")
-        return ch.mention if ch else "#get-started"
+        return ch.mention if ch else "the get-started channel"
 
     # -------------------- interactions --------------------
 
@@ -296,18 +302,20 @@ class JoinLeagueCog(commands.Cog):
 
     # -------------------- embed posting --------------------
 
-    async def post_join_embed(self, channel: discord.TextChannel, target_month: str) -> Tuple[discord.Message, discord.Message]:
-        """Post the join embeds to a channel. Called by /joinpost and by month-flip automation.
+    async def post_join_embed(self, channel: discord.TextChannel) -> Tuple[discord.Message, discord.Message]:
+        """Post the join embeds to a channel. Called by /joinpost.
+
+        The embed is generic (no month) so a single pinned post stays valid every
+        month — the Enter button resolves the current month at click time.
 
         Returns the two sent messages (links, enter).
         """
         cfg = self.cfg
-        nice_month = month_label(target_month)
 
         YELLOW = 0xF1C40F  # gold/yellow
 
         emb1 = discord.Embed(
-            title=f"🐉 Welcome to the DragonShield ECL — {nice_month}",
+            title="🐉 Welcome to the DragonShield ECL",
             description=(
                 "The **European cEDH League** is a competitive monthly league where you fight for:\n"
                 "• **One-of-a-kind ECL Champion Rings**\n"
@@ -365,10 +373,8 @@ class JoinLeagueCog(commands.Cog):
             await ctx.respond("This command can only be used in a server.", ephemeral=True)
             return
 
-        target_month = await self.get_target_month()
-
         try:
-            m1, m2 = await self.post_join_embed(ctx.channel, target_month)
+            m1, m2 = await self.post_join_embed(ctx.channel)
         except Exception as e:
             await ctx.respond(f"❌ Failed to post embeds: {type(e).__name__}: {e}", ephemeral=True)
             return

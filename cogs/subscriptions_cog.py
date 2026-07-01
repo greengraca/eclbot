@@ -832,11 +832,11 @@ class SubscriptionsCog(commands.Cog):
             title=f"✅ Free entry — {nice_month}",
             description=(
                 f"You have **free entry** for **{nice_month}** because you have: **{roles_txt}**.\n\n"
-                "If you lose that role, your free entry goes away."
+                "Your access is secured for this month."
             ),
             color=_get_color(cfg.embed_color),
         )
-        emb_free.set_footer(text="ECL • Free entry notice")
+        emb_free.set_footer(text="DragonShield ECL • Free entry notice")
         _apply_thumbnail(emb_free, cfg.embed_thumbnail_url)
         embeds_to_send.append(("5/5 • Free-entry role notice", emb_free, None))
         
@@ -942,7 +942,7 @@ class SubscriptionsCog(commands.Cog):
                             title="⚔️ /lfgelo is now available!",
                             description=(
                                 f"Elo-matched lobbies are unlocked for the rest of **{month_label(now_mk)}**.\n"
-                                "Use `/lfgelo` to queue into an elo-limited pod!"
+                                "Use `/lfgelo` to queue into an Elo-limited pod!"
                             ),
                             color=0x5865F2,
                         )
@@ -983,7 +983,9 @@ class SubscriptionsCog(commands.Cog):
                                 return
                             # Resolve mention
                             did = extract_discord_id(winner_discord_handle or "") if winner_discord_handle else None
-                            mention = f"<@{did}>" if did else (winner_discord_handle or winner_topdeck_uid or str(winner_entrant_id))
+                            # Never fall back to internal ids (TopDeck uid / entrant id) in a
+                            # public announcement — use the readable handle or a neutral word.
+                            mention = f"<@{did}>" if did else (winner_discord_handle or "a player")
                             pod_title = pod.get("pod_title", "Treasure Pod")
                             await ch.send(
                                 f"**{pod_title}** — Congrats {mention} for winning pod #{table}! "

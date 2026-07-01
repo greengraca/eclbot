@@ -85,7 +85,7 @@ class LeagueGraphsCog(commands.Cog):
         if chart.endswith("_alltime"):
             member = ctx.author
             if not isinstance(member, discord.Member) or not is_mod(member):
-                await ctx.respond("These charts are not yet available.", ephemeral=True)
+                await ctx.respond("These charts are mod-only.", ephemeral=True)
                 return
 
         await safe_ctx_defer(ctx, ephemeral=False, label="leaguegraphs")
