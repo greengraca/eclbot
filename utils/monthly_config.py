@@ -33,11 +33,16 @@ _cache: Dict[str, tuple[Optional[Dict[str, Any]], float]] = {}
 _mostgames_cache: Dict[str, tuple[str, float]] = {}
 _CACHE_TTL = 60  # seconds
 
+# Months we've already warned about falling back to the env bracket (dedup — these
+# getters are called very frequently, so warn at most once per month).
+_warned_fallback: set = set()
+
 
 def clear_cache() -> None:
     """Clear the in-memory config cache (call after writes)."""
     _cache.clear()
     _mostgames_cache.clear()
+    _warned_fallback.clear()
 
 
 def _now_lisbon() -> datetime:
@@ -92,6 +97,15 @@ async def get_bracket_id(month: Optional[str] = None) -> str:
     if config and config.get("bracket_id"):
         return config["bracket_id"]
 
+    # No DB config for this month — the static env fallback is almost certainly the
+    # wrong (stale) bracket. Warn once per month so an unconfigured month is loud.
+    if month not in _warned_fallback:
+        _warned_fallback.add(month)
+        log_warn(
+            f"[monthly_config] No bracket_id configured for {month}; using "
+            f"TOPDECK_BRACKET_ID env fallback ({_ENV_BRACKET_ID or 'unset'!r}). "
+            "Set it in the dashboard."
+        )
     return _ENV_BRACKET_ID
 
 
@@ -110,6 +124,13 @@ async def get_next_month_bracket_id() -> str:
     if config and config.get("bracket_id"):
         return config["bracket_id"]
 
+    if next_month not in _warned_fallback:
+        _warned_fallback.add(next_month)
+        log_warn(
+            f"[monthly_config] No bracket_id configured for {next_month} (next month); "
+            f"using NEXT_MONTH_TOPDECK_BRACKET_ID env fallback "
+            f"({_ENV_NEXT_BRACKET_ID or 'unset'!r}). Set it in the dashboard."
+        )
     return _ENV_NEXT_BRACKET_ID
 
 
