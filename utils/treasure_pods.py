@@ -256,6 +256,119 @@ def generate_all_treasure_tables(
     return result
 
 
+def _spread_positions(start: int, end: int, count: int, exclude: set) -> List[int]:
+    """Evenly spread ``count`` table numbers across ``[start, end]`` with jitter.
+
+    Positions sit at even ideal offsets (like the initial schedule) nudged by
+    ±1/3 of the spacing, skipping any table already in ``exclude``. ``exclude``
+    is updated in place with the chosen tables.
+    """
+    if count <= 0:
+        return []
+    if end <= start:
+        end = start + count
+
+    step = (end - start) / (count + 1)
+    jitter = step / 3
+
+    out: List[int] = []
+    for i in range(1, count + 1):
+        ideal = start + step * i
+        low = max(start, int(ideal - jitter))
+        high = min(end, int(ideal + jitter))
+        if high < low:
+            low = high = max(start, min(end, int(ideal)))
+
+        candidate: Optional[int] = None
+        for _ in range(50):
+            pick = random.randint(low, high)
+            if pick not in exclude:
+                candidate = pick
+                break
+        if candidate is None:
+            # Jitter window exhausted — scan outward for any free table so we
+            # never emit a duplicate (two pods on one table = only one fires).
+            for pick in range(low, end + 1):
+                if pick not in exclude:
+                    candidate = pick
+                    break
+        if candidate is None:
+            for pick in range(start, end + 1):
+                if pick not in exclude:
+                    candidate = pick
+                    break
+        if candidate is None:
+            # Whole window taken; extend just past it.
+            candidate = (max(out) if out else end) + 1
+            while candidate in exclude:
+                candidate += 1
+
+        out.append(candidate)
+        exclude.add(candidate)
+
+    return sorted(out)
+
+
+def _min_gap_for_days(days_until_close: float) -> int:
+    """Target minimum tables between redistributed pods (tighter near close)."""
+    if days_until_close <= 3:
+        return 2
+    if days_until_close <= 5:
+        return 3
+    if days_until_close <= 11:
+        return 6
+    return 10
+
+
+def compute_redistribution_tables(
+    count: int,
+    current_max_table: int,
+    estimated_total: int,
+    days_until_close: float,
+    exclude: set,
+    mode: str = "forward",
+) -> List[int]:
+    """Pick ``count`` new table numbers for pods that must be re-placed.
+
+    The window WIDTH scales with ``count`` so many pods are never crammed into a
+    single narrow band right behind the current table (which made pods fire
+    one-after-another). Placement is spread evenly across that window.
+
+    ``mode="forward"`` — skipped pods (already behind the table counter): spread
+    across the tables the league still has left to play, up to ~92% of the month
+    estimate; tightened only when little of the month remains.
+
+    ``mode="pull_in"`` — pods scheduled too far ahead near month-end: pull into
+    the near-term reach so they still fire before the league closes.
+
+    ``exclude`` is updated in place with the chosen tables.
+    """
+    if count <= 0:
+        return []
+
+    start = current_max_table + 1
+    min_gap = _min_gap_for_days(days_until_close)
+
+    if mode == "pull_in":
+        # Near-term reach based on time left, widened to fit every pod.
+        if days_until_close <= 3:
+            reach = 5
+        elif days_until_close <= 5:
+            reach = 15
+        else:
+            reach = 30
+        end = start + max(reach, count * min_gap)
+    else:  # "forward"
+        # Spread across the remaining natural schedule; only tighten if there's
+        # not enough of the month left to hold every pod at min spacing.
+        natural_end = int(max(estimated_total, 50) * 0.92)
+        end = natural_end
+        if end - start < count * min_gap:
+            end = start + count * min_gap
+
+    return _spread_positions(start, end, count, exclude)
+
+
 class TreasurePodManager:
     """
     Manages treasure pod schedule and checking.
@@ -645,6 +758,7 @@ class TreasurePodManager:
             return False
 
         fired = set(schedule.get("fired_tables", []))
+        estimated_total = schedule.get("estimated_total", 250)
 
         # Collect ALL tables across all types (for collision avoidance)
         all_tables: set[int] = set()
@@ -661,39 +775,25 @@ class TreasurePodManager:
             any_skipped = True
             remaining = [t for t in tables if t not in skipped]
 
-            # Determine max distance based on days until close
-            if days_until_close <= 3:
-                max_distance = 5
-            elif days_until_close <= 5:
-                max_distance = 15
-            else:
-                max_distance = 30
-
-            # Generate replacement table numbers in [current_max_table+1, current_max_table+max_distance]
-            min_new = current_max_table + 1
-            max_new = current_max_table + max_distance
-            replacements: List[int] = []
-
-            for old_table in skipped:
-                for _ in range(50):
-                    candidate = random.randint(min_new, max_new)
-                    if candidate not in all_tables and candidate not in replacements:
-                        break
-                else:
-                    # Fallback: pick sequentially
-                    for fallback in range(min_new, max_new + 1):
-                        if fallback not in all_tables and fallback not in replacements:
-                            candidate = fallback
-                            break
-                replacements.append(candidate)
-
-            all_tables.update(replacements)
+            # Re-spread the skipped pods across the tables the league still has
+            # left to play, instead of cramming them into a fixed window right
+            # behind the current table (which makes pods fire back-to-back).
+            # (Updates all_tables in place to avoid cross-type collisions.)
+            replacements = compute_redistribution_tables(
+                count=len(skipped),
+                current_max_table=current_max_table,
+                estimated_total=estimated_total,
+                days_until_close=days_until_close,
+                exclude=all_tables,
+                mode="forward",
+            )
             table_map[type_id] = sorted(remaining + replacements)
 
             skipped_str = ", ".join(f"#{t}" for t in skipped)
+            new_str = ", ".join(f"#{t}" for t in replacements)
             log_ok(
                 f"[treasure] Redistributed {len(skipped)} skipped {type_id} pod(s): "
-                f"{skipped_str} (max_table={current_max_table})"
+                f"{skipped_str} -> {new_str} (max_table={current_max_table})"
             )
 
         if not any_skipped:
@@ -765,32 +865,25 @@ class TreasurePodManager:
         if distance <= max_distance:
             return False
 
-        # Need to recalculate! Redistribute each type's unfired tables independently
-        range_start = current_max_table + 1
-        range_end = current_max_table + max_distance
-
+        # Need to recalculate! Pull each type's unfired pods into the near-term
+        # window and spread them evenly, so they don't fire back-to-back.
+        estimated_total = schedule.get("estimated_total", 250)
         used: set[int] = set(fired)  # Don't reuse fired tables
         new_map: Dict[str, List[int]] = {}
 
         for type_id, tables in table_map.items():
             type_fired = [t for t in tables if t in fired]
             type_unfired = [t for t in tables if t not in fired]
-            num_unfired = len(type_unfired)
 
-            new_tables: List[int] = []
-            for _ in range(num_unfired):
-                for _ in range(50):
-                    candidate = random.randint(range_start, range_end)
-                    if candidate not in used and candidate not in new_tables:
-                        new_tables.append(candidate)
-                        break
-                else:
-                    for fallback in range(range_start, range_end + 1):
-                        if fallback not in used and fallback not in new_tables:
-                            new_tables.append(fallback)
-                            break
-
-            used.update(new_tables)
+            # (Updates `used` in place to avoid cross-type collisions.)
+            new_tables = compute_redistribution_tables(
+                count=len(type_unfired),
+                current_max_table=current_max_table,
+                estimated_total=estimated_total,
+                days_until_close=days_until_close,
+                exclude=used,
+                mode="pull_in",
+            )
             new_map[type_id] = sorted(type_fired + new_tables)
 
         total_unfired = sum(
