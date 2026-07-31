@@ -8,6 +8,7 @@ from typing import List, Dict, Optional
 
 from db import online_games
 from utils.logger import log_warn
+from utils.topdeck_normalize import MS_THRESHOLD, normalize_ts
 
 
 @dataclass
@@ -59,6 +60,9 @@ async def upsert_record(bracket_id: str, year: int, month: int, record: OnlineGa
     }
 
     doc = asdict(record)
+    # Single choke point for the start_ts unit contract: callers may hand us raw
+    # TopDeck values (milliseconds) or already-normalized seconds.
+    doc["start_ts"] = normalize_ts(doc.get("start_ts"))
     doc.update({"bracket_id": bid, "year": y, "month": m, "updated_at": datetime.now(timezone.utc)})
 
     await online_games.update_one(filt, {"$set": doc}, upsert=True)
@@ -164,14 +168,22 @@ async def has_recent_game_by_topdeck_uid(
         "bracket_id": str(bracket_id),
         "year": int(year),
         "month": int(month),
-        "start_ts": {"$gte": cutoff_ts},
     }
     if online_only:
         match["online"] = True
-    
-    # Find all games after the cutoff and collect which UIDs participated
+
+    # Find all games after the cutoff and collect which UIDs participated.
+    # start_ts is normalized in-pipeline rather than matched directly: rows
+    # written before the unit fix may still hold raw milliseconds, and those
+    # compare greater than any seconds cutoff — passing everyone in the pod.
     pipeline = [
         {"$match": match},
+        {"$addFields": {"_ts_norm": {"$cond": [
+            {"$gt": ["$start_ts", MS_THRESHOLD]},
+            {"$divide": ["$start_ts", 1000.0]},
+            "$start_ts",
+        ]}}},
+        {"$match": {"_ts_norm": {"$gte": cutoff_ts}}},
         {"$unwind": "$topdeck_uids"},
         {"$group": {"_id": "$topdeck_uids"}},
     ]

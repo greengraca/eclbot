@@ -1,8 +1,30 @@
 # utils/topdeck_normalize.py
-"""Shared Discord handle normalization for TopDeck data."""
+"""Shared normalization helpers for TopDeck data (Discord handles, timestamps)."""
 from __future__ import annotations
 
 import re
+from typing import Optional
+
+# TopDeck emits Start/End as either seconds or milliseconds depending on the
+# endpoint. Anything above this is milliseconds (1e10 s == year 2286).
+MS_THRESHOLD = 10_000_000_000
+
+
+def normalize_ts(ts) -> Optional[float]:
+    """Normalize a TopDeck timestamp to **seconds**, accepting seconds or milliseconds.
+
+    Every persisted `start_ts` must go through this. A raw millisecond value
+    (~1.78e12) compares greater than any seconds-based cutoff (~1.78e9), which
+    silently makes time-window filters — notably the Top 16 "game after day N"
+    recency check — match rows they should exclude.
+    """
+    if ts is None:
+        return None
+    try:
+        x = float(ts)
+    except (TypeError, ValueError):
+        return None
+    return x / 1000.0 if x > MS_THRESHOLD else x
 
 
 def norm_handle(s: str) -> str:

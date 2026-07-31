@@ -292,6 +292,12 @@ class TopdeckLeagueCog(commands.Cog):
             except Exception as e:
                 log_warn(f"[topdeck] /top16 recency check error: {type(e).__name__}: {e}")
 
+        log_sync(
+            f"[topdeck] Recency gate: active={recency_active} (month={ms.year}-{ms.month:02d}, "
+            f"after_day={recency_after_day}, bracket={bracket_id}) • band={min_total}-{no_recency_threshold - 1} games "
+            f"• checked={len(uids_need_recency)} • with_recent_game={sum(1 for v in recency_check.values() if v)}"
+        )
+
         qualified_candidates: List[PlayerRow] = []
         failed_recency: List[PlayerRow] = []
         for r in active_by_games:
@@ -308,6 +314,21 @@ class TopdeckLeagueCog(commands.Cog):
 
         log_sync(f"[topdeck] Players qualified: {len(qualified_candidates)}.")
         log_sync(f"[topdeck] Players failed recency: {len(failed_recency)}.")
+        if failed_recency:
+            log_sync(
+                "[topdeck] Failed recency: "
+                + ", ".join(f"{r.name}({r.games}g)" for r in failed_recency[:20])
+            )
+        # Anyone shown in the cut on the auto-pass rule rather than a recent game
+        auto_passed = [
+            r for r in qualified_candidates[:16]
+            if r.games >= no_recency_threshold and not recency_check.get((r.uid or "").strip(), False)
+        ]
+        if auto_passed:
+            log_sync(
+                f"[topdeck] In cut via >={no_recency_threshold}-game auto-pass (no recent game): "
+                + ", ".join(f"{r.name}({r.games}g)" for r in auto_passed[:20])
+            )
 
         qualified_top16: List[PlayerRow] = qualified_candidates[:16]
 

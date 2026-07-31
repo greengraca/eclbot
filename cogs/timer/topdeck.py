@@ -20,6 +20,7 @@ from utils.logger import log_sync, log_ok, log_warn, log_debug
 from utils.treasure_pods import TreasurePodManager
 from utils.dates import month_key
 from utils.monthly_config import get_bracket_id
+from utils.topdeck_normalize import normalize_ts
 
 from .helpers import norm_member_handles, month_start_utc, game_color
 
@@ -173,7 +174,9 @@ class TopDeckTagger:
 
         season = int(getattr(match, "season", 0) or 0)
         tid = int(getattr(match, "table", 0) or 0)
-        start_ts = float(getattr(match, "start", 0.0) or 0.0)
+        # InProgressPod.start is the raw TopDeck value (milliseconds on the live
+        # endpoint); online_games.start_ts is always seconds.
+        start_ts = normalize_ts(getattr(match, "start", None)) or 0.0
 
         entrant_ids: list[int] = []
         for x in (getattr(match, "entrant_ids", None) or []):
