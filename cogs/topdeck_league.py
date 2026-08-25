@@ -6,8 +6,8 @@ from typing import List, Optional, Tuple, Dict
 import discord
 from discord.ext import commands
 
-from topdeck_fetch import get_league_rows_cached, PlayerRow
-from online_games_store import has_recent_game_by_topdeck_uid, is_recency_active
+from topdeck_fetch import get_league_rows_cached, has_recent_game_from_topdeck, PlayerRow
+from online_games_store import is_recency_active
 from utils.top16_eligibility import is_top16_eligible, needs_recency_check
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
@@ -285,9 +285,9 @@ class TopdeckLeagueCog(commands.Cog):
         recency_check: Dict[str, bool] = {}
         if uids_need_recency:
             try:
-                recency_check = await has_recent_game_by_topdeck_uid(
-                    bracket_id, ms.year, ms.month, uids_need_recency,
-                    after_day=recency_after_day, online_only=False,
+                recency_check = await has_recent_game_from_topdeck(
+                    bracket_id, FIREBASE_ID_TOKEN, ms.year, ms.month,
+                    uids_need_recency, after_day=recency_after_day,
                 )
             except Exception as e:
                 log_warn(f"[topdeck] /top16 recency check error: {type(e).__name__}: {e}")

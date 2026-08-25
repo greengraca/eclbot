@@ -22,8 +22,8 @@ import discord
 from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
 
-from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, PlayerRow
-from online_games_store import count_online_games_by_topdeck_uid, has_recent_game_by_topdeck_uid, is_recency_active
+from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, has_recent_game_from_topdeck, PlayerRow
+from online_games_store import count_online_games_by_topdeck_uid, is_recency_active
 from utils.top16_eligibility import is_top16_eligible, needs_recency_check
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
@@ -1217,9 +1217,9 @@ class SubscriptionsCog(commands.Cog):
         recency_check: dict[str, bool] = {}
         if uids_need_recency:
             try:
-                recency_check = await has_recent_game_by_topdeck_uid(
-                    bracket_id, year, month, uids_need_recency,
-                    after_day=recency_after_day, online_only=False,
+                recency_check = await has_recent_game_from_topdeck(
+                    bracket_id, FIREBASE_ID_TOKEN, year, month,
+                    uids_need_recency, after_day=recency_after_day,
                 )
             except Exception as e:
                 return ([], [f"recency_check error: {type(e).__name__}: {e}"])
@@ -1360,9 +1360,9 @@ class SubscriptionsCog(commands.Cog):
         recency_check: dict[str, bool] = {}
         if uids_need_recency:
             try:
-                recency_check = await has_recent_game_by_topdeck_uid(
-                    bracket_id, year, month, uids_need_recency,
-                    after_day=recency_after_day, online_only=False,
+                recency_check = await has_recent_game_from_topdeck(
+                    bracket_id, FIREBASE_ID_TOKEN, year, month,
+                    uids_need_recency, after_day=recency_after_day,
                 )
             except Exception as e:
                 return ([], [f"recency_check error: {type(e).__name__}: {e}"], 0)

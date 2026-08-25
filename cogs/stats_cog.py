@@ -20,9 +20,9 @@ import discord
 from discord.ext import commands
 from discord import Option
 
-from topdeck_fetch import get_league_rows_cached, PlayerRow
+from topdeck_fetch import get_league_rows_cached, has_recent_game_from_topdeck, PlayerRow
 from utils.topdeck_identity import find_row_for_member
-from online_games_store import has_recent_game_by_topdeck_uid, is_recency_active
+from online_games_store import is_recency_active
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
@@ -328,9 +328,9 @@ class StatsCog(commands.Cog):
                 year_i, month_i = int(y), int(m)
                 recency_active = is_recency_active(year_i, month_i, recency_after_day)
                 if recency_active:
-                    recency_map = await has_recent_game_by_topdeck_uid(
-                        bracket_id, year_i, month_i, [uid],
-                        after_day=recency_after_day, online_only=False,
+                    recency_map = await has_recent_game_from_topdeck(
+                        bracket_id, FIREBASE_ID_TOKEN, year_i, month_i, [uid],
+                        after_day=recency_after_day,
                     )
                     has_recent = recency_map.get(uid, False)
             except Exception as e:
