@@ -687,8 +687,11 @@ class TopdeckOnlineSyncCog(commands.Cog):
         self.bot = bot
         self._lock = asyncio.Lock()
 
-    async def cog_load(self) -> None:
-        """Start the auto-sync loop if enabled."""
+        # Started here rather than in a cog_load() hook: cog_load is discord.py's
+        # lifecycle method and py-cord never calls it, so the auto-sync loop was
+        # silently dead from the day it was added — /synconline only ever ran when
+        # someone invoked it by hand. Every other loop in this bot (see
+        # SubscriptionsCog) starts from __init__; before_loop waits for ready.
         if SYNCONLINE_AUTO_HOURS > 0:
             self.auto_sync_loop.change_interval(hours=SYNCONLINE_AUTO_HOURS)
             self.auto_sync_loop.start()
@@ -696,12 +699,12 @@ class TopdeckOnlineSyncCog(commands.Cog):
         else:
             _log("[online-sync] Auto-sync disabled (SYNCONLINE_AUTO_HOURS=0)")
 
-    async def cog_unload(self) -> None:
-        """Stop the auto-sync loop."""
+    def cog_unload(self) -> None:
+        """Stop the auto-sync loop. Sync, not async: py-cord calls this without awaiting."""
         if self.auto_sync_loop.is_running():
             self.auto_sync_loop.cancel()
 
-    @tasks.loop(hours=6)  # Default, overridden in cog_load
+    @tasks.loop(hours=6)  # Default, overridden in __init__
     async def auto_sync_loop(self):
         """Periodic auto-sync of online games."""
         if not GUILD_ID:
