@@ -135,7 +135,9 @@ class TopdeckLeagueCog(commands.Cog):
             )
             return
 
-        top5 = sorted(rows, key=lambda r: (-r.games, -r.pts))[:5]
+        # Dropped players are not raffle-eligible (matches stats_cog contender check)
+        eligible = [r for r in rows if not r.dropped]
+        top5 = sorted(eligible, key=lambda r: (-r.games, -r.pts))[:5]
 
         ts_int = _ts(fetched_at)
 
@@ -165,8 +167,7 @@ class TopdeckLeagueCog(commands.Cog):
             for i, r in enumerate(top5, start=1):
                 res = resolve_row_discord_id(r, index)
                 tag = f"<@{res.discord_id}>" if res.discord_id else "`(unmapped)`"
-                dropped_suffix = " *(dropped)*" if r.dropped else ""
-                lines.append(f"`#{i}` {tag} — {r.name} — **{r.games}** games{dropped_suffix}")
+                lines.append(f"`#{i}` {tag} — {r.name} — **{r.games}** games")
             
             embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
 
@@ -188,7 +189,9 @@ class TopdeckLeagueCog(commands.Cog):
                 threshold_games = 0
                 games_diff = 0
 
-            if not top5:
+            if row_for_author.dropped:
+                gap_line = "You've dropped from the bracket, so you're not eligible for the raffle."
+            elif not top5:
                 gap_line = "There isn't an eligible Top 5 yet."
             elif games_diff <= 0:
                 gap_line = "You're already in, or tied with, the eligible Top 5 by games. Congrats!"
