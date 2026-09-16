@@ -1004,6 +1004,11 @@ class SubscriptionsCog(commands.Cog):
                             on_winner=_announce_winner,
                         )
 
+                        # How much of the month has been played, so pod placement
+                        # can be judged against the pace it is actually running.
+                        month_start, _ = month_bounds(now_mk)
+                        days_elapsed = (now - month_start).total_seconds() / 86400.0
+
                         # Redistribute any treasure pods that were skipped
                         # (table number already passed without the bot timer firing)
                         await self._treasure_manager.redistribute_skipped_pods(
@@ -1011,17 +1016,21 @@ class SubscriptionsCog(commands.Cog):
                             month=now_mk,
                             current_max_table=current_max_table,
                             days_until_close=days_until_close,
+                            days_elapsed=days_elapsed,
                         )
 
-                        # Check if recalculation needed (if nearing month end)
-                        if days_until_close <= 11 and days_until_close > 0:
-                            await self._treasure_manager.check_and_recalculate_if_needed(
-                                guild_id=guild.id,
-                                month=now_mk,
-                                days_until_close=days_until_close,
-                                current_max_table=current_max_table,
-                                new_player_count=player_count,
-                            )
+                        # Checked all month, not just near the end: a pod above
+                        # where the month will finish is unreachable now, and
+                        # waiting for the month-end window to notice is what let
+                        # 2026-09 sit broken for eleven days.
+                        await self._treasure_manager.check_and_recalculate_if_needed(
+                            guild_id=guild.id,
+                            month=now_mk,
+                            days_until_close=days_until_close,
+                            current_max_table=current_max_table,
+                            new_player_count=player_count,
+                            days_elapsed=days_elapsed,
+                        )
                 except Exception as e:
                     await self.log.warn(f"[treasure] Check failed: {type(e).__name__}: {e}")
 

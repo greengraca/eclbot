@@ -19,8 +19,9 @@ import hashlib
 import json
 import os
 import random
+import statistics
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from cryptography.fernet import Fernet
 
@@ -31,9 +32,22 @@ from utils.logger import log_ok, log_warn
 # Env var for encryption key
 TREASURE_POD_SECRET = os.getenv("TREASURE_POD_SECRET", "").strip()
 
-# Games per player estimate (based on historical data)
-# December: 540/240 = 2.25, January: 315/96 = 3.28
+# Games per player estimate. Only a fallback now: used until there are enough
+# completed months to measure the real ratio (see tables_per_player_ratio).
 GAMES_PER_PLAYER_ESTIMATE = float(os.getenv("TREASURE_GAMES_PER_PLAYER", "3.5"))
+
+# How many completed months feed the tables-per-player ratio, and the band it is
+# held to. Observed 2026-02..2026-08: 3.00, 3.22, 3.37, 3.62, 3.78, 3.98, 4.53.
+TREASURE_RATIO_HISTORY_MONTHS = 3
+TREASURE_RATIO_MIN = 2.5
+TREASURE_RATIO_MAX = 4.5
+
+# Second halves of a month run slower than firsts (2026-08: 197 tables in days
+# 1-15, 161 after), so month-to-date pace is discounted when projecting forward.
+LATE_MONTH_PACE_FACTOR = 0.85
+
+# Days of the month needed before the pace is worth reading.
+PACE_MIN_DAYS_ELAPSED = 7.0
 
 # Number of treasure pods per month (legacy fallback)
 TREASURE_PODS_PER_MONTH = int(os.getenv("TREASURE_PODS_PER_MONTH", "5"))
@@ -151,12 +165,97 @@ def _encrypt_table_map(table_map: Dict[str, List[int]]) -> Optional[str]:
     return _encrypt_data(table_map)
 
 
-def estimate_total_tables(player_count: int) -> int:
-    """Estimate total tables for a month based on player count."""
+def tables_per_player_ratio(ratios: Optional[List[float]]) -> float:
+    """Tables-per-player to assume, from recent completed months.
+
+    Median rather than mean so one unusually busy month does not drag the whole
+    estimate up, clamped to a sane band, and falling back to the env constant
+    until at least two months are available.
+    """
+    usable = [float(r) for r in (ratios or []) if r and r > 0]
+    if len(usable) < 2:
+        return GAMES_PER_PLAYER_ESTIMATE
+    return max(TREASURE_RATIO_MIN, min(TREASURE_RATIO_MAX, statistics.median(usable)))
+
+
+def estimate_total_tables(player_count: int, ratios: Optional[List[float]] = None) -> int:
+    """Estimate a month's final table number before it has any pace of its own.
+
+    ``ratios`` are tables-per-player from recent completed months; without them
+    this falls back to the env constant.
+    """
     if player_count <= 0:
         return 100
-    estimated = int(player_count * GAMES_PER_PLAYER_ESTIMATE)
-    return max(estimated, 50)
+    return max(int(player_count * tables_per_player_ratio(ratios)), 50)
+
+
+def project_total_tables(
+    current_max_table: int,
+    days_elapsed: float,
+    days_until_close: float,
+    fallback: int,
+) -> int:
+    """Project a month's final table number from the pace it is actually running.
+
+    Player count barely predicts how many tables a month produces, but the
+    month's own pace does. Month-to-date rate is extrapolated to close and
+    discounted by LATE_MONTH_PACE_FACTOR. Returns ``fallback`` until enough of
+    the month has elapsed to read a rate.
+    """
+    if current_max_table <= 0 or days_elapsed < PACE_MIN_DAYS_ELAPSED:
+        return fallback
+    rate = current_max_table / days_elapsed
+    projected = current_max_table + rate * max(days_until_close, 0.0) * LATE_MONTH_PACE_FACTOR
+    return max(int(projected), current_max_table + 10, 50)
+
+
+def needs_recalculation(
+    unfired: List[int],
+    current_max_table: int,
+    estimated_total: int,
+    days_elapsed: float,
+    days_until_close: float,
+) -> Tuple[bool, str, int]:
+    """Decide whether a schedule must be re-placed, and how.
+
+    Returns ``(fire, mode, projected_total)``.
+
+    Two independent triggers:
+
+    * **tail** — a pod sits above where the month will realistically finish. It
+      can never be reached, so it is re-spread *forward* across the tables that
+      are actually left. Checked all month, because waiting for the month-end
+      window is what let 2026-09 sit broken for eleven days.
+    * **nearest** — near close the next pod is still far ahead, so everything is
+      *pulled in* to fire before the league shuts.
+
+    The old gate only had the second, and only looked at ``min(unfired)``. A
+    schedule whose nearest pod was close but whose tail was unreachable passed
+    it every time.
+    """
+    if not unfired:
+        return False, "", estimated_total
+
+    projected = project_total_tables(
+        current_max_table, days_elapsed, days_until_close, estimated_total
+    )
+
+    # Near close first: with little month left, tightening everything into reach
+    # is safer than spreading it, so this wins when both triggers apply.
+    if 0 < days_until_close <= 11:
+        if days_until_close <= 3:
+            max_distance = 5
+        elif days_until_close <= 5:
+            max_distance = 15
+        else:
+            max_distance = 30
+        if min(unfired) - current_max_table > max_distance:
+            return True, "pull_in", projected
+
+    if max(unfired) > int(projected * 0.92):
+        return True, "forward", projected
+
+    return False, "", projected
 
 
 def generate_treasure_table_numbers(
@@ -384,6 +483,45 @@ class TreasurePodManager:
         """Get the schedule document for a month."""
         return await self.schedule_col.find_one({"guild_id": guild_id, "month": month})
 
+    async def recent_tables_per_player(
+        self,
+        guild_id: int,
+        month: str,
+        months: int = TREASURE_RATIO_HISTORY_MONTHS,
+    ) -> List[float]:
+        """Tables-per-player for the completed months before ``month``.
+
+        A month's final table number is ``max(tid)`` in online_games, not a
+        document count: if the online sync dropped a record the maximum is still
+        correct where a count would silently run low.
+        """
+        ratios: List[float] = []
+        try:
+            from db import online_games
+
+            cursor = (
+                self.schedule_col.find({"guild_id": guild_id, "month": {"$lt": month}})
+                .sort("month", -1)
+                .limit(months)
+            )
+            async for sched in cursor:
+                players = sched.get("player_count_at_creation") or 0
+                mk = str(sched.get("month") or "")
+                if players <= 0 or len(mk) != 7:
+                    continue
+                top = await online_games.find_one(
+                    {"year": int(mk[:4]), "month": int(mk[5:7])},
+                    sort=[("tid", -1)],
+                    projection={"tid": 1},
+                )
+                final_table = int((top or {}).get("tid") or 0)
+                if final_table > 0:
+                    ratios.append(final_table / players)
+        except Exception as e:
+            log_warn(f"[treasure] Could not read month history, using the default ratio: {e}")
+            return []
+        return ratios
+
     def _get_type_meta(
         self,
         type_id: str,
@@ -427,7 +565,7 @@ class TreasurePodManager:
         """
         # Check dashboard config first (dashboard_treasure_pod_config collection)
         pod_types = TREASURE_POD_TYPES
-        games_per_player = GAMES_PER_PLAYER_ESTIMATE
+        games_per_player: Optional[float] = None
         try:
             from db import treasure_pod_config
             dashboard_config = await treasure_pod_config.find_one(
@@ -435,12 +573,28 @@ class TreasurePodManager:
             )
             if dashboard_config and dashboard_config.get("pod_types"):
                 pod_types = dashboard_config["pod_types"]
-                games_per_player = dashboard_config.get("games_per_player", GAMES_PER_PLAYER_ESTIMATE)
+                games_per_player = dashboard_config.get("games_per_player")
                 log_ok(f"[treasure] Using dashboard config for {month} ({len(pod_types)} types)")
         except Exception as e:
             log_warn(f"[treasure] Failed to read dashboard config, using env vars: {e}")
 
-        estimated_total = max(int(player_count * games_per_player), 50)
+        # Measured history wins. The dashboard's games_per_player is only a
+        # cold-start fallback: it is written as a fixed 4 on every config, so
+        # honouring it first would just reinstate the constant this replaces.
+        ratios = await self.recent_tables_per_player(guild_id, month)
+        if len(ratios) >= 2:
+            estimated_total = estimate_total_tables(player_count, ratios)
+            log_ok(
+                f"[treasure] {month}: {tables_per_player_ratio(ratios):.2f} tables/player "
+                f"measured over {len(ratios)} past month(s) -> estimated_total={estimated_total}"
+            )
+        else:
+            fallback = float(games_per_player or GAMES_PER_PLAYER_ESTIMATE)
+            estimated_total = max(int(player_count * fallback), 50)
+            log_ok(
+                f"[treasure] {month}: not enough history ({len(ratios)} month(s)); "
+                f"falling back to {fallback} tables/player -> estimated_total={estimated_total}"
+            )
 
         table_map = generate_all_treasure_tables(estimated_total, pod_types)
         encrypted = _encrypt_table_map(table_map)
@@ -630,10 +784,10 @@ class TreasurePodManager:
         if not table_map:
             return
 
-        if new_player_count and new_player_count > 0:
-            estimated_total = estimate_total_tables(new_player_count)
-        else:
-            estimated_total = schedule.get("estimated_total", 250)
+        # Keep whatever estimate the schedule already carries. The recalculation
+        # path maintains it from the month's observed pace; re-deriving it from
+        # player count here would throw that correction away on every draw.
+        estimated_total = schedule.get("estimated_total", 250)
 
         # Collect ALL tables across all types to avoid cross-type collisions
         all_tables: set[int] = set()
@@ -737,6 +891,7 @@ class TreasurePodManager:
         month: str,
         current_max_table: int,
         days_until_close: float = 30.0,
+        days_elapsed: float = 0.0,
     ) -> bool:
         """
         Detect unfired pods whose table numbers are already below current_max_table
@@ -758,7 +913,13 @@ class TreasurePodManager:
             return False
 
         fired = set(schedule.get("fired_tables", []))
-        estimated_total = schedule.get("estimated_total", 250)
+        # Re-place against where the month will actually finish, not the estimate
+        # it was created with — otherwise a slow month keeps scattering skipped
+        # pods past its own finish line.
+        estimated_total = project_total_tables(
+            current_max_table, days_elapsed, days_until_close,
+            schedule.get("estimated_total", 250),
+        )
 
         # Collect ALL tables across all types (for collision avoidance)
         all_tables: set[int] = set()
@@ -820,6 +981,7 @@ class TreasurePodManager:
         days_until_close: float,
         current_max_table: int,
         new_player_count: Optional[int] = None,
+        days_elapsed: float = 0.0,
     ) -> bool:
         """
         Check if treasure pods need recalculation and do it if needed.
@@ -849,25 +1011,19 @@ class TreasurePodManager:
         if not unfired:
             return False
 
-        # Determine max distance based on days until close
-        if days_until_close <= 3:
-            max_distance = 5
-        elif days_until_close <= 5:
-            max_distance = 15
-        elif days_until_close <= 11:
-            max_distance = 30
-        else:
+        fire, mode, estimated_total = needs_recalculation(
+            unfired=unfired,
+            current_max_table=current_max_table,
+            estimated_total=schedule.get("estimated_total", 250),
+            days_elapsed=days_elapsed,
+            days_until_close=days_until_close,
+        )
+        if not fire:
             return False
 
-        nearest = min(unfired)
-        distance = nearest - current_max_table
-
-        if distance <= max_distance:
-            return False
-
-        # Need to recalculate! Pull each type's unfired pods into the near-term
-        # window and spread them evenly, so they don't fire back-to-back.
-        estimated_total = schedule.get("estimated_total", 250)
+        # Re-place each type's unfired pods: "forward" spreads them across the
+        # tables the month still has left, "pull_in" tightens them into reach
+        # near close. Either way they are spread evenly, never back-to-back.
         used: set[int] = set(fired)  # Don't reuse fired tables
         new_map: Dict[str, List[int]] = {}
 
@@ -882,7 +1038,7 @@ class TreasurePodManager:
                 estimated_total=estimated_total,
                 days_until_close=days_until_close,
                 exclude=used,
-                mode="pull_in",
+                mode=mode,
             )
             new_map[type_id] = sorted(type_fired + new_tables)
 
@@ -900,16 +1056,19 @@ class TreasurePodManager:
             "updated_at": datetime.now(timezone.utc),
         }}
 
-        if new_player_count and new_player_count > 0:
-            new_estimated = estimate_total_tables(new_player_count)
-            update_doc["$set"]["estimated_total"] = new_estimated
+        # Persist the pace-based projection so every later re-placement works
+        # against the month's real finish line instead of the opening guess.
+        update_doc["$set"]["estimated_total"] = estimated_total
 
         await self.schedule_col.update_one(
             {"guild_id": guild_id, "month": month},
             update_doc,
         )
 
-        log_ok(f"[treasure] Schedule recalculated to sooner ({total_unfired} unfired remaining)")
+        log_ok(
+            f"[treasure] Schedule recalculated ({mode}, {total_unfired} unfired remaining, "
+            f"estimated_total -> {estimated_total}, table={current_max_table})"
+        )
 
         return True
 
