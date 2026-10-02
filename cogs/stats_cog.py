@@ -22,6 +22,7 @@ from discord import Option
 
 from topdeck_fetch import get_league_rows_cached, has_recent_game_from_topdeck, PlayerRow
 from utils.topdeck_identity import find_row_for_member
+from utils.most_games import MOST_GAMES_MIN_POINTS, contender_status, most_games_top
 from online_games_store import is_recency_active
 
 from utils.dates import current_month_key, add_months
@@ -106,40 +107,25 @@ def _top16_position(rows: List[PlayerRow], target: PlayerRow) -> Optional[int]:
 
 def _most_games_contender_line(rows: List[PlayerRow], target: PlayerRow, top_n: int = 5) -> str:
     """
-    Most-games raffle contender check.
-    All non-dropped players are eligible — exclusion only happens if
-    a player actually reaches the finals (not tracked here).
-    Sorted by games desc, pts desc.
+    Most-games raffle contender check (rules live in utils/most_games.py).
+    Eligible: non-dropped players with >= MOST_GAMES_MIN_POINTS points,
+    sorted by games desc, pts desc. Finalist exclusion happens at the draw
+    (not tracked here).
     """
-    def _key(r: PlayerRow) -> str:
-        uid = (getattr(r, "uid", None) or "").strip()
-        return uid if uid else (getattr(r, "name", "") or "").strip().lower()
+    status, n = contender_status(rows, target, top_n)
 
-    tkey = _key(target)
-
-    # All non-dropped players sorted by games desc, pts desc
-    eligible = sorted(
-        [r for r in rows if not getattr(r, "dropped", False)],
-        key=lambda r: (-int(getattr(r, "games", 0) or 0), -float(getattr(r, "pts", 0.0) or 0.0)),
-    )
-    top = eligible[:top_n]
-
-    if not top:
+    if status == "in":
+        return f"Most games contender: ✅ (#{n}/{top_n})"
+    if status == "below_points":
+        return f"Most games contender: ❌ (need at least **{MOST_GAMES_MIN_POINTS}** points)"
+    if status == "dropped":
+        return "Most games contender: ❌ (dropped)"
+    if status == "no_top":
         return "Most games contender: —"
 
-    # Determine if target is in top list
-    in_top = any(_key(r) == tkey for r in top if tkey)
-    if in_top:
-        pos = next((i for i, r in enumerate(top, start=1) if _key(r) == tkey), None)
-        if pos:
-            return f"Most games contender: ✅ (#{pos}/{top_n})"
-        return "Most games contender: ✅"
-
-    # Not in top list: show games needed to reach last position
-    cutoff_games = int(getattr(top[-1], "games", 0) or 0)
-    my_games = int(getattr(target, "games", 0) or 0)
-    need = max(0, cutoff_games - my_games)
-    return f"Most games contender: ❌ (need **{need}** more to reach **{cutoff_games}**)"
+    # Qualified but outside the Top N: games needed to reach last position
+    cutoff_games = int(getattr(most_games_top(rows, top_n)[-1], "games", 0) or 0)
+    return f"Most games contender: ❌ (need **{n}** more to reach **{cutoff_games}**)"
 
 
 

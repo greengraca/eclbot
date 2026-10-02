@@ -9,6 +9,7 @@ from discord.ext import commands
 from topdeck_fetch import get_league_rows_cached, has_recent_game_from_topdeck, PlayerRow
 from online_games_store import is_recency_active
 from utils.top16_eligibility import is_top16_eligible, needs_recency_check
+from utils.most_games import MOST_GAMES_MIN_POINTS, contender_status, most_games_top
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
@@ -135,9 +136,9 @@ class TopdeckLeagueCog(commands.Cog):
             )
             return
 
-        # Dropped players are not raffle-eligible (matches stats_cog contender check)
-        eligible = [r for r in rows if not r.dropped]
-        top5 = sorted(eligible, key=lambda r: (-r.games, -r.pts))[:5]
+        # Raffle candidates: non-dropped, >= MOST_GAMES_MIN_POINTS, Top 5 by games
+        # (utils/most_games.py — shared with the stats_cog contender check)
+        top5 = most_games_top(rows)
 
         ts_int = _ts(fetched_at)
 
@@ -145,7 +146,7 @@ class TopdeckLeagueCog(commands.Cog):
         embed = discord.Embed(
             title="Most Games Played — Prize Chance Leaderboard",
             description=(
-                "Top 5 by total games played.\n"
+                f"Top 5 by total games played (min. {MOST_GAMES_MIN_POINTS} points).\n"
                 "-# If a player advances to the finals, they forfeit their access to the raffle."
             ),
         )
@@ -182,18 +183,15 @@ class TopdeckLeagueCog(commands.Cog):
         )
 
         if row_for_author:
-            if top5:
-                threshold_games = top5[-1].games
-                games_diff = threshold_games - row_for_author.games
-            else:
-                threshold_games = 0
-                games_diff = 0
+            status, games_diff = contender_status(rows, row_for_author)
 
-            if row_for_author.dropped:
+            if status == "dropped":
                 gap_line = "You've dropped from the bracket, so you're not eligible for the raffle."
-            elif not top5:
+            elif status == "below_points":
+                gap_line = f"You need at least **{MOST_GAMES_MIN_POINTS}** points to be eligible for the raffle."
+            elif status == "no_top":
                 gap_line = "There isn't an eligible Top 5 yet."
-            elif games_diff <= 0:
+            elif status == "in" or games_diff <= 0:
                 gap_line = "You're already in, or tied with, the eligible Top 5 by games. Congrats!"
             else:
                 gap_line = f"You're **{games_diff}** game(s) away from entering the eligible Top 5 by games."
