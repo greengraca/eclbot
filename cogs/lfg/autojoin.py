@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 
 import discord
 
-from spelltable_client import create_spelltable_game
+from game_rooms import create_game_room
 from utils.interactions import safe_ctx_followup, resolve_member
 from utils.logger import log_error
 
@@ -193,15 +193,12 @@ async def autojoin_specific_lobby_group(
 
     if became_full:
         started_at = now_utc()
-        link_created: Optional[str] = None
+        room = None
         try:
-            link_created = await create_spelltable_game(
-                game_name="ECL DragonShield",
-                format_name="Commander",
-                is_public=False,
-            )
+            room = await create_game_room(guild, channel_id, player_ids_snapshot)
         except Exception as e:
-            log_error(f"[lfg] Failed to create SpellTable game (autojoin group): {e}")
+            log_error(f"[lfg] Failed to create game room (autojoin group): {e}")
+        link_created: Optional[str] = room.link if room else None
 
         if link_created:
             dm_targets: list[int] = []
@@ -211,6 +208,7 @@ async def autojoin_specific_lobby_group(
                 if current is not None and current is lobby:
                     if lobby.is_full() and not lobby.has_link():
                         lobby.link = link_created
+                        lobby.link_password = room.password if room else None
                         lobby.link_creating = False
                         dm_targets = list(lobby.player_ids)
                         finalize = True
@@ -221,7 +219,7 @@ async def autojoin_specific_lobby_group(
             if not finalize:
                 log_error(
                     f"[lfg] autojoin group: lobby {guild.id}:{lobby_id} no longer full "
-                    "at finalize; discarding SpellTable link"
+                    "at finalize; discarding game link"
                 )
                 if msg and view:
                     embed = cog._build_lobby_embed(guild, lobby)
@@ -266,14 +264,26 @@ async def autojoin_specific_lobby_group(
                     ephemeral=True,
                 )
         else:
+            failed_embed: Optional[discord.Embed] = None
             async with cog.state.lock:
                 current = cog.state.peek_guild_lobbies(guild.id).get(lobby_id)
                 if current is not None and current is lobby:
                     lobby.link_creating = False
+                    if lobby.is_full():
+                        # Close the lobby publicly instead of leaving it stuck on "creating…"
+                        failed_embed = cog._build_room_failed_embed(guild, lobby)
+                        cog._clear_lobby(guild.id, lobby_id)
+            if failed_embed is not None:
+                if view:
+                    with contextlib.suppress(Exception):
+                        view.stop()
+                if msg:
+                    with contextlib.suppress(Exception):
+                        await msg.edit(embed=failed_embed, view=None)
             with contextlib.suppress(Exception):
                 await safe_ctx_followup(
                     ctx,
-                    "Joined an existing lobby, but I couldn’t create the SpellTable room. Ping a mod.",
+                    "Joined an existing lobby, but I couldn’t create the game room — see the lobby message.",
                     ephemeral=True,
                 )
         return True
@@ -380,16 +390,12 @@ async def autojoin_specific_lobby_from_lfg(
 
     if became_full:
         started_at = now_utc()
-        link_created: Optional[str] = None
-
+        room = None
         try:
-            link_created = await create_spelltable_game(
-                game_name="ECL DragonShield",
-                format_name="Commander",
-                is_public=False,
-            )
+            room = await create_game_room(guild, channel_id, player_ids_snapshot)
         except Exception as e:
-            log_error(f"[lfg] Failed to create SpellTable game (autojoin): {e}")
+            log_error(f"[lfg] Failed to create game room (autojoin): {e}")
+        link_created: Optional[str] = room.link if room else None
 
         if link_created:
             dm_targets: list[int] = []
@@ -399,6 +405,7 @@ async def autojoin_specific_lobby_from_lfg(
                 if current is not None and current is lobby:
                     if lobby.is_full() and not lobby.has_link():
                         lobby.link = link_created
+                        lobby.link_password = room.password if room else None
                         lobby.link_creating = False
                         dm_targets = list(lobby.player_ids)
                         finalize = True
@@ -409,7 +416,7 @@ async def autojoin_specific_lobby_from_lfg(
             if not finalize:
                 log_error(
                     f"[lfg] autojoin: lobby {guild.id}:{lobby_id} no longer full "
-                    "at finalize; discarding SpellTable link"
+                    "at finalize; discarding game link"
                 )
                 if msg and view:
                     embed = cog._build_lobby_embed(guild, lobby)
@@ -454,14 +461,26 @@ async def autojoin_specific_lobby_from_lfg(
                     ephemeral=True,
                 )
         else:
+            failed_embed: Optional[discord.Embed] = None
             async with cog.state.lock:
                 current = cog.state.peek_guild_lobbies(guild.id).get(lobby_id)
                 if current is not None and current is lobby:
                     lobby.link_creating = False
+                    if lobby.is_full():
+                        # Close the lobby publicly instead of leaving it stuck on "creating…"
+                        failed_embed = cog._build_room_failed_embed(guild, lobby)
+                        cog._clear_lobby(guild.id, lobby_id)
+            if failed_embed is not None:
+                if view:
+                    with contextlib.suppress(Exception):
+                        view.stop()
+                if msg:
+                    with contextlib.suppress(Exception):
+                        await msg.edit(embed=failed_embed, view=None)
             with contextlib.suppress(Exception):
                 await safe_ctx_followup(
                     ctx,
-                    "Joined an existing lobby, but I couldn’t create the SpellTable room. Ping a mod.",
+                    "Joined an existing lobby, but I couldn’t create the game room — see the lobby message.",
                     ephemeral=True,
                 )
 

@@ -6,6 +6,8 @@ from typing import List, Optional, Mapping
 
 import discord
 
+from game_rooms import service_name
+
 from .models import LFGLobby
 
 
@@ -40,15 +42,16 @@ def build_lobby_embed(
     expand_interval_min: int = 5,
     last_seat_grace_min: int = 10,
 ) -> discord.Embed:
+    svc = service_name()
     remaining = lobby.remaining_slots()
     if remaining <= 0:
-        title = "Pod full — creating your SpellTable game…"
+        title = f"Pod full — creating your {svc} game…"
     elif remaining == 1:
         title = "Waiting for 1 more player to join..."
     else:
         title = f"Waiting for {remaining} more players to join..."
 
-    description = "*A SpellTable link will be created when all players have joined.*\n\n"
+    description = f"*A {svc} link will be created when all players have joined.*\n\n"
 
     if elo_info is not None and lobby.elo_mode:
         description += (
@@ -115,9 +118,13 @@ def build_ready_embed(
     started_at = started_at.astimezone(timezone.utc)
     started_ts = ts(started_at)
 
+    description = f"# [Join your {service_name(lobby.link)} game now!]({lobby.link})"
+    if lobby.link_password:
+        description += f"\nPassword: `{lobby.link_password}`"
+
     embed = discord.Embed(
         title="Your game is ready!",
-        description=f"# [Join your SpellTable game now!]({lobby.link})",
+        description=description,
         color=discord.Color.green(),
     )
 
@@ -136,6 +143,36 @@ def build_ready_embed(
     embed.add_field(name="Players", value="\n".join(lines) if lines else "*Unknown players*", inline=False)
     embed.add_field(name="Format", value="Commander", inline=True)
     embed.add_field(name="Started at", value=f"<t:{started_ts}:f>", inline=True)
+
+    if icon_url:
+        embed.set_thumbnail(url=icon_url)
+
+    return embed
+
+
+def build_room_failed_embed(
+    guild: discord.Guild,
+    lobby: LFGLobby,
+    *,
+    icon_url: str = "",
+) -> discord.Embed:
+    """Shown on the lobby message when the pod filled but room creation failed."""
+    embed = discord.Embed(
+        title="Pod full — but I couldn't create the game room",
+        description=(
+            "One of you please create a private game on "
+            "[Convoke](https://convoke.games) and share the link here.\n"
+            "This lobby is closed, so you're all free to use /lfg again."
+        ),
+        color=discord.Color.red(),
+    )
+
+    lines: List[str] = []
+    for uid in lobby.player_ids:
+        member = guild.get_member(uid)
+        lines.append(f"{member.mention} ({member.display_name})" if member else f"<@{uid}> (User {uid})")
+
+    embed.add_field(name="Players", value="\n".join(lines) if lines else "*Unknown players*", inline=False)
 
     if icon_url:
         embed.set_thumbnail(url=icon_url)

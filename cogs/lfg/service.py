@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 import discord
 
-from spelltable_client import create_spelltable_game
+from game_rooms import create_game_room
 from utils.interactions import safe_i_send, safe_i_edit, resolve_member
 from utils.logger import log_error
 
@@ -103,7 +103,7 @@ async def handle_join(
 ):
     """Join button handler (normal + Elo lobbies).
 
-    Important: don't hold the store lock across slow awaits (TopDeck fetches, Discord I/O, SpellTable calls).
+    Important: don't hold the store lock across slow awaits (TopDeck fetches, Discord I/O, game room calls).
     """
 
     # Ack fast to avoid Unknown interaction (10062) on slow paths
@@ -163,7 +163,7 @@ async def handle_join(
                 reply_ephemeral = "You're already in this lobby."
             elif lobby.is_full():
                 _disable_all_buttons(view)
-                # Don't tear down a lobby that's mid-finalization (a SpellTable link
+                # Don't tear down a lobby that's mid-finalization (a game link
                 # is being created/applied) — the in-flight finalize owns cleanup.
                 if not getattr(lobby, "link_creating", False) and not lobby.has_link():
                     lobby_id_to_clear = lobby.lobby_id
@@ -265,20 +265,21 @@ async def handle_join(
         await safe_i_send(interaction, reply_ephemeral, ephemeral=True)
         return
 
-    # If we didn't trigger SpellTable creation, we're done.
+    # If we didn't trigger room creation, we're done.
     if not create_room or create_room_lobby_id is None or create_room_started_at is None:
         return
 
-    # Create SpellTable room (slow) OUTSIDE the lock
-    link_created: Optional[str] = None
+    # Create the game room (slow) OUTSIDE the lock
+    room = None
+    async with cog.state.lock:
+        room_lobby = cog.state.peek_guild_lobbies(guild.id).get(create_room_lobby_id)
+        room_player_ids = list(room_lobby.player_ids) if room_lobby else []
     try:
-        link_created = await create_spelltable_game(
-            game_name="ECL DragonShield",
-            format_name="Commander",
-            is_public=False,
-        )
+        room = await create_game_room(guild, view.lobby.channel_id, room_player_ids)
     except Exception as e:
-        log_error(f"[lfg] Failed to create SpellTable game: {e}")
+        log_error(f"[lfg] Failed to create game room: {e}")
+    link_created: Optional[str] = room.link if room else None
+    failed_embed: Optional[discord.Embed] = None
 
     # Apply the created link if the lobby is still active + still full
     async with cog.state.lock:
@@ -292,9 +293,15 @@ async def handle_join(
             return
 
         if not link_created:
+            # Close the lobby publicly instead of leaving it stuck on "creating…"
             lobby.link_creating = False
+            failed_embed = cog._build_room_failed_embed(guild, lobby)
+            cog._clear_lobby(guild.id, lobby.lobby_id)
+            with contextlib.suppress(Exception):
+                view.stop()
         else:
             lobby.link = link_created
+            lobby.link_password = room.password if room else None
             lobby.link_creating = False
 
             # ✅ DO NOT build the ready embed here (async) — capture ref and do it outside lock
@@ -307,12 +314,11 @@ async def handle_join(
             with contextlib.suppress(Exception):
                 view.stop()
 
+    if failed_embed is not None:
+        await safe_i_edit(interaction, embed=failed_embed, view=None)
+        return
+
     if not link_created or ready_lobby_ref is None or lobby_id_to_clear is None:
-        await safe_i_send(
-            interaction,
-            "The lobby filled, but I couldn't create the SpellTable room. Please try /lfg again or ping a mod.",
-            ephemeral=True,
-        )
         return
 
     # ✅ Build READY embed (includes pts) OUTSIDE the lock

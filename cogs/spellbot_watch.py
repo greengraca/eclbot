@@ -25,6 +25,9 @@ DEBUG_SPELLBOT_WATCH = bool(int(os.getenv("DEBUG_SPELLBOT_WATCH", "0")))
 
 FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
+# SpellBot game links (Convoke now, SpellTable historically)
+GAME_LINK_RE = re.compile(r"https?://(?:www\.)?(?:convoke\.games/\S*?/play/|spelltable\.wizards\.com/game/)[\w-]+")
+
 # Minimum total pot for "high-stakes pod" announcement
 HIGH_STAKES_THRESHOLD = float(os.getenv("HIGH_STAKES_THRESHOLD", "375"))
 
@@ -59,15 +62,11 @@ class SpellBotWatchCog(commands.Cog):
     # --------- helpers ---------
 
     @staticmethod
-    def _extract_spelltable_link(embed: discord.Embed) -> Optional[str]:
-        desc = embed.description or ""
-        if not desc:
-            return None
-
-        for token in desc.split():
-            if "spelltable.wizards.com/game" in token:
-                return token.strip("()<>")
-        return None
+    def _extract_game_link(embed: discord.Embed) -> Optional[str]:
+        texts = [embed.url or "", embed.description or ""]
+        texts += [f.value or "" for f in embed.fields]
+        m = GAME_LINK_RE.search("\n".join(texts))
+        return m.group(0) if m else None
 
     def _debug(self, msg: str) -> None:
         if DEBUG_SPELLBOT_WATCH:
@@ -299,7 +298,7 @@ class SpellBotWatchCog(commands.Cog):
             return
         self._seen_ready_messages.append(msg.id)
 
-        link = self._extract_spelltable_link(embed)
+        link = self._extract_game_link(embed)
         channel_name = (
             f"#{msg.channel.name}"
             if hasattr(msg.channel, "name")

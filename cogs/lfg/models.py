@@ -35,9 +35,10 @@ class LFGLobby:
         self.player_ids: List[int] = [int(host_id)]  # host always first
         self.invited_ids: List[int] = invited_ids or []
         self.message_id: Optional[int] = None   # set after we send the embed
-        self.link: str = ""                     # SpellTable link once lobby is full
+        self.link: str = ""                     # Convoke/SpellTable link once lobby is full
+        self.link_password: Optional[str] = None  # room password, if the service set one
 
-        # True while we're creating a SpellTable room (prevents duplicate creation)
+        # True while we're creating a game room (prevents duplicate creation)
         self.link_creating: bool = False
 
         # TopDeck points snapshot for display in Elo lobbies

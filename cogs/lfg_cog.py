@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 from discord import Option
 
-from spelltable_client import create_spelltable_game  # <- your SpellTable helper
+from game_rooms import create_game_room
 from topdeck_fetch import get_handle_to_best_cached
 
 from utils.interactions import (
@@ -27,6 +27,7 @@ from .lfg.views import LFGJoinView
 from .lfg.embeds import (
     build_lobby_embed,
     build_ready_embed,
+    build_room_failed_embed,
     EloLobbyInfo,
     LastSeatInfo,
 )
@@ -105,12 +106,12 @@ HIGH_STAKES_THRESHOLD = float(os.getenv("HIGH_STAKES_THRESHOLD", "0"))  # e.g. 4
 
 class LFGCog(commands.Cog):
     """
-    Simple LFG system for SpellTable Commander pods.
+    Simple LFG system for online Commander pods (Convoke, SpellTable fallback).
 
     - /lfg → opens a lobby for up to 4 players (optionally auto-filling with mentioned friends).
     - /lfgelo → opens an Elo-matched lobby for up to 4 players (no friends option).
     - One active lobby per guild at a time.
-    - SpellTable room is created *only when the lobby becomes full*.
+    - The game room is created *only when the lobby becomes full* (game_rooms.py).
     
     Persists lobby state to MongoDB for Heroku restart survival.
     """
@@ -685,6 +686,9 @@ class LFGCog(commands.Cog):
         )
 
 
+    def _build_room_failed_embed(self, guild: discord.Guild, lobby: LFGLobby) -> discord.Embed:
+        return build_room_failed_embed(guild, lobby, icon_url=LFG_EMBED_ICON_URL)
+
     async def _handle_open_last_seat(
         self,
         interaction: discord.Interaction,
@@ -721,7 +725,7 @@ class LFGCog(commands.Cog):
 
     @commands.slash_command(
         name="lfg",
-        description="Open a SpellTable Commander lobby (4 players max).",
+        description="Open a Commander lobby (4 players max).",
         guild_ids=[GUILD_ID] if GUILD_ID else None,
     )
     async def lfg(
@@ -802,22 +806,20 @@ class LFGCog(commands.Cog):
 
         if full_lobby is not None:
             try:
-                link = await create_spelltable_game(
-                    game_name="ECL DragonShield",
-                    format_name="Commander",
-                    is_public=False,
-                )
+                room = await create_game_room(ctx.guild, ctx.channel.id, full_lobby.player_ids)
             except Exception as e:
-                link = None
-                log_error(f"[lfg] Failed to create SpellTable game (friends fill): {e}")
-            if not link:
+                room = None
+                log_error(f"[lfg] Failed to create game room (friends fill): {e}")
+            if room is None:
                 await safe_ctx_followup(
                     ctx,
-                    "I couldn't create a SpellTable game right now. Please try again in a bit or ping a mod.",
+                    "I couldn't create a game room right now. Create a private game on "
+                    "https://convoke.games and share the link with your pod, or ping a mod.",
                     ephemeral=True,
                 )
                 return
-            full_lobby.link = link
+            full_lobby.link = room.link
+            full_lobby.link_password = room.password
 
             started_at = now_utc()
             ready_embed = await self._build_ready_embed(ctx.guild, full_lobby, started_at)
@@ -863,7 +865,7 @@ class LFGCog(commands.Cog):
 
     @commands.slash_command(
         name="lfgelo",
-        description="Open an Elo-matched SpellTable Commander lobby (4 players max).",
+        description="Open an Elo-matched Commander lobby (4 players max).",
         guild_ids=[GUILD_ID] if GUILD_ID else None,
     )
     async def lfgelo(self, ctx: discord.ApplicationContext):
