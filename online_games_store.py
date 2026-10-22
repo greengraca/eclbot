@@ -1,14 +1,13 @@
 # online_games_store.py
 from __future__ import annotations
 
-import calendar
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
 from db import online_games
 from utils.logger import log_warn
-from utils.topdeck_normalize import MS_THRESHOLD, normalize_ts
+from utils.topdeck_normalize import normalize_ts
 
 
 @dataclass
@@ -117,86 +116,3 @@ async def count_online_games_by_topdeck_uid(
             log_warn(f"[online_games] Aggregation row parse error: {type(e).__name__}: {e}")
             continue
     return out
-
-
-def is_recency_active(year: int, month: int, after_day: int = 20) -> bool:
-    """True if the recency cutoff (day `after_day` of the given month, UTC) has arrived.
-
-    Used to gate the top16 recency check: before the cutoff day, no game can satisfy
-    "after day N" for the current month, so callers should skip the filter rather
-    than incorrectly disqualifying players in the 10-19 game band.
-    """
-    max_day = calendar.monthrange(year, month)[1]
-    clamped_day = min(after_day, max_day)
-    cutoff_dt = datetime(year, month, clamped_day, 0, 0, 0, tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) >= cutoff_dt
-
-
-async def has_recent_game_by_topdeck_uid(
-    bracket_id: str,
-    year: int,
-    month: int,
-    uids: List[str],
-    after_day: int = 20,
-    *,
-    online_only: bool = True,
-) -> Dict[str, bool]:
-    """
-    Check if each TopDeck UID has at least one game after the specified day of the month.
-    
-    Args:
-        bracket_id: TopDeck bracket ID
-        year: Year
-        month: Month
-        uids: List of TopDeck UIDs to check
-        after_day: Day of month (games on or after this day count as "recent")
-        online_only: Only count online games
-    
-    Returns:
-        Dict mapping each UID to True/False
-    """
-    if not uids:
-        return {}
-    
-    # Calculate the timestamp for the start of after_day (clamped to month length)
-    max_day = calendar.monthrange(year, month)[1]
-    clamped_day = min(after_day, max_day)
-    cutoff_dt = datetime(year, month, clamped_day, 0, 0, 0, tzinfo=timezone.utc)
-    cutoff_ts = cutoff_dt.timestamp()
-    
-    match: Dict[str, object] = {
-        "bracket_id": str(bracket_id),
-        "year": int(year),
-        "month": int(month),
-    }
-    if online_only:
-        match["online"] = True
-
-    # Find all games after the cutoff and collect which UIDs participated.
-    # start_ts is normalized in-pipeline rather than matched directly: rows
-    # written before the unit fix may still hold raw milliseconds, and those
-    # compare greater than any seconds cutoff — passing everyone in the pod.
-    pipeline = [
-        {"$match": match},
-        {"$addFields": {"_ts_norm": {"$cond": [
-            {"$gt": ["$start_ts", MS_THRESHOLD]},
-            {"$divide": ["$start_ts", 1000.0]},
-            "$start_ts",
-        ]}}},
-        {"$match": {"_ts_norm": {"$gte": cutoff_ts}}},
-        {"$unwind": "$topdeck_uids"},
-        {"$group": {"_id": "$topdeck_uids"}},
-    ]
-    
-    uids_with_recent: set = set()
-    async for row in online_games.aggregate(pipeline):
-        try:
-            k = str(row["_id"]).strip()
-            if k:
-                uids_with_recent.add(k)
-        except Exception as e:
-            log_warn(f"[online_games] Recency check row parse error: {type(e).__name__}: {e}")
-            continue
-    
-    # Build result dict for all requested UIDs
-    return {uid: (uid in uids_with_recent) for uid in uids}

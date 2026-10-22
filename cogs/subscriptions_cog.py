@@ -22,9 +22,9 @@ import discord
 from discord.ext import commands, tasks
 from pymongo.errors import DuplicateKeyError
 
-from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, has_recent_game_from_topdeck, PlayerRow
-from online_games_store import count_online_games_by_topdeck_uid, is_recency_active
-from utils.top16_eligibility import is_top16_eligible, needs_recency_check
+from topdeck_fetch import get_league_rows_cached, get_in_progress_pods, get_cached_matches, PlayerRow
+from online_games_store import count_online_games_by_topdeck_uid
+from utils.top16_eligibility import is_top16_eligible
 from db import ensure_indexes, ping, subs_access, subs_free_entries, subs_jobs, subs_kofi_events, treasure_pod_schedule, treasure_pods as treasure_pods_col, job_once
 from .topdeck_month_dump import dump_topdeck_month_to_mongo
 from utils.interactions import resolve_member, safe_ctx_defer, safe_ctx_followup
@@ -1154,10 +1154,7 @@ class SubscriptionsCog(commands.Cog):
     ) -> tuple[list[dict], list[str]]:
         """Top16 cut (prize eligible): skip ineligible players and promote next eligible.
 
-        Eligibility for online games requirement:
-          - Option A: >= top16_min_online_games_no_recency (default 20) games - no recency check
-          - Option B: >= top16_min_online_games (default 10) games AND at least 1 game
-                      after day top16_recency_after_day (default 20) of the month
+        Eligibility: not dropped and >= top16_min_total_games (default 10) total games.
 
         Returns:
           - entries: [{discord_id, row, pts, games}] in award order (after de-dupe)
@@ -1181,48 +1178,17 @@ class SubscriptionsCog(commands.Cog):
         if not rows:
             return ([], ["no TopDeck rows"])
 
-        try:
-            y, m = cut_month.split("-")
-            year, month = int(y), int(m)
-        except Exception:
-            return ([], [f"bad cut_month: {cut_month!r}"])
-
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
         active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
 
-        # Recency now counts ANY game (online or in-person)
-        min_total = cfg.top16_min_total_games            # default 10
-        no_recency = cfg.top16_min_online_games_no_recency  # 20 — now a total-games threshold
-        recency_after_day = cfg.top16_recency_after_day  # default 20
-
-        recency_active = is_recency_active(year, month, recency_after_day)
-
-        uids_need_recency = []
-        if recency_active:
-            for r in active_by_games:
-                uid = (r.uid or "").strip()
-                if uid and needs_recency_check(r.games, min_total, no_recency):
-                    uids_need_recency.append(uid)
-
-        recency_check: dict[str, bool] = {}
-        if uids_need_recency:
-            try:
-                recency_check = await has_recent_game_from_topdeck(
-                    bracket_id, FIREBASE_ID_TOKEN, year, month,
-                    uids_need_recency, after_day=recency_after_day,
-                )
-            except Exception as e:
-                return ([], [f"recency_check error: {type(e).__name__}: {e}"])
+        min_total = cfg.top16_min_total_games  # default 10
 
         qualified: list[PlayerRow] = []
         for r in active_by_games:
             uid = (r.uid or "").strip()
             if not uid:
                 continue
-            if is_top16_eligible(
-                dropped=False, total_games=r.games, has_recent=recency_check.get(uid, False),
-                recency_active=recency_active, min_total=min_total, no_recency_games=no_recency,
-            ):
+            if is_top16_eligible(dropped=False, total_games=r.games, min_total=min_total):
                 qualified.append(r)
 
         if not qualified:
@@ -1325,47 +1291,17 @@ class SubscriptionsCog(commands.Cog):
         if not rows:
             return ([], ["no TopDeck rows"], 0)
 
-        try:
-            y, m = mk.split("-")
-            year, month = int(y), int(m)
-        except Exception:
-            return ([], [f"bad mk: {mk!r}"], 0)
-
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
         active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
 
         min_total = cfg.top16_min_total_games
-        no_recency = cfg.top16_min_online_games_no_recency
-        recency_after_day = cfg.top16_recency_after_day
-
-        recency_active = is_recency_active(year, month, recency_after_day)
-
-        uids_need_recency = []
-        if recency_active:
-            for r in active_by_games:
-                uid = (r.uid or "").strip()
-                if uid and needs_recency_check(r.games, min_total, no_recency):
-                    uids_need_recency.append(uid)
-
-        recency_check: dict[str, bool] = {}
-        if uids_need_recency:
-            try:
-                recency_check = await has_recent_game_from_topdeck(
-                    bracket_id, FIREBASE_ID_TOKEN, year, month,
-                    uids_need_recency, after_day=recency_after_day,
-                )
-            except Exception as e:
-                return ([], [f"recency_check error: {type(e).__name__}: {e}"], 0)
 
         qualified: list[tuple[int, PlayerRow]] = []
         for idx, r in enumerate(active_by_games, start=1):
             uid = (r.uid or "").strip()
             if not uid:
                 continue
-            if is_top16_eligible(
-                dropped=False, total_games=r.games, has_recent=recency_check.get(uid, False),
-                recency_active=recency_active, min_total=min_total, no_recency_games=no_recency,
-            ):
+            if is_top16_eligible(dropped=False, total_games=r.games, min_total=min_total):
                 qualified.append((idx, r))
 
         if not qualified:

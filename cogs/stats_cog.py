@@ -20,10 +20,9 @@ import discord
 from discord.ext import commands
 from discord import Option
 
-from topdeck_fetch import get_league_rows_cached, has_recent_game_from_topdeck, PlayerRow
+from topdeck_fetch import get_league_rows_cached, PlayerRow
 from utils.topdeck_identity import find_row_for_member
 from utils.most_games import MOST_GAMES_MIN_POINTS, contender_status, most_games_top
-from online_games_store import is_recency_active
 
 from utils.dates import current_month_key, add_months
 from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
@@ -295,42 +294,13 @@ class StatsCog(commands.Cog):
             inline=False,
         )
 
-        # ---- Eligibility (total games + any-game recency) ----
+        # ---- Eligibility (total games) ----
         uid = (getattr(row, "uid", None) or "").strip()
         min_total = int(getattr(cfg, "top16_min_total_games", 0) or 0)
-        no_recency_threshold = int(getattr(cfg, "top16_min_online_games_no_recency", 20) or 20)
-        recency_after_day = int(getattr(cfg, "top16_recency_after_day", 20) or 20)
 
         meets_total = games >= min_total
         top16_pos = _top16_position(rows or [], row)
         in_top16_window = bool(top16_pos and top16_pos <= 16)
-
-        meets_recency = True
-        has_recent = None
-        recency_active = False
-        if uid and min_total <= games < no_recency_threshold:
-            try:
-                y, m = mk.split("-")
-                year_i, month_i = int(y), int(m)
-                recency_active = is_recency_active(year_i, month_i, recency_after_day)
-                if recency_active:
-                    recency_map = await has_recent_game_from_topdeck(
-                        bracket_id, FIREBASE_ID_TOKEN, year_i, month_i, [uid],
-                        after_day=recency_after_day,
-                    )
-                    has_recent = recency_map.get(uid, False)
-            except Exception as e:
-                log_warn(f"[stats] recency check failed for uid={uid}: {type(e).__name__}: {e}")
-                has_recent = None
-            if has_recent is False:
-                meets_recency = False
-
-        # Recency field (only shown when applicable: 10-19 total games)
-        if uid and min_total <= games < no_recency_threshold:
-            if has_recent is True:
-                emb.add_field(name="📅 Recency", value=f"Game after day {recency_after_day} ✅", inline=True)
-            elif has_recent is False:
-                emb.add_field(name="📅 Recency", value=f"Game after day {recency_after_day} ❌", inline=True)
 
         # ---- Top16 Eligibility (checklist + verdict) ----
         elig_lines = []
@@ -339,18 +309,9 @@ class StatsCog(commands.Cog):
         else:
             elig_lines.append("Position: —")
         elig_lines.append(f"Games: **{games}** / {min_total} {'✅' if meets_total else '❌'}")
-        if uid and min_total <= games < no_recency_threshold:
-            if has_recent is True:
-                elig_lines.append("Recency: ✅")
-            elif has_recent is False:
-                elig_lines.append("Recency: ❌")
-                elig_lines.append(
-                    f"🔴 **Warning:** No game after day **{recency_after_day}** — "
-                    f"required with fewer than **{no_recency_threshold}** games."
-                )
         elig_lines.append("─")
 
-        all_eligible = meets_total and in_top16_window and meets_recency
+        all_eligible = meets_total and in_top16_window
         if all_eligible:
             elig_lines.append("\U0001f7e2 **On the Top cut this month**")
         else:

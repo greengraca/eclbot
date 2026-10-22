@@ -1,19 +1,17 @@
 # cogs/topdeck_league.py
 import os
-from datetime import datetime, timezone
-from typing import List, Optional, Tuple, Dict
+from datetime import datetime
+from typing import List, Optional, Tuple
 
 import discord
 from discord.ext import commands
 
-from topdeck_fetch import get_league_rows_cached, has_recent_game_from_topdeck, PlayerRow
-from online_games_store import is_recency_active
-from utils.top16_eligibility import is_top16_eligible, needs_recency_check
+from topdeck_fetch import get_league_rows_cached, PlayerRow
+from utils.top16_eligibility import is_top16_eligible
 from utils.most_games import MOST_GAMES_MIN_POINTS, contender_status, most_games_top
 from utils.topdeck_identity import find_row_for_member, build_member_index, resolve_row_discord_id
 from utils.logger import log_sync, log_warn
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
-from utils.mod_check import is_mod
 from utils.settings import GUILD_ID, load_subs_config
 
 
@@ -24,11 +22,6 @@ FIREBASE_ID_TOKEN = os.getenv("FIREBASE_ID_TOKEN", None)
 
 def _ts(dt: datetime) -> int:
     return int(dt.timestamp())
-
-
-def _month_start_utc() -> datetime:
-    now = datetime.now(timezone.utc)
-    return datetime(now.year, now.month, 1, tzinfo=timezone.utc)
 
 
 async def _get_member_index(guild: discord.Guild):
@@ -267,74 +260,21 @@ class TopdeckLeagueCog(commands.Cog):
 
         log_sync(f"[topdeck] Active players with >={cfg.top16_min_total_games} games: {len(active_by_games)}.")
 
-        # ---- Step 2: qualified = total games + recency (any game) ----
+        # ---- Step 2: qualified = not dropped + min total games ----
         min_total = cfg.top16_min_total_games
-        no_recency_threshold = cfg.top16_min_online_games_no_recency  # 20, total-games threshold
-        recency_after_day = cfg.top16_recency_after_day
 
-        ms = _month_start_utc()
-        bracket_id = await get_bracket_id()
-        recency_active = is_recency_active(ms.year, ms.month, recency_after_day)
-
-        uids_need_recency: List[str] = []
-        if recency_active:
-            for r in active_by_games:
-                uid = (r.uid or "").strip()
-                if uid and needs_recency_check(r.games, min_total, no_recency_threshold):
-                    uids_need_recency.append(uid)
-
-        recency_check: Dict[str, bool] = {}
-        if uids_need_recency:
-            try:
-                recency_check = await has_recent_game_from_topdeck(
-                    bracket_id, FIREBASE_ID_TOKEN, ms.year, ms.month,
-                    uids_need_recency, after_day=recency_after_day,
-                )
-            except Exception as e:
-                log_warn(f"[topdeck] /top16 recency check error: {type(e).__name__}: {e}")
-
-        log_sync(
-            f"[topdeck] Recency gate: active={recency_active} (month={ms.year}-{ms.month:02d}, "
-            f"after_day={recency_after_day}, bracket={bracket_id}) • band={min_total}-{no_recency_threshold - 1} games "
-            f"• checked={len(uids_need_recency)} • with_recent_game={sum(1 for v in recency_check.values() if v)}"
-        )
-
-        qualified_candidates: List[PlayerRow] = []
-        failed_recency: List[PlayerRow] = []
-        for r in active_by_games:
-            uid = (r.uid or "").strip()
-            if not uid:
-                continue
-            if is_top16_eligible(
-                dropped=False, total_games=r.games, has_recent=recency_check.get(uid, False),
-                recency_active=recency_active, min_total=min_total, no_recency_games=no_recency_threshold,
-            ):
-                qualified_candidates.append(r)
-            elif recency_active and needs_recency_check(r.games, min_total, no_recency_threshold):
-                failed_recency.append(r)
+        qualified_candidates: List[PlayerRow] = [
+            r for r in active_by_games
+            if (r.uid or "").strip()
+            and is_top16_eligible(dropped=False, total_games=r.games, min_total=min_total)
+        ]
 
         log_sync(f"[topdeck] Players qualified: {len(qualified_candidates)}.")
-        log_sync(f"[topdeck] Players failed recency: {len(failed_recency)}.")
-        if failed_recency:
-            log_sync(
-                "[topdeck] Failed recency: "
-                + ", ".join(f"{r.name}({r.games}g)" for r in failed_recency[:20])
-            )
-        # Anyone shown in the cut on the auto-pass rule rather than a recent game
-        auto_passed = [
-            r for r in qualified_candidates[:16]
-            if r.games >= no_recency_threshold and not recency_check.get((r.uid or "").strip(), False)
-        ]
-        if auto_passed:
-            log_sync(
-                f"[topdeck] In cut via >={no_recency_threshold}-game auto-pass (no recent game): "
-                + ", ".join(f"{r.name}({r.games}g)" for r in auto_passed[:20])
-            )
 
         qualified_top16: List[PlayerRow] = qualified_candidates[:16]
 
         if len(qualified_top16) < 16:
-            log_warn("[topdeck] WARNING: fewer than 16 players meet the games + recency requirement.")
+            log_warn("[topdeck] WARNING: fewer than 16 players meet the games requirement.")
 
         # ---- Step 3: personal info ----
         member = ctx.author
@@ -347,39 +287,14 @@ class TopdeckLeagueCog(commands.Cog):
         ts_int = _ts(fetched_at)
 
         if row_for_author:
-            author_uid = (row_for_author.uid or "").strip()
             total_games = row_for_author.games
 
-            if total_games >= no_recency_threshold:
+            if total_games >= min_total:
                 missing_msg = (
                     f"You're already eligible: you have **{total_games}** games.\n"
                     f"(TopDeck record: {row_for_author.wins}W / {row_for_author.draws}D / {row_for_author.losses}L.)\n\n"
                     f"TopDeck data: last updated <t:{ts_int}:R>."
                 )
-            elif total_games >= min_total:
-                if not recency_active:
-                    missing_msg = (
-                        f"You're already eligible: you have **{total_games}** games. "
-                        f"After day {recency_after_day}, you'll also need at least 1 game played that day or later "
-                        f"(or reach {no_recency_threshold}+ games to skip the recency requirement).\n"
-                        f"(TopDeck record: {row_for_author.wins}W / {row_for_author.draws}D / {row_for_author.losses}L.)\n\n"
-                        f"TopDeck data: last updated <t:{ts_int}:R>."
-                    )
-                elif recency_check.get(author_uid, False):
-                    missing_msg = (
-                        f"You're already eligible: you have **{total_games}** games "
-                        f"and a game after day {recency_after_day}.\n"
-                        f"(TopDeck record: {row_for_author.wins}W / {row_for_author.draws}D / {row_for_author.losses}L.)\n\n"
-                        f"TopDeck data: last updated <t:{ts_int}:R>."
-                    )
-                else:
-                    missing_msg = (
-                        f"You have **{total_games}** games but **no game after day {recency_after_day}**.\n"
-                        f"Play at least 1 game after day {recency_after_day} to be eligible, "
-                        f"or reach {no_recency_threshold}+ games to skip the recency requirement.\n"
-                        f"(TopDeck record: {row_for_author.wins}W / {row_for_author.draws}D / {row_for_author.losses}L.)\n\n"
-                        f"TopDeck data: last updated <t:{ts_int}:R>."
-                    )
             else:
                 missing = min_total - total_games
                 missing_msg = (
@@ -393,35 +308,6 @@ class TopdeckLeagueCog(commands.Cog):
                 "I couldn't find you in this bracket's data. "
                 "Please check that your Discord on TopDeck is up to date.\n\n"
                 f"TopDeck data: last updated <t:{ts_int}:R>."
-            )
-
-        # ---- Warning: players bumped from top16 by recency ----
-        bumped_from_top16: List[PlayerRow] = []
-        if failed_recency:
-            all_in_band = sorted(
-                qualified_candidates + failed_recency,
-                key=lambda r: (-r.pts, -r.games),
-            )
-            for r in all_in_band[:16]:
-                if r in failed_recency:
-                    bumped_from_top16.append(r)
-
-        caller_is_mod = is_mod(member if isinstance(member, discord.Member) else None)
-
-        if bumped_from_top16 and caller_is_mod:
-            bump_lines = []
-            for r in bumped_from_top16:
-                bump_lines.append(f"\u2022 {r.name} \u2014 {int(round(r.pts))} pts, {r.games} games")
-            missing_msg += (
-                f"\n\n\u26a0\ufe0f **Players excluded from Top 16 due to recency** "
-                f"(no game after day {recency_after_day}):\n"
-                + "\n".join(bump_lines)
-            )
-        elif bumped_from_top16 and row_for_author and row_for_author in bumped_from_top16:
-            missing_msg += (
-                f"\n\n\u26a0\ufe0f **You would be in the Top 16 by points, but you have no game "
-                f"after day {recency_after_day}.** Play at least 1 game after day "
-                f"{recency_after_day} to qualify, or reach {no_recency_threshold}+ games."
             )
 
         # ---- Step 4: public Top 16 ----

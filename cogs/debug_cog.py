@@ -244,14 +244,9 @@ class DebugCog(commands.Cog):
         # Show config requirements (same as subscriptions logic)
         try:
             req_total = int(getattr(cfg, "top16_min_total_games", 0) or 0)
-            req_after_day = int(getattr(cfg, "top16_recency_after_day", 0) or 0)
-            req_no_recency = int(getattr(cfg, "top16_min_online_games_no_recency", 0) or 0)
             emb.add_field(
                 name="Requirements used",
-                value=(
-                    f"min_total_games={req_total} • recent game after day {req_after_day} "
-                    f"(unless ≥ {req_no_recency} games) • eligibility checked at close time"
-                ),
+                value=f"min_total_games={req_total} • eligibility checked at close time",
                 inline=False,
             )
         except Exception:

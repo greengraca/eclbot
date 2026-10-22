@@ -2,10 +2,9 @@
 import os
 import re
 import asyncio
-import calendar
 from dataclasses import dataclass
 from utils.logger import log_sync, log_warn
-from utils.topdeck_normalize import norm_handle as _norm_handle_basic, normalize_topdeck_discord, normalize_ts
+from utils.topdeck_normalize import norm_handle as _norm_handle_basic, normalize_topdeck_discord
 from datetime import datetime, timezone, timedelta
 from typing import (
     Any,
@@ -742,78 +741,6 @@ def get_cached_matches(
         return None  # Cache expired
 
     return matches, entrant_to_uid, player_map
-
-
-# --------- Top 16 recency (sourced from TopDeck, not the online_games mirror) ---------
-
-
-def recent_uids_from_matches(
-    matches: List[Match],
-    entrant_to_uid: Dict[int, Optional[str]],
-    year: int,
-    month: int,
-    after_day: int = 20,
-) -> set:
-    """UIDs with at least one counted game on/after the recency cutoff day.
-
-    Read from TopDeck's own match list rather than the `online_games` mirror. That
-    mirror only holds pods the online-sync managed to record, so while the sync is
-    stalled it silently strips genuine post-cutoff games and drops players from the
-    Top 16 cut. Match validity matches the standings computation exactly.
-
-    `after_day` past the end of the month clamps to the last day.
-    """
-    max_day = calendar.monthrange(year, month)[1]
-    cutoff = datetime(
-        year, month, min(after_day, max_day), 0, 0, 0, tzinfo=timezone.utc
-    ).timestamp()
-
-    out: set = set()
-    for m in matches:
-        if not _is_valid_completed_match(m):
-            continue
-        ts = normalize_ts(m.start)
-        if ts is None or ts < cutoff:
-            continue
-        for eid in (m.es or []):
-            uid = (entrant_to_uid.get(eid) or "").strip()
-            if uid:
-                out.add(uid)
-    return out
-
-
-async def has_recent_game_from_topdeck(
-    bracket_id: str,
-    firebase_id_token: Optional[str],
-    year: int,
-    month: int,
-    uids: List[str],
-    after_day: int = 20,
-) -> Dict[str, bool]:
-    """Recency map for `uids`, sourced from TopDeck's match list.
-
-    Callers prime the match cache via `get_league_rows_cached` immediately
-    beforehand, so it is normally warm. Only if it has gone cold do we fall back
-    to the `online_games` mirror, which is the weaker source this replaces.
-    """
-    if not uids:
-        return {}
-
-    cached = get_cached_matches(bracket_id, firebase_id_token)
-    if cached is None:
-        log_warn(
-            "[topdeck] Recency: TopDeck match cache is cold; falling back to the "
-            "online_games mirror, which is only as complete as the last sync."
-        )
-        from online_games_store import has_recent_game_by_topdeck_uid
-
-        return await has_recent_game_by_topdeck_uid(
-            bracket_id, year, month, uids, after_day=after_day, online_only=False,
-        )
-
-    matches, entrant_to_uid, _player_map = cached
-    recent = recent_uids_from_matches(matches, entrant_to_uid, year, month, after_day)
-    return {uid: (uid in recent) for uid in uids}
 
 
 # --------- Derived helpers ---------

@@ -15,8 +15,7 @@ def normalize_ts(ts) -> Optional[float]:
 
     Every persisted `start_ts` must go through this. A raw millisecond value
     (~1.78e12) compares greater than any seconds-based cutoff (~1.78e9), which
-    silently makes time-window filters — notably the Top 16 "game after day N"
-    recency check — match rows they should exclude.
+    silently makes time-window filters match rows they should exclude.
     """
     if ts is None:
         return None
