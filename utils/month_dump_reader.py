@@ -29,7 +29,10 @@ from topdeck_fetch import (
     WAGER_RATE,
     _compute_standings,
     _is_valid_completed_match,
+    _table_activity_ts,
+    DecayClock,
     get_cached_matches,
+    get_live_scoring,
     _fetch_league_data_full,
     _get_shared_session,
     _fetch_json,
@@ -262,10 +265,14 @@ def _gather_all_entrant_ids(e2u: Dict[str, str], matches: List[Match]) -> set:
 
 
 def _compute_standings_cacheable(
-    matches: List[Match], all_entrant_ids: set
+    matches: List[Match], all_entrant_ids: set, scoring: Optional[Dict[str, Any]] = None
 ) -> Tuple[Dict[int, float], Dict[int, Dict[str, int]], Dict[int, float]]:
-    """Compute standings and return a cache-friendly tuple (no opponent sets)."""
-    points, stats, win_pct, _ = _compute_standings(matches, all_entrant_ids)
+    """Compute standings and return a cache-friendly tuple (no opponent sets).
+
+    `scoring` = a dump's `scoring` block (inactivity decay) or get_live_scoring();
+    None for dumps that predate it (no decay).
+    """
+    points, stats, win_pct, _ = _compute_standings(matches, all_entrant_ids, scoring)
     # Strip opponent sets to save memory in cache
     stats_clean = {}
     for eid, s in stats.items():
@@ -331,7 +338,7 @@ def compute_player_month_stats(dump: Dict[str, Any], target_uid: str) -> Optiona
 
     matches = _rebuild_matches_from_dump(dump)
     all_entrant_ids = _gather_all_entrant_ids(e2u, matches)
-    points, stats, win_pct = _compute_standings_cacheable(matches, all_entrant_ids)
+    points, stats, win_pct = _compute_standings_cacheable(matches, all_entrant_ids, dump.get("scoring"))
 
     return _extract_player_stats(
         points, stats, win_pct, all_entrant_ids,
@@ -477,7 +484,7 @@ async def get_player_history(
             def _compute():
                 matches = _rebuild_matches_from_dump(dump)
                 all_eids = _gather_all_entrant_ids(e2u, matches)
-                pts, sts, wpct = _compute_standings_cacheable(matches, all_eids)
+                pts, sts, wpct = _compute_standings_cacheable(matches, all_eids, dump.get("scoring"))
                 return pts, sts, wpct, all_eids
 
             pts, sts, wpct, all_eids = await asyncio.to_thread(_compute)
@@ -618,11 +625,16 @@ def compute_daily_progression(
     month_matches: List[Match],
     all_entrant_ids: set,
     target_entrant_id: int,
+    scoring: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Compute day-by-day cumulative points, win rate, and rank.
 
     Returns a list of dicts sorted by day, each with:
         {day, pts, rank, games, wins, losses, draws, win_pct}
+
+    `scoring` (get_live_scoring()) replays inactivity decay; each day's snapshot
+    is what TopDeck showed right after that day's last game, and the final one
+    runs the idle tail to now so it lands on the live standings.
 
     Uses incremental computation: a single pass through matches accumulating
     running totals, with snapshots at the end of each day. This is O(matches)
@@ -650,6 +662,9 @@ def compute_daily_progression(
 
     sorted_days = sorted(day_to_matches.keys())
     progression: List[Dict[str, Any]] = []
+    scoring = scoring or {}
+    clock = DecayClock(scoring.get("decay"))
+    day_last_ts = 0.0
 
     for day in sorted_days:
         # Process each match in this day incrementally
@@ -662,6 +677,13 @@ def compute_daily_progression(
                 if eid not in points:
                     points[eid] = float(START_POINTS)
                     stats[eid] = {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+
+            # Inactivity decay lands before the table scores
+            at = _table_activity_ts(m.raw)
+            for eid in m.es:
+                clock.touch(points, eid, at)
+            end_raw = m.raw.get("End") if isinstance(m.raw, dict) else None
+            day_last_ts = float(end_raw) if isinstance(end_raw, (int, float)) and end_raw else at
 
             # Float staking (same logic as _compute_standings)
             stakes = [{"eid": eid, "stake": points[eid] * WAGER_RATE} for eid in m.es]
@@ -699,10 +721,14 @@ def compute_daily_progression(
         games = target_stats["games"]
         win_pct = (target_stats["wins"] / games) if games > 0 else 0.0
 
+        # Points as TopDeck showed them then (decayed); the last day runs to now
+        snap_at = (scoring.get("decay_until_ms") or day_last_ts) if day == sorted_days[-1] else day_last_ts
+        shown = {eid: clock.view(points, eid, snap_at) for eid in points}
+
         # Rank ALL entrants (including 0-game) to match TopDeck.gg
         ranked = sorted(
-            points.keys(),
-            key=lambda eid: (-points.get(eid, 0), -stats.get(eid, {}).get("games", 0)),
+            shown.keys(),
+            key=lambda eid: (-shown.get(eid, 0), -stats.get(eid, {}).get("games", 0)),
         )
         rank = None
         for i, eid in enumerate(ranked, start=1):
@@ -712,7 +738,7 @@ def compute_daily_progression(
 
         progression.append({
             "day": day,
-            "pts": float(points.get(target_entrant_id, START_POINTS)),
+            "pts": float(shown.get(target_entrant_id, START_POINTS)),
             "rank": rank,
             "games": games,
             "wins": target_stats["wins"],
@@ -861,7 +887,7 @@ async def get_league_monthly_aggregates(
             def _compute():
                 matches = _rebuild_matches_from_dump(dump)
                 all_eids = _gather_all_entrant_ids(e2u, matches)
-                pts, sts, wpct = _compute_standings_cacheable(matches, all_eids)
+                pts, sts, wpct = _compute_standings_cacheable(matches, all_eids, dump.get("scoring"))
                 return matches, pts, sts, all_eids
 
             matches, pts, sts, all_eids = await asyncio.to_thread(_compute)
@@ -902,8 +928,10 @@ async def get_league_monthly_aggregates(
                     {str(k): v for k, v in e2u.items()}, month_matches
                 )
 
+                live_scoring = get_live_scoring(live_bracket)
+
                 def _compute_current():
-                    return _compute_standings_cacheable(month_matches, all_eids)
+                    return _compute_standings_cacheable(month_matches, all_eids, live_scoring)
 
                 pts, sts, wpct = await asyncio.to_thread(_compute_current)
 

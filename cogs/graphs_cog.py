@@ -20,7 +20,7 @@ import discord
 from discord.ext import commands
 from discord import Option
 
-from topdeck_fetch import Match, PlayerRow, get_league_rows_cached
+from topdeck_fetch import Match, PlayerRow, get_league_rows_cached, get_live_scoring
 from utils.topdeck_identity import find_row_for_member
 from utils.interactions import safe_ctx_defer, safe_ctx_followup
 from utils.settings import GUILD_ID, SUBS, FIREBASE_ID_TOKEN
@@ -262,7 +262,8 @@ class GraphsCog(commands.Cog):
         month_matches, all_entrant_ids = await self._get_month_matches(entrant_id, bracket_id)
 
         progression = await asyncio.to_thread(
-            compute_daily_progression, month_matches, all_entrant_ids, entrant_id
+            compute_daily_progression, month_matches, all_entrant_ids, entrant_id,
+            get_live_scoring(bracket_id),
         )
 
         if not progression:
@@ -295,7 +296,8 @@ class GraphsCog(commands.Cog):
         month_matches, all_entrant_ids = await self._get_month_matches(entrant_id, bracket_id)
 
         progression = await asyncio.to_thread(
-            compute_daily_progression, month_matches, all_entrant_ids, entrant_id
+            compute_daily_progression, month_matches, all_entrant_ids, entrant_id,
+            get_live_scoring(bracket_id),
         )
 
         if not progression:

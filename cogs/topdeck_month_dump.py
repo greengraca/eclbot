@@ -31,6 +31,9 @@ from topdeck_fetch import (
     _extract_matches_all_seasons,
     _is_in_progress_match,
     _is_valid_completed_match,
+    decay_settings_from_fields,
+    decay_end_from_fields,
+    decay_until_ms,
 )
 
 # ---------- ENV / CONFIG ----------
@@ -268,7 +271,8 @@ async def dump_topdeck_month_to_mongo(
     run_id = uuid.uuid4().hex
 
     payload: Dict[str, Any] = {
-        "schema_version": 1,
+        # 2: adds `scoring` (inactivity decay) — readers treat dumps without it as decay-free
+        "schema_version": 2,
         "run_id": run_id,
         "bracket_id": bracket_id,
         "guild_id": int(guild_id),
@@ -285,6 +289,12 @@ async def dump_topdeck_month_to_mongo(
             "excluded_invalid_completed": excluded_invalid_completed,
         },
         "entrant_to_uid": {str(k): v for k, v in entrant_to_uid.items()},
+        # Inactivity decay settings + the moment TopDeck's idle tail ran to as this
+        # dump was taken (ms, capped at league end), so replays match TopDeck then.
+        "scoring": {
+            "decay": decay_settings_from_fields(fields),
+            "decay_until_ms": decay_until_ms(decay_end_from_fields(fields), now_ts * 1000.0),
+        },
         "players": players,
         "matches": [
             {

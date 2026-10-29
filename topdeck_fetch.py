@@ -1,6 +1,7 @@
 # topdeck_fetch.py
 import os
 import re
+import time
 import asyncio
 from dataclasses import dataclass
 from utils.logger import log_sync, log_warn
@@ -258,12 +259,138 @@ def extract_discord_from_name(name: str) -> str:
 
 
 
+# --------- Inactivity decay ---------
+# TopDeck league setting, first turned on for 2026-10 ("10% of points above the
+# starting score every 7 days, never returned"). Port of TopDeck's DecayOn /
+# DecaySchedule / DecayTicks / DecayPoints and the two places EntityRender
+# applies them. Mirrored in eclDashboard lib/topdeck-decay.ts — keep both in step.
+#   - Before a table scores, each seat whose idle clock is behind the table's
+#     Start (End if no Start) decays for the gap, then the clock moves to Start.
+#     So the wager reads the decayed points.
+#   - After the last table, everyone decays from their last game to now, capped
+#     at the league's End / S1:End (decay stops when the league does).
+#   - Whole ticks only: nothing in the first period, then one tick per period
+#     ("Daily": one per day after the first period). Each tick takes perc% of
+#     what sits above START_POINTS; players at or below start never move.
+#
+# "scoring" dict = {"decay": settings or None, "decay_until_ms": idle-tail end}.
+# Same shape as the `scoring` block month dumps store.
+
+_DAY_MS = 86_400_000
+
+# TopDeck ConfigDefaults — a doc only carries C:{key} once the TO changes it.
+_DEFAULT_DECAY_PERC = 10.0
+_DEFAULT_DECAY_PERIOD_DAYS = 7.0
+
+
+def _num(v: Any, default: float) -> float:
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def decay_settings_from_fields(fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Decay settings from a parsed TopDeck doc; None when decay is off (TopDeck also requires PointWager)."""
+    if fields.get("C:PointMode") != "PointWager":
+        return None
+    mode = fields.get("C:DecayMode") or "None"
+    if mode not in ("Periodic", "Daily"):
+        return None
+    return {
+        "mode": mode,
+        "perc": _num(fields.get("C:DecayPerc"), _DEFAULT_DECAY_PERC),
+        "period_days": _num(fields.get("C:DecayPeriodDays"), _DEFAULT_DECAY_PERIOD_DAYS),
+    }
+
+
+def decay_end_from_fields(fields: Dict[str, Any]) -> Optional[float]:
+    """League end (ms) that stops the idle tail: TopDeck's `End || S1:End`. None while running."""
+    for key in ("End", "S1:End"):
+        v = _num(fields.get(key), 0.0)
+        if v > 0:
+            return v
+    return None
+
+
+def decay_until_ms(end_ms: Optional[float], now_ms: Optional[float] = None) -> float:
+    """The "now" TopDeck decays a league up to: the earlier of now and the league's end."""
+    now = now_ms if now_ms is not None else time.time() * 1000.0
+    return min(now, end_ms) if end_ms is not None else now
+
+
+def _table_activity_ts(raw: Any) -> float:
+    """When a table counts as activity: TopDeck's `Start || End || 0`, raw (ms in practice)."""
+    if isinstance(raw, dict):
+        for key in ("Start", "End"):
+            v = raw.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v:
+                return float(v)
+    return 0.0
+
+
+class DecayClock:
+    """Per-player idle clocks for one standings replay; decays the caller's points dict in place."""
+
+    def __init__(self, decay: Optional[Dict[str, Any]]):
+        self.on = bool(decay) and decay.get("mode") in ("Periodic", "Daily")
+        self.last_played: Dict[Any, float] = {}
+        if self.on:
+            period_ms = _num(decay.get("period_days"), _DEFAULT_DECAY_PERIOD_DAYS) * _DAY_MS
+            self.rate = _num(decay.get("perc"), _DEFAULT_DECAY_PERC) / 100.0
+            self.first_ms = period_ms
+            self.step_ms = _DAY_MS if decay.get("mode") == "Daily" else period_ms
+
+    def _decayed(self, pts: float, from_ms: float, to_ms: float) -> float:
+        if not self.on or not pts > START_POINTS:
+            return pts
+        idle = to_ms - from_ms
+        if not self.first_ms > 0 or idle < self.first_ms:
+            return pts
+        ticks = int((idle - self.first_ms) // self.step_ms) + 1
+        after = START_POINTS + (pts - START_POINTS) * (1.0 - self.rate) ** ticks
+        return min(pts, max(START_POINTS, after))
+
+    def touch(self, points: Dict[Any, float], key: Any, at: float) -> None:
+        """Call for each seat before a table scores. at = _table_activity_ts(table)."""
+        if not self.on:
+            return
+        last = self.last_played.get(key, 0.0)
+        if at > last:
+            points[key] = self._decayed(points[key], last, at)
+            self.last_played[key] = at
+
+    def view(self, points: Dict[Any, float], key: Any, at: float) -> float:
+        """What `key` would show at `at`, without changing state (chart snapshots)."""
+        return self._decayed(points[key], self.last_played.get(key, 0.0), at)
+
+    def settle(self, points: Dict[Any, float], at: Optional[float]) -> None:
+        """Idle tail: decay everyone from their last game to `at`. Once, after the last table."""
+        if not self.on or at is None:
+            return
+        for key in list(points):
+            points[key] = self.view(points, key, at)
+
+
+# bracket_id -> (decay settings, league end ms), refreshed on every doc fetch.
+_LEAGUE_DECAY: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[float]]] = {}
+
+
+def get_live_scoring(bracket_id: str) -> Dict[str, Any]:
+    """Scoring dict for replaying the live league now (graphs). Decay off until the league was fetched once."""
+    decay, end_ms = _LEAGUE_DECAY.get(bracket_id, (None, None))
+    return {"decay": decay, "decay_until_ms": decay_until_ms(end_ms)}
+
+
 def _compute_standings(
     matches: Iterable[Match],
     entrant_ids: Iterable[int],
+    scoring: Optional[Dict[str, Any]] = None,
 ):
     points: Dict[int, float] = {}
     stats: Dict[int, Dict[str, Any]] = {}
+    scoring = scoring or {}
+    clock = DecayClock(scoring.get("decay"))
 
     # init players
     for eid in entrant_ids:
@@ -293,6 +420,11 @@ def _compute_standings(
                     "opponents": set(),
                 },
             )
+
+        # inactivity decay lands before the table scores, so the wager reads decayed points
+        at = _table_activity_ts(m.raw)
+        for eid in m.es:
+            clock.touch(points, eid, at)
 
         # opponent tracking
         for eid in m.es:
@@ -331,6 +463,9 @@ def _compute_standings(
                     st["wins"] += 1
                 else:
                     st["losses"] += 1
+
+    # idle tail: last game -> now (or league end)
+    clock.settle(points, scoring.get("decay_until_ms"))
 
     # win% = wins / games
     win_pct: Dict[int, float] = {}
@@ -564,6 +699,10 @@ async def _fetch_league_data_full(
     drop_state = _extract_drop_state(fields)
     entrant_to_uid = _extract_entrant_to_uid(fields)
     matches = _extract_matches_all_seasons(fields)
+    decay = decay_settings_from_fields(fields)
+    decay_end = decay_end_from_fields(fields)
+    _LEAGUE_DECAY[bracket_id] = (decay, decay_end)
+    scoring = {"decay": decay, "decay_until_ms": decay_until_ms(decay_end)}
 
     # Build player_map: uid -> player data dict
     player_map: Dict[str, Dict] = {}
@@ -583,7 +722,7 @@ async def _fetch_league_data_full(
 
     # CPU-heavy: run off the event loop
     points, stats, win_pct, ow_pct = await asyncio.to_thread(
-        _compute_standings, matches, entrant_ids
+        _compute_standings, matches, entrant_ids, scoring
     )
 
     # Build per-entrant rows, then merge by UID (a player may have multiple
