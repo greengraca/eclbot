@@ -194,14 +194,10 @@ class LeagueGraphsCog(commands.Cog):
     async def _chart_standings(self, ml, bracket_id):
         rows = await self._fetch_rows(bracket_id)
 
-        # Sort by points descending, take top 16 with games > 0
+        # TopDeck's order, take top 16 with games > 0
         ranked = sorted(
             [r for r in rows if int(getattr(r, "games", 0) or 0) > 0],
-            key=lambda r: (
-                -float(getattr(r, "pts", 0.0) or 0.0),
-                -float(getattr(r, "ow_pct", 0.0) or 0.0),
-                -float(getattr(r, "win_pct", 0.0) or 0.0),
-            ),
+            key=lambda r: r.rank_key,
         )
         top = ranked[:16]
 

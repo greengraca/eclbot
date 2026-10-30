@@ -56,12 +56,8 @@ CHART_CHOICES = [
 
 
 def _rank_of_row(rows: List[PlayerRow], target: PlayerRow) -> Optional[int]:
-    # Rank ALL players (including dropped) by pts → ow_pct → win_pct to match TopDeck.gg
-    ranked = sorted(rows, key=lambda r: (
-        -float(getattr(r, "pts", 0.0) or 0.0),
-        -float(getattr(r, "ow_pct", 0.0) or 0.0),
-        -float(getattr(r, "win_pct", 0.0) or 0.0),
-    ))
+    # Rank ALL players (including dropped) in TopDeck's order — TopDeck ranks drops by record too
+    ranked = sorted(rows, key=lambda r: r.rank_key)
     tuid = (getattr(target, "uid", None) or "").strip()
     if tuid:
         for i, r in enumerate(ranked, start=1):

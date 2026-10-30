@@ -1179,7 +1179,7 @@ class SubscriptionsCog(commands.Cog):
             return ([], ["no TopDeck rows"])
 
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
-        active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
+        active_by_games = sorted(active_by_games, key=lambda r: r.rank_key)  # TopDeck's order (rounded pts, then tiebreakers)
 
         min_total = cfg.top16_min_total_games  # default 10
 
@@ -1292,7 +1292,7 @@ class SubscriptionsCog(commands.Cog):
             return ([], ["no TopDeck rows"], 0)
 
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
-        active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
+        active_by_games = sorted(active_by_games, key=lambda r: r.rank_key)  # TopDeck's order (rounded pts, then tiebreakers)
 
         min_total = cfg.top16_min_total_games
 

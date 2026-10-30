@@ -256,7 +256,7 @@ class TopdeckLeagueCog(commands.Cog):
         # ---- Step 1: active players with >= min total games ----
         cfg = load_subs_config()
         active_by_games = [r for r in rows if (not r.dropped) and (r.games >= cfg.top16_min_total_games)]
-        active_by_games = sorted(active_by_games, key=lambda r: (-r.pts, -r.games))
+        active_by_games = sorted(active_by_games, key=lambda r: r.rank_key)  # TopDeck's order (rounded pts, then tiebreakers)
 
         log_sync(f"[topdeck] Active players with >={cfg.top16_min_total_games} games: {len(active_by_games)}.")
 

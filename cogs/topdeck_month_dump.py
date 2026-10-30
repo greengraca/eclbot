@@ -34,6 +34,7 @@ from topdeck_fetch import (
     decay_settings_from_fields,
     decay_end_from_fields,
     decay_until_ms,
+    breakers_from_fields,
 )
 
 # ---------- ENV / CONFIG ----------
@@ -294,6 +295,8 @@ async def dump_topdeck_month_to_mongo(
         "scoring": {
             "decay": decay_settings_from_fields(fields),
             "decay_until_ms": decay_until_ms(decay_end_from_fields(fields), now_ts * 1000.0),
+            # Event tiebreaker order (C:Breakers) for ranking ties the way TopDeck does
+            "breakers": breakers_from_fields(fields),
         },
         "players": players,
         "matches": [

@@ -64,12 +64,8 @@ def _fmt_map(conf: str, key: str = "", detail: str = "") -> str:
 
 
 def _rank_of_row(rows: List[PlayerRow], target: PlayerRow) -> Optional[int]:
-    # Rank ALL players (including dropped) by pts → ow_pct → win_pct to match TopDeck.gg
-    ranked = sorted(rows, key=lambda r: (
-        -float(getattr(r, "pts", 0.0) or 0.0),
-        -float(getattr(r, "ow_pct", 0.0) or 0.0),
-        -float(getattr(r, "win_pct", 0.0) or 0.0),
-    ))
+    # Rank ALL players (including dropped) in TopDeck's order — TopDeck ranks drops by record too
+    ranked = sorted(rows, key=lambda r: r.rank_key)
 
     tuid = (getattr(target, "uid", None) or "").strip()
     if tuid:
@@ -90,7 +86,7 @@ def _top16_position(rows: List[PlayerRow], target: PlayerRow) -> Optional[int]:
     min_games = int(getattr(cfg, "top16_min_total_games", 0) or 0)
 
     active = [r for r in rows if (not getattr(r, "dropped", False)) and (int(getattr(r, "games", 0) or 0) >= min_games)]
-    active = sorted(active, key=lambda r: (-float(getattr(r, "pts", 0.0) or 0.0), -int(getattr(r, "games", 0) or 0)))
+    active = sorted(active, key=lambda r: r.rank_key)
 
     tuid = (getattr(target, "uid", None) or "").strip()
     if tuid:

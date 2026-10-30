@@ -1,6 +1,8 @@
 # topdeck_fetch.py
 import os
 import re
+import json
+import math
 import time
 import asyncio
 from dataclasses import dataclass
@@ -69,6 +71,10 @@ class PlayerRow:
     losses: int
     dropped: bool
     dropped_at: Optional[float]
+    opp_beaten: int = 0
+    unique_opps: int = 0
+    # TopDeck's ranking order (see rank_key) — sort by this, never by raw pts
+    rank_key: Tuple = ()
 
 
 @dataclass
@@ -372,6 +378,60 @@ class DecayClock:
             points[key] = self.view(points, key, at)
 
 
+# --------- Ranking ---------
+# TopDeck's SortByRanking: players are ordered by the event's tiebreakers
+# (C:Breakers, "tie settings" on the event setup page). Unset = TopDeck's league
+# default: MPTS (points rounded to a whole number — 1243.11 and 1242.59 TIE) ->
+# SR (win %) -> OSR (opponents' win %) -> OBEAT (unique opponents beaten) ->
+# UOPP (unique opponents) -> entrant number (first come, first served).
+# Percentages compare at 2 decimals, as TopDeck shows them. Mirrored in
+# eclDashboard lib/topdeck-ranking.ts.
+
+DEFAULT_LEAGUE_BREAKERS: Tuple[str, ...] = ("MPTS", "SR", "OSR", "OBEAT", "UOPP")
+
+
+def _js_round(x: float) -> float:
+    """JS Math.round (halves round up); Python's round() sends .5 to even."""
+    return math.floor(x + 0.5)
+
+
+def breakers_from_fields(fields: Dict[str, Any]) -> List[str]:
+    """The event's tiebreaker order, keeping the ones we can compute."""
+    raw = fields.get("C:Breakers")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if not isinstance(raw, list) or not raw:
+        return list(DEFAULT_LEAGUE_BREAKERS)
+    unknown = [b for b in raw if b not in DEFAULT_LEAGUE_BREAKERS]
+    if unknown:
+        log_warn(f"[topdeck] tiebreakers {unknown} not supported - ranking skips them (TopDeck may order ties differently)")
+    return [b for b in raw if b in DEFAULT_LEAGUE_BREAKERS]
+
+
+def rank_key(
+    *,
+    pts: float,
+    win_pct: float,
+    ow_pct: float,
+    opp_beaten: int,
+    unique_opps: int,
+    entrant_id: int,
+    breakers: Iterable[str] = DEFAULT_LEAGUE_BREAKERS,
+) -> Tuple:
+    """Sort key reproducing TopDeck's order (ascending = best first). win_pct/ow_pct are 0-1."""
+    metrics = {
+        "MPTS": _js_round(pts),
+        "SR": _js_round(win_pct * 10000) / 100,
+        "OSR": _js_round(ow_pct * 10000) / 100,
+        "OBEAT": opp_beaten,
+        "UOPP": unique_opps,
+    }
+    return tuple(-metrics[b] for b in breakers) + (entrant_id,)
+
+
 # bracket_id -> (decay settings, league end ms), refreshed on every doc fetch.
 _LEAGUE_DECAY: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[float]]] = {}
 
@@ -401,6 +461,7 @@ def _compute_standings(
             "draws": 0,
             "losses": 0,
             "opponents": set(),  # type: ignore[assignment]
+            "beaten": set(),  # type: ignore[assignment]
         }
 
     for m in matches:
@@ -418,6 +479,7 @@ def _compute_standings(
                     "draws": 0,
                     "losses": 0,
                     "opponents": set(),
+                    "beaten": set(),
                 },
             )
 
@@ -463,6 +525,7 @@ def _compute_standings(
                     st["wins"] += 1
                 else:
                     st["losses"] += 1
+                    stats[winner_eid]["beaten"].add(eid)
 
     # idle tail: last game -> now (or league end)
     clock.settle(points, scoring.get("decay_until_ms"))
@@ -703,6 +766,7 @@ async def _fetch_league_data_full(
     decay_end = decay_end_from_fields(fields)
     _LEAGUE_DECAY[bracket_id] = (decay, decay_end)
     scoring = {"decay": decay, "decay_until_ms": decay_until_ms(decay_end)}
+    breakers = breakers_from_fields(fields)
 
     # Build player_map: uid -> player data dict
     player_map: Dict[str, Dict] = {}
@@ -753,6 +817,8 @@ async def _fetch_league_data_full(
             losses=int(s.get("losses", 0)),
             dropped=dropped,
             dropped_at=float(dropped_at) if dropped_at is not None else None,
+            opp_beaten=len(s.get("beaten", ())),
+            unique_opps=len(s.get("opponents", ())),
         )
 
         if not uid:
@@ -775,6 +841,8 @@ async def _fetch_league_data_full(
             old_g = total_g - row.games
             if total_g > 0:
                 existing.ow_pct = (existing.ow_pct * old_g + row.ow_pct * row.games) / total_g
+            existing.opp_beaten += row.opp_beaten
+            existing.unique_opps += row.unique_opps
             # Player is only dropped if ALL entrant IDs are dropped
             if not row.dropped:
                 existing.dropped = False
@@ -782,14 +850,19 @@ async def _fetch_league_data_full(
 
     rows: List[PlayerRow] = list(uid_merged.values()) + no_uid_rows
 
-    rows.sort(
-        key=lambda r: (
-            r.dropped,
-            -r.pts,
-            -r.ow_pct,
-            -r.win_pct,
+    for r in rows:
+        r.rank_key = rank_key(
+            pts=r.pts,
+            win_pct=r.win_pct,
+            ow_pct=r.ow_pct,
+            opp_beaten=r.opp_beaten,
+            unique_opps=r.unique_opps,
+            entrant_id=r.entrant_id,
+            breakers=breakers,
         )
-    )
+
+    # TopDeck's order, with dropped players grouped last
+    rows.sort(key=lambda r: (r.dropped, r.rank_key))
 
     return rows, matches, entrant_to_uid, player_map
 
